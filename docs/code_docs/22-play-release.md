@@ -185,8 +185,11 @@ Source of truth: [19-firebase-telemetry.md](19-firebase-telemetry.md).
 | Data shared with third parties? | **No** (Firebase is a processor, not a recipient) |
 
 **What is explicitly never sent** (enforced in code): PIN secrets, the specific site or
-URL blocked, the specific video watched, the installed-app list, message content.
-`web_blocked` deliberately drops the host.
+URL blocked, the specific video watched, the installed-app list, message content, and
+the **protected-apps list** (the user's banking/UPI/password apps — it never leaves the
+device, and no analytics or log line ever names a protected package; see
+[24-protected-apps.md](24-protected-apps.md) §6). `web_blocked` deliberately drops the
+host.
 
 **Known gap — telemetry has no opt-out.** Collection is forced on in
 `lib/core/services/firebase/firebase_services.dart`. `docs/info_docs/03` describes a

@@ -132,7 +132,7 @@ Android device. The agent-facing runbook is `.claude/skills/detoxo-auto-test/SKI
 Artifacts land in `build/qa/` (gitignored via `/build/`).
 
 ### Layer 1 — Dart (runs today: `flutter test`)
-**25 test files / 188 tests** under `test/` — pure Dart + widget tests, no device needed. Grouped
+**26 test files / 240 tests** under `test/` — pure Dart + widget tests, no device needed. Grouped
 by where business rules live:
 
 | Area | Tests |
@@ -141,6 +141,7 @@ by where business rules live:
 | Plans & sessions | `plans_pause_curious_test.dart` (pause math + `curious`/Conscious) |
 | Access protection | `access_protection_test.dart`, `usage_ladder_test.dart` (retry-lockout ladder) |
 | Blocking & limits | `web_blocker_test.dart`, `blocklist_install_filter_test.dart`, `streak_test.dart` |
+| Protected apps | `protected_apps_test.dart` (catalog, repo salvage/migration, cubit, fail-closed PIN gate, wire contract) |
 | Permissions | `permissions_restricted_settings_test.dart` (ECM / non-Play install path) |
 | Content counter | `counter_style_test.dart` |
 | Help & upgrade | `help_test.dart`, `app_upgrader_test.dart`, `legal_web_view_test.dart` |

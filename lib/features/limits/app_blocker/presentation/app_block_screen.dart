@@ -242,5 +242,7 @@ class _AppBlockViewState extends State<_AppBlockView> {
         ),
       ],
     );
+    pkgController.dispose();
+    nameController.dispose();
   }
 }

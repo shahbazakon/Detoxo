@@ -96,12 +96,17 @@ Broadly the methods fall into four groups. (Argument/return shapes are in [18-pl
 
 - `pushSettings` unpacks `activePlan`, `defaultBlockMode`, `enabledPlatforms`, `vibration`, `masterEnabled`, `pauseUntil`, `reelAllowance`, `consciousEarnDivisor`, `consciousMaxBankMs`, `blockAdultWebsites`, `blockWebsitesForBlockedApps`. The `activePlan` is stored **verbatim** — the old auto-reset of the Conscious bank on a `*→CURIOUS` transition was **removed**, so an auto-revert *into* Conscious (after an override that ran from a Conscious base) keeps the earned bank; the fresh-start reset now lives in the separate `resetConsciousBank` command below. `reelAllowance` is stored as the target (survives restart) but the One Reel / Unblock **consumed-count is not reset here** — only the imperative `armReelSession` re-arms, so an unrelated push can't refill a spent session.
 
-- `pushProtectedApps` stores the enabled privacy-protected package names as a
-  `StringSet` (`protected_packages`); the service caches it in a `@Volatile` set
-  on `reload()` and does **nothing at all** while one of those apps is the event
-  source or the focused window — no counting, no URL reads, no tree walks, no
-  blocking, and `performBackInternal`/`killApp`/`lockScreen` are individually
-  guarded as fail-closed backstops. See [24-protected-apps.md](24-protected-apps.md).
+- `pushProtectedApps` stores the privacy-protected package names as a
+  `StringSet` (`protected_packages`) — **set-if-changed**: an absent/malformed
+  arg is a no-op (never a wipe), an unchanged set skips the prefs write, and a
+  changed set triggers only the cheap `refreshProtectedPackages()` (no full
+  config re-parse). The service caches the set in a `@Volatile` field and does
+  **nothing at all** while one of those apps is the event source, the tracked
+  foreground, or the active window's own package (`activeWindowProtected`, the
+  anchor that survives a stale/clobbered `foregroundPkg`) — no counting, no URL
+  reads, no tree walks, no blocking; `performBackInternal`/`killApp`/`lockScreen`
+  are individually guarded as fail-closed backstops. See
+  [24-protected-apps.md](24-protected-apps.md).
 
 **Permission queries & launches** — pure platform checks and Settings intents:
 `isAccessibilityEnabled`, `openAccessibilitySettings`, `canDrawOverlays`, `requestOverlayPermission`, `hasUsageAccess`, `openUsageAccessSettings`, `isIgnoringBatteryOptimizations`, `requestIgnoreBatteryOptimizations`, `isDeviceAdminActive`, `requestDeviceAdmin`, `removeDeviceAdmin`.

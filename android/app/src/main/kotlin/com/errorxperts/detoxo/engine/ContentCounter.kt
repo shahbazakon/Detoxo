@@ -139,6 +139,15 @@ class ContentCounter(private val context: Context) {
         usageLastTickMs = now
     }
 
+    /**
+     * Privacy: a protected app took the foreground — drop the usage window so
+     * the time spent inside it can never be bridged by [USAGE_ACTIVE_GAP_MS]
+     * and attributed to the previously-foreground monitored app.
+     */
+    fun onProtectedForeground() {
+        usageActivePkg = null
+    }
+
     fun setEnabled(on: Boolean) {
         store.enabled = on
         if (!on) {

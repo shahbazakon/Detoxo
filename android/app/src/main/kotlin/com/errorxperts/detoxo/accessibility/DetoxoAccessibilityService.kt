@@ -57,6 +57,25 @@ class DetoxoAccessibilityService : AccessibilityService() {
     /** THE privacy decision: Detoxo does nothing at all for a protected app. */
     private fun isProtected(pkg: String?): Boolean = pkg != null && pkg in protectedPkgs
 
+    /**
+     * Second privacy anchor: the active window's own package. Immune to a
+     * stale or clobbered [foregroundPkg] (null after a service reconnect, or
+     * overwritten by a transient IME/system window while a protected app is
+     * on screen) — a tree whose root is protected is never walked, and no
+     * BACK/lock ever fires into it.
+     */
+    private fun activeWindowProtected(root: AccessibilityNodeInfo?): Boolean =
+        isProtected(root?.packageName?.toString())
+
+    /**
+     * Cheap refresh for protected-apps pushes: re-reads only the set — no
+     * detection-config re-parse, no Conscious/bubble re-sync (that is
+     * [reload]'s job, and pushes of an unchanged set skip even this).
+     */
+    fun refreshProtectedPackages() {
+        protectedPkgs = store.protectedPackages
+    }
+
     private val lastEventByPackage = ConcurrentHashMap<String, Long>()
     @Volatile private var lastBlockTime = 0L
     @Volatile private var lastBackTime = 0L
@@ -166,6 +185,9 @@ class DetoxoAccessibilityService : AccessibilityService() {
                     !pkgProtected && config.platformsFor(pkg).any { isReelPlatform(it) },
                 )
             }
+            // Privacy: drop the usage window so time inside the protected app
+            // can never be attributed to the previously-foreground reel app.
+            if (pkgProtected) contentCounter.onProtectedForeground()
         }
 
         // ── Privacy guard: the single decision point. Checks the event source
@@ -224,6 +246,7 @@ class DetoxoAccessibilityService : AccessibilityService() {
 
         val enabled = store.enabledPlatforms
         val root = rootInActiveWindow ?: return
+        if (activeWindowProtected(root)) return
 
         for (platform in platforms) {
             if (platform.detectionType != "LEGACY" && platform.detectionType != "OVERLAY") continue
@@ -336,6 +359,7 @@ class DetoxoAccessibilityService : AccessibilityService() {
         lastCountEventByPackage[pkg] = now
 
         val root = rootInActiveWindow ?: return
+        if (activeWindowProtected(root)) return
         for (platform in platforms) {
             if (!isReelPlatform(platform)) continue
             for (detector in platform.detectors) {
@@ -374,6 +398,7 @@ class DetoxoAccessibilityService : AccessibilityService() {
      */
     private fun handleBrowser(pkg: String) {
         val root = rootInActiveWindow ?: return
+        if (activeWindowProtected(root)) return
         val host = BrowserUrlExtractor.extractHost(root, pkg, MAX_NODES) ?: return
         if (!webEngine.matchHost(host)) {
             lastUrlByPkg[pkg] = host
@@ -438,8 +463,11 @@ class DetoxoAccessibilityService : AccessibilityService() {
 
     private fun performBackInternal() {
         // Fail-closed: never BACK into a protected app (covers Dart-invoked
-        // backs and any timer that fires after a switch into one).
+        // backs and any timer that fires after a switch into one). The active
+        // window is the second anchor: foregroundPkg alone can be stale or
+        // clobbered by an IME window during e.g. UPI PIN entry.
         if (isProtected(foregroundPkg)) return
+        if (activeWindowProtected(rootInActiveWindow)) return
         performGlobalAction(GLOBAL_ACTION_BACK)
     }
 
@@ -456,7 +484,9 @@ class DetoxoAccessibilityService : AccessibilityService() {
     }
 
     fun lockScreen() {
-        if (isProtected(foregroundPkg)) return // never lock mid-payment
+        // Never lock mid-payment; window anchor covers a clobbered foregroundPkg.
+        if (isProtected(foregroundPkg)) return
+        if (activeWindowProtected(rootInActiveWindow)) return
         try {
             val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
             val admin = ComponentName(this, DetoxoDeviceAdminReceiver::class.java)

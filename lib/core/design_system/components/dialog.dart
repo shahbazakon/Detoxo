@@ -102,25 +102,39 @@ class AppDialog extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (icon != null) ...[
-          IconBadge(icon: icon, color: accent),
-          const SizedBox(height: AppSpacing.md),
-        ],
-        Text(
-          title,
-          style: text.titleLarge?.copyWith(fontWeight: FontWeight.w700),
-        ),
-        if (message != null) ...[
-          const SizedBox(height: AppSpacing.sm),
-          Text(
-            message!,
-            style: text.bodyMedium?.copyWith(color: context.glass.onGlassMuted),
+        // Header + content scroll on overflow (large text scale + IME on a
+        // short screen); the action row below stays pinned and reachable.
+        Flexible(
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                if (icon != null) ...[
+                  IconBadge(icon: icon, color: accent),
+                  const SizedBox(height: AppSpacing.md),
+                ],
+                Text(
+                  title,
+                  style: text.titleLarge?.copyWith(fontWeight: FontWeight.w700),
+                ),
+                if (message != null) ...[
+                  const SizedBox(height: AppSpacing.sm),
+                  Text(
+                    message!,
+                    style: text.bodyMedium?.copyWith(
+                      color: context.glass.onGlassMuted,
+                    ),
+                  ),
+                ],
+                if (content != null) ...[
+                  const SizedBox(height: AppSpacing.md),
+                  content!,
+                ],
+              ],
+            ),
           ),
-        ],
-        if (content != null) ...[
-          const SizedBox(height: AppSpacing.md),
-          content!,
-        ],
+        ),
         if (actionList != null && actionList.isNotEmpty) ...[
           const SizedBox(height: AppSpacing.lg),
           Row(

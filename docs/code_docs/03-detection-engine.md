@@ -366,7 +366,10 @@ Key nuances:
   `lastReelAtMs` — without this, the 2.5 s stale-watching window could survive a
   reel-app → banking-app switch and the timer would press BACK inside the bank
   when the bank hits 0. `performBackInternal` / `killApp` / `lockScreen` carry
-  the same guard as a fail-closed backstop (see
+  the same guard as a fail-closed backstop, plus the `activeWindowProtected`
+  window anchor (the active window's own package), which also gates every
+  `rootInActiveWindow` tree walk — immune to a `foregroundPkg` left stale by a
+  service reconnect or clobbered by a transient IME/system window (see
   [24-protected-apps.md](24-protected-apps.md)).
 
 **`consciousState` event / `consciousSnapshot`** carries

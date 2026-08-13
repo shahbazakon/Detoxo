@@ -31,7 +31,7 @@ abstract final class ReportIssueDialog {
           onPressed: () => Navigator.of(context).pop(),
         ),
         PrimaryButton(
-          label: 'Report a bug now',
+          label: 'Report a bug',
           icon: Icons.bug_report_outlined,
           onPressed: () {
             Navigator.of(context).pop();

@@ -107,11 +107,18 @@ class CommandHandler(
                 result.success(true)
             }
             "pushProtectedApps" -> {
-                // Enabled package names only — names/categories never cross the
-                // channel, and protected packages are never logged.
-                store.protectedPackages =
-                    call.argument<List<String>>("packages")?.toSet() ?: emptySet()
-                DetoxoAccessibilityService.instance?.reload()
+                // Package names only — names/categories never cross the channel,
+                // and protected packages are never logged. Fail-safe: an absent
+                // or malformed arg is a no-op, never a wipe (clearing protection
+                // requires an explicit empty list). An unchanged set skips the
+                // prefs rewrite and the service refresh entirely.
+                call.argument<List<*>>("packages")?.let { list ->
+                    val next = list.filterIsInstance<String>().toSet()
+                    if (next != store.protectedPackages) {
+                        store.protectedPackages = next
+                        DetoxoAccessibilityService.instance?.refreshProtectedPackages()
+                    }
+                }
                 result.success(true)
             }
             "consciousState" -> result.success(

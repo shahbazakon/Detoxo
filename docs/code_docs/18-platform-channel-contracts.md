@@ -65,7 +65,7 @@ Method-name constants live in `ChannelMethods` (Dart) and are matched by string 
 | `pushConfig` | `{json: String}` | `store.platformsConfigJson = json`; `service.reload()` | `true` | `pushConfig(String json)` |
 | `pushSettings` | settings map (see below) | applies each present key to `ConfigStore`; `service.reload()` | `true` | `pushSettings(Map settings)` |
 | `pushWebBlocklist` | `{json: String}` | `store.webBlocklistJson = json`; `service.reload()` | `true` | `pushWebBlocklist(String json)` |
-| `pushProtectedApps` | `{packages: List<String>}` | `store.protectedPackages = packages.toSet()`; `service.reload()` | `true` | `pushProtectedApps(List<String> packages)` |
+| `pushProtectedApps` | `{packages: List<String>}` | set-if-changed: absent/malformed arg is a **no-op** (never a wipe), unchanged set skips everything, changed set → `store.protectedPackages` + `service.refreshProtectedPackages()` (no full `reload()`) | `true` | `pushProtectedApps(List<String> packages)` |
 
 **`pushConfig` payload** — `json` is the full `platforms_config.json` string
 (featuredApps → platforms → detectors), parsed natively by `DetectionConfig`.
