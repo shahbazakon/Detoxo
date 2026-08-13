@@ -65,6 +65,7 @@ Method-name constants live in `ChannelMethods` (Dart) and are matched by string 
 | `pushConfig` | `{json: String}` | `store.platformsConfigJson = json`; `service.reload()` | `true` | `pushConfig(String json)` |
 | `pushSettings` | settings map (see below) | applies each present key to `ConfigStore`; `service.reload()` | `true` | `pushSettings(Map settings)` |
 | `pushWebBlocklist` | `{json: String}` | `store.webBlocklistJson = json`; `service.reload()` | `true` | `pushWebBlocklist(String json)` |
+| `pushProtectedApps` | `{packages: List<String>}` | `store.protectedPackages = packages.toSet()`; `service.reload()` | `true` | `pushProtectedApps(List<String> packages)` |
 
 **`pushConfig` payload** — `json` is the full `platforms_config.json` string
 (featuredApps → platforms → detectors), parsed natively by `DetectionConfig`.
@@ -91,6 +92,14 @@ Method-name constants live in `ChannelMethods` (Dart) and are matched by string 
 `{pattern, matchType}` rules. `matchType` is `WebMatchType.wire`:
 `DOMAIN` \| `EXACT` \| `WILDCARD` (native `WebBlockEngine` matches browser hosts
 against these).
+
+**`pushProtectedApps` payload** — `packages` is a flat list of privacy-protected
+package names: the **entire bundled catalog** (always protected, installed or
+not) **plus the user's enabled manual additions** — the `protectedPackagesFor`
+derivation (see [24-protected-apps.md](24-protected-apps.md)). Deliberately
+minimal: app names and categories never cross the channel — native only needs
+"is this package protected". Pushed by `ProtectedAppsCubit` on every list change
+and by `syncProtectedAppsAtBoot` at splash.
 
 ### Permission queries & launches
 
@@ -136,6 +145,17 @@ Direct engine actions, routed to the live `DetoxoAccessibilityService.instance`
 | `performBack` | — | `service.performBackPublic()` | `true` | `performBack()` |
 | `killApp` | `{package: String}` | `service.killApp(pkg)` (no-op if pkg null) | `true` | `killApp(String pkg)` |
 | `lockScreen` | — | `service.lockScreen()` (device-admin `lockNow`) | `true` | `lockScreen()` |
+
+### PIN lock / Smart Auto Lock
+
+Activity-scoped commands for the PIN lock's privacy and screen-off features
+(see [08-pin-lock-recovery.md](08-pin-lock-recovery.md) §10). These do not touch
+the accessibility service.
+
+| Method | Args | Native effect | Returns | Dart wrapper |
+|---|---|---|---|---|
+| `setSecureScreen` | `{enabled: bool}` | add/clear `FLAG_SECURE` on the activity window (hide in Recents + block screenshots); no-op if no activity attached | `true` | `setSecureScreen({required bool enabled})` |
+| `lastScreenOff` | — | `MainActivity.lastScreenOffMillis` — wall-clock stamp of the last `ACTION_SCREEN_OFF` this process (0 = never) | `Long` | `lastScreenOff()` → `Future<int>` (0 off-Android) |
 
 ### One Reel / Unblock session control
 

@@ -6,6 +6,7 @@ import 'package:detoxo/core/navigation/app_router.dart';
 import 'package:detoxo/core/services/firebase/firebase.dart';
 import 'package:detoxo/core/theme/app_theme.dart';
 import 'package:detoxo/features/access_protection/domain/repositories/pin_repository.dart';
+import 'package:detoxo/features/access_protection/presentation/pin_auto_relock.dart';
 import 'package:detoxo/features/access_protection/presentation/pin_cubit.dart';
 import 'package:detoxo/features/additional_feature/app_feedback/app_feedback.dart';
 import 'package:detoxo/features/blocking/blocklist/presentation/targets_cubit.dart';
@@ -183,19 +184,22 @@ class _RouterState extends State<_Router> {
             onSubmit: onSubmit,
             scrollController: scrollController,
           ),
-      child: MaterialApp.router(
-        title: 'Detoxo',
-        theme: AppTheme.light(
-          brandPrimary: widget.lightBrand.primary,
-          brandAccent: widget.lightBrand.accent,
+      child: PinAutoRelock(
+        router: _router,
+        child: MaterialApp.router(
+          title: 'Detoxo',
+          theme: AppTheme.light(
+            brandPrimary: widget.lightBrand.primary,
+            brandAccent: widget.lightBrand.accent,
+          ),
+          darkTheme: AppTheme.dark(
+            brandPrimary: widget.darkBrand.primary,
+            brandAccent: widget.darkBrand.accent,
+          ),
+          themeMode: widget.themeMode,
+          routerConfig: _router,
+          debugShowCheckedModeBanner: false,
         ),
-        darkTheme: AppTheme.dark(
-          brandPrimary: widget.darkBrand.primary,
-          brandAccent: widget.darkBrand.accent,
-        ),
-        themeMode: widget.themeMode,
-        routerConfig: _router,
-        debugShowCheckedModeBanner: false,
       ),
     );
   }

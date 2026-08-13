@@ -16,6 +16,10 @@ class _FakePinRepo implements PinRepository {
   Future<PinConfig> load() async => _stored;
   @override
   Future<void> save(PinConfig config) async => _stored = config;
+  @override
+  Future<void> setSecureScreen({required bool enabled}) async {}
+  @override
+  Future<int> lastScreenOffMillis() async => 0;
 }
 
 PinConfig _configuredCustom() {

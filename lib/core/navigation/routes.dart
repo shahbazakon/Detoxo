@@ -12,6 +12,7 @@ abstract final class Routes {
   static const String settings = '/settings';
   static const String webBlock = '/web-block';
   static const String appBlock = '/app-block';
+  static const String protectedApps = '/protected-apps';
   static const String dailyLimit = '/daily-limit';
   static const String analytics = '/analytics';
   static const String appearance = '/appearance';

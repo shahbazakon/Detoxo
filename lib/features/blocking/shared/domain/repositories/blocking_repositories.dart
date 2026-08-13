@@ -49,6 +49,10 @@ abstract interface class EngineRepository {
   /// native engine's URL matcher.
   Future<void> pushWebBlocklist(String json);
 
+  /// Pushes the enabled privacy-protected package names — apps the native
+  /// engine must completely ignore while they are foreground.
+  Future<void> pushProtectedApps(List<String> packages);
+
   Future<ServiceSnapshot> currentStatus();
 
   /// One-shot pull of the current Conscious bank (for initial UI render).

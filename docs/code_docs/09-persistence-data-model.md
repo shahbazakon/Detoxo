@@ -90,6 +90,7 @@ Each key maps to exactly one repository that owns its JSON shape:
 | `webBlocklist` | `web_blocklist` | no | `WebBlockRepositoryImpl` | JSON list of blocklist entries |
 | `webBlockStats` | `web_block_stats` | no | `WebBlockStatsRepositoryImpl` | `{date, today, total, hosts:{host:count}}` |
 | `appBlocklist` | `app_blocklist` | no | `AppBlockRepositoryImpl` | JSON list of `AppBlockEntry.toJson()` |
+| `protectedApps` | `protected_apps` | no | `ProtectedAppsRepositoryImpl` | JSON list of `ProtectedApp.toJson()` |
 | `dailyLimit` | `daily_limit` | no | `DailyLimitRepositoryImpl` | `DailyLimit.toJson()` — one JSON object |
 | `streak` | `daily_limit_streak` | no | `StreakRepositoryImpl` | `Streak.toJson()` — `{base, lastDay, todayFailed}` |
 | `analyticsEvents` | `analytics_events` | no | `AnalyticsRepositoryImpl` | JSON list of block events (capped) |
@@ -134,6 +135,14 @@ Each key maps to exactly one repository that owns its JSON shape:
   `today` rolls over on a new calendar day (`_rollDate`).
 - **`app_blocklist`** — JSON list of `AppBlockEntry` (full-app blocks, distinct
   from reel-platform detection).
+- **`protected_apps`** — JSON list of `ProtectedApp`
+  (`{packageName, appName, category, isEnabled, source}`) holding the user's
+  **manual additions only**. Catalog apps (banks, UPI, password managers…) are
+  protected implicitly and never stored; `load()` filters out legacy
+  `source: catalog` rows that early builds seeded, and treats absent/unreadable
+  data as `[]` (nothing is lost — the catalog is derived). The native push is
+  always `catalog ∪ enabled manual` (`pushProtectedApps` →
+  `protected_packages` below). See [24-protected-apps.md](24-protected-apps.md).
 - **`daily_limit`** — `DailyLimit.toJson()`; defaults to `const DailyLimit()`
   when absent. See [07-daily-limit-scheduler.md](07-daily-limit-scheduler.md).
 - **`daily_limit_streak`** — `Streak.toJson()` (`{base, lastDay, todayFailed}`);
@@ -181,7 +190,7 @@ the service runs in the **main process**, no multi-process mode is needed.
 ### 2.1 `ConfigStore` keys
 
 Written by Dart via `CommandHandler` (`pushConfig`, `pushSettings`,
-`pushWebBlocklist`); read by `DetoxoAccessibilityService`.
+`pushWebBlocklist`, `pushProtectedApps`); read by `DetoxoAccessibilityService`.
 
 | Key string | Type | Default | Meaning |
 |---|---|---|---|
@@ -189,6 +198,7 @@ Written by Dart via `CommandHandler` (`pushConfig`, `pushSettings`,
 | `active_plan` | String | `BLOCK_ALL` | Plan **wire token**: `BLOCK_ALL`, `CURIOUS` (= *Conscious* in the UI), `ONE_REEL`, `PAUSED` |
 | `default_block_mode` | String | `PRESS_BACK` | `PRESS_BACK` / `KILL_APP` / `LOCK_SCREEN` / `NONE` |
 | `enabled_platforms` | Set<String> | ∅ | Enabled `platformId`s (e.g. `ig_reel`, `yt_shorts`) |
+| `protected_packages` | Set<String> | ∅ | Privacy-protected package names the service ignores entirely (survives reboot with Flutter dead) |
 | `vibration_enabled` | Boolean | true | Vibrate on block |
 | `master_enabled` | Boolean | true | Global on/off for blocking |
 | `pause_until` | Long | 0 | Epoch millis until which blocking is paused (0 = not paused) |
@@ -367,6 +377,7 @@ counted reel (throttled) so the widget refreshes without any Dart round-trip.
 - `lib/features/limits/web_blocker/data/repositories/web_block_stats_repository_impl.dart`
 - `lib/features/limits/web_blocker/data/repositories/web_block_repository_impl.dart`
 - `lib/features/limits/app_blocker/data/repositories/app_block_repository_impl.dart`
+- `lib/features/protected_apps/data/repositories/protected_apps_repository_impl.dart`
 - `lib/features/limits/daily_limit/data/repositories/daily_limit_repository_impl.dart`
 - `lib/features/limits/streak/data/repositories/streak_repository_impl.dart`
 - `lib/features/analytics/data/repositories/analytics_repository_impl.dart`

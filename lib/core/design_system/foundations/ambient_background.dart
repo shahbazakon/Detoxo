@@ -16,11 +16,7 @@ import 'package:flutter_svg/flutter_svg.dart';
 /// SVG gradient background chosen for the current brightness. Place a single
 /// instance behind each screen via [GlassScaffold].
 class AmbientBackground extends StatelessWidget {
-  const AmbientBackground({
-    required this.child,
-    this.animated = true,
-    super.key,
-  });
+  const AmbientBackground({required this.child, this.animated = true, super.key});
 
   final Widget child;
 
@@ -48,10 +44,9 @@ class AmbientBackground extends StatelessWidget {
             decoration: BoxDecoration(gradient: gradient),
 
             child: ImageFiltered(
-              // Heavy abstract blur so the SVG reads as ambient light, not a
-              // picture. 70 keeps that look at a fraction of sigma-100's GPU cost.
+              // Heavy abstract blur so the SVG reads as ambient light, not a picture.
               imageFilter: ImageFilter.blur(sigmaX: 70, sigmaY: 70),
-              child: SvgPicture.asset(assetKey, fit: BoxFit.cover),
+              child: Opacity(opacity: 0.7, child: SvgPicture.asset(assetKey, fit: BoxFit.cover)),
             ),
           ),
         child,
@@ -67,11 +62,7 @@ class AmbientBackground extends StatelessWidget {
   }) {
     final isDark = brightness == Brightness.dark;
 
-    Widget blob({
-      required Alignment align,
-      required Color color,
-      required double size,
-    }) {
+    Widget blob({required Alignment align, required Color color, required double size}) {
       Widget b = Container(
         width: size,
         height: size,
@@ -191,13 +182,7 @@ class GlassScaffold extends StatelessWidget {
 
 /// A frosted top app bar that blurs the ambient gradient behind it.
 class GlassAppBar extends StatelessWidget implements PreferredSizeWidget {
-  const GlassAppBar({
-    this.title,
-    this.actions,
-    this.leading,
-    this.globalActions = true,
-    super.key,
-  });
+  const GlassAppBar({this.title, this.actions, this.leading, this.globalActions = true, super.key});
 
   final Widget? title;
   final List<Widget>? actions;
@@ -247,11 +232,7 @@ class GlassAppBar extends StatelessWidget implements PreferredSizeWidget {
 /// backdrop for the whole bar — never one per item. Pass `enableBlur: false`
 /// when the child is itself a native blurred surface (iOS CNTabBar).
 class GlassBottomBar extends StatelessWidget {
-  const GlassBottomBar({
-    required this.child,
-    this.enableBlur = true,
-    super.key,
-  });
+  const GlassBottomBar({required this.child, this.enableBlur = true, super.key});
 
   final Widget child;
   final bool enableBlur;

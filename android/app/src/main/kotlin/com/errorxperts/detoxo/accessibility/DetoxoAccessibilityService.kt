@@ -47,6 +47,16 @@ class DetoxoAccessibilityService : AccessibilityService() {
     private lateinit var store: ConfigStore
     @Volatile private var config: DetectionConfig = DetectionConfig.EMPTY
 
+    // ── Privacy-protected apps ────────────────────────────────────────────────
+    // While a protected app (banking/UPI/password manager…) is foreground the
+    // service must do nothing at all: no counting, no URL reads, no tree walks,
+    // no blocking, no BACK presses. Cached from ConfigStore so the hot path
+    // never touches SharedPreferences; refreshed by reload().
+    @Volatile private var protectedPkgs: Set<String> = emptySet()
+
+    /** THE privacy decision: Detoxo does nothing at all for a protected app. */
+    private fun isProtected(pkg: String?): Boolean = pkg != null && pkg in protectedPkgs
+
     private val lastEventByPackage = ConcurrentHashMap<String, Long>()
     @Volatile private var lastBlockTime = 0L
     @Volatile private var lastBackTime = 0L
@@ -110,6 +120,7 @@ class DetoxoAccessibilityService : AccessibilityService() {
     /** Reload config + settings (called after Dart pushes changes). */
     fun reload() {
         config = DetectionConfig.parse(store.platformsConfigJson)
+        protectedPkgs = store.protectedPackages
         webEngine.setBlocklist(store.webBlocklistJson)
         webEngine.setAdultEnabled(store.blockAdultWebsites)
         syncConscious()
@@ -135,22 +146,34 @@ class DetoxoAccessibilityService : AccessibilityService() {
         if (event == null) return
         val pkg = event.packageName?.toString() ?: return
 
+        val pkgProtected = isProtected(pkg)
+
         // Track the foreground app for the Conscious accountant (every package,
         // including ours). Leaving a reel-bearing app for one without reel
         // surfaces immediately ends "watching" so the bank can start earning.
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
             foregroundPkg = pkg
-            if (config.platformsFor(pkg).isEmpty()) {
+            // A protected app counts as "no reel surfaces" even if it is also in
+            // the monitored catalog — protection wins, and the stale "watching"
+            // window dies the instant a protected app foregrounds.
+            if (pkgProtected || config.platformsFor(pkg).isEmpty()) {
                 lastReelAtMs = 0L
                 reelViewStartMs = 0L // left the reel app → next reel is a fresh view
             }
             if (contentCounter.isEnabled) {
                 contentCounter.onForegroundChanged(
                     pkg,
-                    config.platformsFor(pkg).any { isReelPlatform(it) },
+                    !pkgProtected && config.platformsFor(pkg).any { isReelPlatform(it) },
                 )
             }
         }
+
+        // ── Privacy guard: the single decision point. Checks the event source
+        // AND the focused window (split-screen: rootInActiveWindow is the
+        // FOCUSED pane, so an event from the other pane must never walk a
+        // protected pane's tree). Everything below — counting, browser URL
+        // reads, tree walks, blocking — is unreachable for a protected app. ──
+        if (pkgProtected || isProtected(foregroundPkg)) return
 
         if (pkg == packageName) return
 
@@ -414,12 +437,16 @@ class DetoxoAccessibilityService : AccessibilityService() {
     }
 
     private fun performBackInternal() {
+        // Fail-closed: never BACK into a protected app (covers Dart-invoked
+        // backs and any timer that fires after a switch into one).
+        if (isProtected(foregroundPkg)) return
         performGlobalAction(GLOBAL_ACTION_BACK)
     }
 
     fun performBackPublic() = performBackInternal()
 
     fun killApp(pkg: String) {
+        if (isProtected(pkg)) return // never kill a protected app
         try {
             val am = getSystemService(Context.ACTIVITY_SERVICE) as ActivityManager
             am.killBackgroundProcesses(pkg)
@@ -429,6 +456,7 @@ class DetoxoAccessibilityService : AccessibilityService() {
     }
 
     fun lockScreen() {
+        if (isProtected(foregroundPkg)) return // never lock mid-payment
         try {
             val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
             val admin = ComponentName(this, DetoxoDeviceAdminReceiver::class.java)
@@ -504,6 +532,15 @@ class DetoxoAccessibilityService : AccessibilityService() {
         // app is allowed and the reel gate is off, so freeze the bank rather than
         // silently accrue free allowance while the user scrolls unblocked.
         if (now < store.pauseUntil) {
+            emitConsciousState()
+            return
+        }
+
+        // Protected app foreground: freeze the bank and drop any stale
+        // "watching" so this 1 Hz timer can never BACK-press into it (the
+        // WATCH_STALE_MS window would otherwise survive a reel→bank switch).
+        if (isProtected(foregroundPkg)) {
+            lastReelAtMs = 0L
             emitConsciousState()
             return
         }

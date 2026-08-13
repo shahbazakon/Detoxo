@@ -44,6 +44,7 @@ abstract final class StoreKeys {
   static const String webBlocklist = 'web_blocklist';
   static const String webBlockStats = 'web_block_stats';
   static const String appBlocklist = 'app_blocklist';
+  static const String protectedApps = 'protected_apps';
   static const String dailyLimit = 'daily_limit';
   static const String streak = 'daily_limit_streak';
   static const String premiumDevUnlock = 'premium_dev_unlock';

@@ -92,9 +92,16 @@ Note the service is **never** started manually. An enabled AccessibilityService 
 Broadly the methods fall into four groups. (Argument/return shapes are in [18-platform-channel-contracts.md](18-platform-channel-contracts.md).)
 
 **Config / settings push** — write to `ConfigStore`, then `DetoxoAccessibilityService.instance?.reload()`:
-`pushConfig`, `pushSettings`, `pushWebBlocklist`.
+`pushConfig`, `pushSettings`, `pushWebBlocklist`, `pushProtectedApps`.
 
 - `pushSettings` unpacks `activePlan`, `defaultBlockMode`, `enabledPlatforms`, `vibration`, `masterEnabled`, `pauseUntil`, `reelAllowance`, `consciousEarnDivisor`, `consciousMaxBankMs`, `blockAdultWebsites`, `blockWebsitesForBlockedApps`. The `activePlan` is stored **verbatim** — the old auto-reset of the Conscious bank on a `*→CURIOUS` transition was **removed**, so an auto-revert *into* Conscious (after an override that ran from a Conscious base) keeps the earned bank; the fresh-start reset now lives in the separate `resetConsciousBank` command below. `reelAllowance` is stored as the target (survives restart) but the One Reel / Unblock **consumed-count is not reset here** — only the imperative `armReelSession` re-arms, so an unrelated push can't refill a spent session.
+
+- `pushProtectedApps` stores the enabled privacy-protected package names as a
+  `StringSet` (`protected_packages`); the service caches it in a `@Volatile` set
+  on `reload()` and does **nothing at all** while one of those apps is the event
+  source or the focused window — no counting, no URL reads, no tree walks, no
+  blocking, and `performBackInternal`/`killApp`/`lockScreen` are individually
+  guarded as fail-closed backstops. See [24-protected-apps.md](24-protected-apps.md).
 
 **Permission queries & launches** — pure platform checks and Settings intents:
 `isAccessibilityEnabled`, `openAccessibilitySettings`, `canDrawOverlays`, `requestOverlayPermission`, `hasUsageAccess`, `openUsageAccessSettings`, `isIgnoringBatteryOptimizations`, `requestIgnoreBatteryOptimizations`, `isDeviceAdminActive`, `requestDeviceAdmin`, `removeDeviceAdmin`.

@@ -1,5 +1,6 @@
 import 'package:detoxo/core/design_system/design_system.dart';
 import 'package:detoxo/core/widgets/common_widgets.dart';
+import 'package:detoxo/features/access_protection/domain/entities/pin_config.dart';
 import 'package:detoxo/features/access_protection/presentation/pin_cubit.dart';
 import 'package:detoxo/features/blocking/shared/domain/entities/enums.dart';
 import 'package:flutter/material.dart';
@@ -28,6 +29,8 @@ class _PinSetupScreenState extends State<PinSetupScreen> {
   final Set<PinScope> _scopes = {..._supportedScopes};
   bool _biometric = false;
   bool _biometricAvailable = false;
+  AutoLockTimeout _autoLock = AutoLockTimeout.m1;
+  bool _secureScreen = false;
 
   @override
   void initState() {
@@ -39,6 +42,8 @@ class _PinSetupScreenState extends State<PinSetupScreen> {
         ..clear()
         ..addAll(config.scopes.where(_supportedScopes.contains));
       _biometric = config.biometricEnabled;
+      _autoLock = config.autoLock;
+      _secureScreen = config.secureScreen;
     }
     _loadBiometricAvailability();
   }
@@ -91,6 +96,8 @@ class _PinSetupScreenState extends State<PinSetupScreen> {
       secret: _pinController.text.trim(),
       scopes: _scopes,
       biometricEnabled: _biometric && _biometricAvailable,
+      autoLock: _autoLock,
+      secureScreen: _secureScreen,
     );
     if (!mounted) return;
     GlassToast.show(context, 'PIN saved.', tone: AppTone.success);
@@ -122,15 +129,9 @@ class _PinSetupScreenState extends State<PinSetupScreen> {
     }
   }
 
-  String _derivedPreview() {
-    final now = DateTime.now();
-    String two(int v) => v.toString().padLeft(2, '0');
-    return switch (_type) {
-      PinType.date => '${two(now.day)}${two(now.month)}${now.year}',
-      PinType.time => '${two(now.hour)}${two(now.minute)}',
-      _ => '',
-    };
-  }
+  /// Live preview of a clock-derived PIN — same source of truth as the
+  /// matcher, so what we show is always what unlocks.
+  String _derivedPreview() => PinCubit.derivedPin(_type, DateTime.now()) ?? '';
 
   /// Picks the PIN type in a glass bottom sheet (consistent with the Settings
   /// pickers), then applies the choice.
@@ -141,6 +142,15 @@ class _PinSetupScreenState extends State<PinSetupScreen> {
       child: _PinTypePicker(selected: _type),
     );
     if (picked != null && mounted) setState(() => _type = picked);
+  }
+
+  Future<void> _openAutoLockSheet() async {
+    final picked = await GlassBottomSheet.show<AutoLockTimeout>(
+      context: context,
+      title: 'Auto-lock',
+      child: _AutoLockPicker(selected: _autoLock),
+    );
+    if (picked != null && mounted) setState(() => _autoLock = picked);
   }
 
   @override
@@ -213,6 +223,23 @@ class _PinSetupScreenState extends State<PinSetupScreen> {
               'Changing protected settings',
               'Ask before disabling blocking, resetting data or changing the PIN',
             ),
+            if (_scopes.contains(PinScope.app)) ...[
+              const SectionHeader('Smart auto-lock'),
+              FeatureTile(
+                icon: Icons.lock_clock_outlined,
+                title: 'Re-lock after leaving Detoxo',
+                subtitle: _autoLockLabel(_autoLock),
+                onTap: _openAutoLockSheet,
+              ),
+              const SizedBox(height: AppSpacing.xs),
+              AppToggleTile(
+                leading: Icon(Icons.visibility_off_outlined, color: accent),
+                title: 'Hide screen in Recents',
+                subtitle: 'Blanks the app preview and blocks screenshots',
+                value: _secureScreen,
+                onChanged: (v) => setState(() => _secureScreen = v),
+              ),
+            ],
             const SizedBox(height: AppSpacing.md),
             Text(
               'There is no reset. Your PIN stays on this phone and Detoxo '
@@ -227,8 +254,10 @@ class _PinSetupScreenState extends State<PinSetupScreen> {
               const SectionHeader('Convenience'),
               AppToggleTile(
                 leading: Icon(Icons.fingerprint, color: accent),
-                title: 'Allow biometric unlock',
-                subtitle: 'Use fingerprint / face to unlock',
+                title: 'Unlock with fingerprint or device credential',
+                subtitle:
+                    'Use fingerprint / face, or your device PIN, pattern or '
+                    'password',
                 value: _biometric,
                 onChanged: (v) => setState(() => _biometric = v),
               ),
@@ -275,7 +304,7 @@ String _pinTypeLabel(PinType t) => switch (t) {
   PinType.custom => 'Custom PIN',
   PinType.date => "Today's date",
   PinType.time => 'Current time',
-  _ => t.name,
+  _ => 'Unsupported', // wire-compat types; never leak an enum identifier
 };
 
 String _pinTypeHint(PinType t) => switch (t) {
@@ -285,6 +314,59 @@ String _pinTypeHint(PinType t) => switch (t) {
   PinType.time => 'Derived from the clock (HHmm) — changes each minute.',
   _ => '',
 };
+
+/// Human labels & hints for the auto-lock timeouts, shared by the setup row
+/// and the bottom-sheet picker.
+String _autoLockLabel(AutoLockTimeout t) => switch (t) {
+  AutoLockTimeout.never => 'Never — only on relaunch',
+  AutoLockTimeout.immediately => 'Immediately',
+  AutoLockTimeout.s15 => 'After 15 seconds',
+  AutoLockTimeout.s30 => 'After 30 seconds',
+  AutoLockTimeout.m1 => 'After 1 minute',
+  AutoLockTimeout.m5 => 'After 5 minutes',
+  AutoLockTimeout.screenOff => 'When screen turns off',
+};
+
+String _autoLockHint(AutoLockTimeout t) => switch (t) {
+  AutoLockTimeout.never => 'Ask again only when Detoxo restarts',
+  AutoLockTimeout.immediately => 'Ask every time you leave and come back',
+  AutoLockTimeout.screenOff => 'Stay unlocked while the screen stays on',
+  _ => 'Ask after this long away from Detoxo',
+};
+
+/// Bottom-sheet body: the auto-lock timeouts as radio rows. Pops the chosen
+/// [AutoLockTimeout] (or nothing if dismissed).
+class _AutoLockPicker extends StatelessWidget {
+  const _AutoLockPicker({required this.selected});
+
+  final AutoLockTimeout selected;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final timeout in AutoLockTimeout.values)
+          Padding(
+            padding: const EdgeInsets.only(bottom: AppSpacing.xs),
+            child: GlassListTile(
+              leading: Icon(
+                timeout == selected
+                    ? Icons.radio_button_checked
+                    : Icons.radio_button_unchecked,
+                color: timeout == selected
+                    ? Theme.of(context).colorScheme.secondary
+                    : context.glass.onGlassMuted,
+              ),
+              title: _autoLockLabel(timeout),
+              subtitle: _autoLockHint(timeout),
+              onTap: () => Navigator.of(context).pop(timeout),
+            ),
+          ),
+      ],
+    );
+  }
+}
 
 /// Bottom-sheet body: the three PIN types as radio rows. Pops the chosen
 /// [PinType] (or nothing if dismissed).

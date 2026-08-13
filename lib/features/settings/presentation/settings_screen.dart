@@ -165,6 +165,16 @@ class _SettingsScreenState extends State<SettingsScreen>
                   ),
                 ),
 
+                // ── Privacy: apps Detoxo must never touch ───────────────────
+                const SectionHeader('Privacy'),
+                FeatureTile(
+                  icon: Icons.privacy_tip_outlined,
+                  title: 'Protected apps',
+                  subtitle:
+                      'Banking & sensitive apps Detoxo completely ignores',
+                  onTap: () => context.push(Routes.protectedApps),
+                ),
+
                 // ── Security: who can change things & system access ─────────
                 const SectionHeader('Security'),
                 _PinTile(),
@@ -381,12 +391,10 @@ class _PinTile extends StatelessWidget {
     await context.read<PinCubit>().disable();
   }
 
-  /// Edit the configured PIN (type, recovery email, biometrics). Gated by the
-  /// settings scope like every protected change.
+  /// Edit the configured PIN (type, auto-lock, biometrics). The `/pin/setup`
+  /// route itself is wrapped in `PinGuard(scope: settings)`, so no gate here.
   Future<void> _openSettings(BuildContext context) async {
-    if (await requirePin(context, PinScope.settings) && context.mounted) {
-      unawaited(context.push(Routes.pinSetup));
-    }
+    await context.push(Routes.pinSetup);
   }
 
   @override
@@ -398,7 +406,7 @@ class _PinTile extends StatelessWidget {
           PinType.custom => 'Custom',
           PinType.date => 'Date',
           PinType.time => 'Time',
-          _ => '',
+          _ => 'Unknown', // wire-compat types; never render a dangling bullet
         };
         return Column(
           children: [
@@ -421,7 +429,7 @@ class _PinTile extends StatelessWidget {
                 icon: Icons.tune,
                 animatedIcon: AppIcon.pinLock,
                 title: 'PIN settings',
-                subtitle: 'Type, recovery email & biometrics',
+                subtitle: 'Type, auto-lock & biometrics',
                 onTap: () => _openSettings(context),
               ),
           ],

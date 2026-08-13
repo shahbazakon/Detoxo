@@ -75,6 +75,11 @@ class EngineChannel {
   Future<void> pushWebBlocklist(String json) =>
       invokeVoid(ChannelMethods.pushWebBlocklist, {'json': json});
 
+  /// Pushes the enabled privacy-protected package names; native persists them
+  /// and the service ignores those apps entirely. No-op off-Android.
+  Future<void> pushProtectedApps(List<String> packages) =>
+      invokeVoid(ChannelMethods.pushProtectedApps, {'packages': packages});
+
   Future<bool> isAccessibilityEnabled() =>
       invokeBool(ChannelMethods.isAccessibilityEnabled);
 
@@ -100,6 +105,16 @@ class EngineChannel {
       invokeVoid(ChannelMethods.requestDeviceAdmin);
   Future<void> removeDeviceAdmin() =>
       invokeVoid(ChannelMethods.removeDeviceAdmin);
+
+  /// Applies/clears FLAG_SECURE on the activity window (PIN lock's "hide in
+  /// Recents & block screenshots"). No-op off-Android.
+  Future<void> setSecureScreen({required bool enabled}) =>
+      invokeVoid(ChannelMethods.setSecureScreen, {'enabled': enabled});
+
+  /// Wall-clock millis of the last native `ACTION_SCREEN_OFF` (0 = never seen
+  /// / off-Android).
+  Future<int> lastScreenOff() async =>
+      (await _invoke<int>(ChannelMethods.lastScreenOff)) ?? 0;
 
   Future<void> performBack() => invokeVoid(ChannelMethods.performBack);
   Future<void> killApp(String pkg) =>

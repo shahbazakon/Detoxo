@@ -29,7 +29,7 @@ path is native; Dart owns config, settings and UI, bridged by **one** MethodChan
 | 05 | [Plans, Pause & Conscious](05-plans-pause-conscious.md) | Block-All / Conscious / One-Reel / Pause, the Conscious time-bank, countdown & content engine |
 | 06 | [App Blocker & Web Blocklist](06-app-and-web-blocker.md) | Full-app blocking + website blocklist (`WebBlockEngine`) |
 | 07 | [Daily Limit & Scheduler](07-daily-limit-scheduler.md) | Daily time quota + reset |
-| 08 | [PIN Lock & Biometrics](08-pin-lock-recovery.md) | PIN gate, lockout ladder, biometrics; why there is no recovery channel |
+| 08 | [PIN Lock & Biometrics](08-pin-lock-recovery.md) | PIN gate, lockout ladder, biometric/device-credential unlock, Smart Auto Lock + Recents privacy; why there is no recovery channel |
 | 09 | [Persistence & Data Model](09-persistence-data-model.md) | `local_store` + `detoxo_engine_prefs` + secure storage + widget keys |
 | 10 | [Config Sync (offline-first)](10-networking-config-sync.md) | Bundled config load; remote as swap-in |
 | 11 | [Monetization](11-monetization.md) | Premium entitlement model + dev-unlock; ads/billing SDKs removed pending real monetization |
@@ -45,6 +45,7 @@ path is native; Dart owns config, settings and UI, bridged by **one** MethodChan
 | 21 | [App Upgrader](21-app-upgrader.md) | In-app "update available" prompt (`upgrader` engine + custom glass dialog, force-update, auto + manual check) |
 | 22 | [Play Store Release & Policy](22-play-release.md) | Signed `.aab` build, Accessibility/FGS/device-admin declarations, data-safety answers, restricted-settings notes |
 | 23 | [Testing Runbook & IDE Run Configs](23-testing-runbook.md) | How to run every layer — terminal, Android Studio, VS Code; artifacts; troubleshooting |
+| 24 | [Protected Apps (Privacy Exclusion)](24-protected-apps.md) | User-managed sensitive apps (banking/UPI/password managers) Detoxo ignores entirely: native privacy guard, catalog seeding, `pushProtectedApps` |
 
 ## Glossary
 | Term | Meaning |

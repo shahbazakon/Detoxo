@@ -6,10 +6,12 @@ import 'package:detoxo/core/navigation/routes.dart';
 import 'package:detoxo/features/access_protection/presentation/pin_cubit.dart';
 import 'package:detoxo/features/blocking/blocklist/presentation/targets_cubit.dart';
 import 'package:detoxo/features/blocking/shared/domain/entities/enums.dart';
+import 'package:detoxo/features/blocking/shared/domain/repositories/blocking_repositories.dart';
 import 'package:detoxo/features/blocking/shared/presentation/settings_cubit.dart';
 import 'package:detoxo/features/content_counter/content_counter_core/domain/repositories/content_counter_repository.dart';
 import 'package:detoxo/features/content_counter/home_content_counter/domain/repositories/home_widget_repository.dart';
 import 'package:detoxo/features/permissions/presentation/permissions_cubit.dart';
+import 'package:detoxo/features/protected_apps/protected_apps.dart';
 import 'package:detoxo/gen/assets.gen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -62,6 +64,16 @@ class _SplashScreenState extends State<SplashScreen> {
     // Reel counter runs natively (enabled by default); refresh the home widget
     // with the latest snapshot. Fire-and-forget so it never blocks routing.
     unawaited(_refreshReelCounterWidget());
+
+    // Protected apps: push the derived set (full catalog + manual additions)
+    // so the native engine matches Dart (repairs drift after "Reset app
+    // data"). Fire-and-forget so it never blocks routing.
+    unawaited(
+      syncProtectedAppsAtBoot(
+        sl<ProtectedAppsRepository>(),
+        sl<EngineRepository>(),
+      ),
+    );
 
     if (!mounted) return;
 

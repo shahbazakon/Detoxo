@@ -22,6 +22,11 @@ abstract final class ChannelMethods {
   /// the native `WebBlockEngine` matches browser URLs against.
   static const String pushWebBlocklist = 'pushWebBlocklist';
 
+  /// Privacy-protected apps push: a flat list of package names the native
+  /// engine must completely ignore (no counting, reading, or blocking while
+  /// one is foreground). Payload `{packages: List<String>}`.
+  static const String pushProtectedApps = 'pushProtectedApps';
+
   // Permission + service status queries.
   static const String isAccessibilityEnabled = 'isAccessibilityEnabled';
   static const String openAccessibilitySettings = 'openAccessibilitySettings';
@@ -36,6 +41,15 @@ abstract final class ChannelMethods {
   static const String isDeviceAdminActive = 'isDeviceAdminActive';
   static const String requestDeviceAdmin = 'requestDeviceAdmin';
   static const String removeDeviceAdmin = 'removeDeviceAdmin';
+
+  // PIN lock / Smart Auto Lock.
+  /// Toggle FLAG_SECURE on the activity window (hide in Recents + block
+  /// screenshots). Payload `{enabled}`.
+  static const String setSecureScreen = 'setSecureScreen';
+
+  /// Wall-clock millis of the last `ACTION_SCREEN_OFF` seen this process
+  /// (0 = never). Drives the "when screen turns off" auto-lock option.
+  static const String lastScreenOff = 'lastScreenOff';
 
   // Block actions / overlay (used for testing the engine and PIN/one-reel UI).
   static const String performBack = 'performBack';

@@ -2,7 +2,9 @@
 
 The **access_protection** feature is Detoxo's app-level lock: a PIN that gates
 opening the app and changing protected settings, an escalating retry-lockout
-ladder, and optional biometric unlock (`local_auth`).
+ladder, optional biometric / device-credential unlock (`local_auth`), and
+**Smart Auto Lock** — re-locking on return from the background plus
+FLAG_SECURE Recents privacy (§10).
 
 > **There is no recovery channel, deliberately.** An earlier build shipped an
 > email-OTP flow backed by a hardcoded `_devOtp = '000000'` that `validateOtp`
@@ -28,12 +30,13 @@ touches it only through `PinCubit`, the public barrel
 
 | Layer | File | Responsibility |
 |-------|------|----------------|
-| domain / entity | `domain/entities/pin_config.dart` | `PinConfig` (persisted state) + `PinLockoutPolicy` (the ladder) |
+| domain / entity | `domain/entities/pin_config.dart` | `PinConfig` (persisted state) + `AutoLockTimeout` + `AutoLockPolicy` (resume re-lock) + `PinLockoutPolicy` (the ladder) |
 | domain / hashing | `domain/pin_hasher.dart` | `PinHasher` — salted SHA-256 for custom PINs |
-| domain / contract | `domain/repositories/pin_repository.dart` | `PinRepository` interface (load / save only) |
-| data | `data/repositories/pin_repository_impl.dart` | secure-storage persistence, legacy plaintext migration |
+| domain / contract | `domain/repositories/pin_repository.dart` | `PinRepository` interface (load / save / secure-screen / screen-off query) |
+| data | `data/repositories/pin_repository_impl.dart` | secure-storage persistence, legacy plaintext migration, channel calls for FLAG_SECURE + screen-off |
 | presentation / state | `presentation/pin_cubit.dart` | `PinCubit` — setup, verify, lockout, biometrics |
 | presentation / gate | `presentation/pin_gate.dart` | `requirePin()` + `PinGuard` — how other features demand the PIN |
+| presentation / relock | `presentation/pin_auto_relock.dart` | `PinAutoRelock` — lifecycle observer that re-locks on resume |
 | presentation / UI | `presentation/pin_lock_screen.dart` | the full-screen keypad lock |
 | presentation / UI | `presentation/pin_setup_screen.dart` | configure / disable the lock |
 | presentation / UI | `presentation/pin_help_sheet.dart` | "Forgot PIN?" — explains there is no reset |
@@ -59,7 +62,9 @@ repository round-trips to secure storage. Fields:
 | `scopes` | `Set<PinScope>` | which sections the PIN guards |
 | `retryCount` | `int` | cumulative failed attempts (persisted, drives the ladder) |
 | `lockedUntil` | `DateTime?` | end of the current cooldown window (null = not locked) |
-| `biometricEnabled` | `bool` | whether fingerprint/face unlock is allowed |
+| `biometricEnabled` | `bool` | whether fingerprint/face/device-credential unlock is allowed |
+| `autoLock` | `AutoLockTimeout` | resume re-lock timing (default `m1`); see §10 |
+| `secureScreen` | `bool` | FLAG_SECURE — hide in Recents + block screenshots (default `false`) |
 
 Derived getters:
 
@@ -70,7 +75,7 @@ Derived getters:
 `copyWith` has one non-obvious parameter: **`clearLockout`**. Because `lockedUntil`
 is nullable, an ordinary `copyWith(lockedUntil: null)` can't distinguish "leave
 it" from "clear it", so passing `clearLockout: true` forces `lockedUntil = null`.
-This is how a successful verify / recovery wipes the cooldown.
+This is how a successful verify wipes the cooldown.
 
 **JSON:** `toJson`/`fromJson` use each enum's `wire` token (`type` and each
 `scope`), and `lockedUntil` is stored as `millisecondsSinceEpoch`. This is the
@@ -91,12 +96,13 @@ exact shape written under the secure key `pin_config`.
 | `deviceDefault` | `DEVICE_DEFAULT` | no | modeled for wire compat; not selectable |
 
 **Derived PINs (date/time) store no secret at all** — no salt, no hash,
-`secretLength = 0`. `PinCubit._matches` computes the expected value live from
-`DateTime.now()`:
+`secretLength = 0`. `PinCubit.derivedPin(type, now)` computes the expected
+value live from the clock — the single source of truth consumed by both the
+matcher (`PinCubit.matches`) and the setup screen's live preview:
 
 ```dart
-PinType.date => entry == '${_two(now.day)}${_two(now.month)}${now.year}', // ddMMyyyy
-PinType.time => entry == '${_two(now.hour)}${_two(now.minute)}',          // HHmm
+PinType.date => '${_two(now.day)}${_two(now.month)}${now.year}', // ddMMyyyy
+PinType.time => '${_two(now.hour)}${_two(now.minute)}',          // HHmm
 ```
 
 They are convenience / "obscurity" locks (anyone who knows the trick can unlock),
@@ -158,12 +164,17 @@ to a fresh `LocalAuthentication()`, injectable for tests). Registered app-wide (
 
 ### Setup / teardown
 
-- `load()` — emits `repo.load()`.
-- `setup({type, secret, scopes, verifiedEmail, biometricEnabled})` — for `custom`,
-  mints a salt and hashes the secret and records `secretLength`; for date/time it
-  stores empty salt/hash and `secretLength = 0`. Saves and emits.
-- `disable()` — saves and emits `const PinConfig()` (i.e. `type = none`), removing
-  the lock entirely.
+- `load()` — loads from the repo, **re-applies the FLAG_SECURE window state**
+  (window flags die with the activity; every recreation path re-runs the splash,
+  which awaits this), then emits.
+- `setup({type, secret, scopes, biometricEnabled, autoLock, secureScreen})` —
+  for `custom`, mints a salt and hashes the secret and records `secretLength`;
+  for date/time it stores empty salt/hash and `secretLength = 0`. Saves, pushes
+  the FLAG_SECURE state, and emits.
+- `disable()` — saves and emits `const PinConfig()` (i.e. `type = none`),
+  removing the lock entirely and clearing FLAG_SECURE.
+- `lastScreenOff()` — proxies the native screen-off timestamp for
+  `AutoLockTimeout.screenOff` (§10).
 
 ### Verification and the lockout ladder
 
@@ -171,7 +182,7 @@ to a fresh `LocalAuthentication()`, injectable for tests). Registered app-wide (
 
 ```
 if (isLockedOut) return false;               // keypad is disabled anyway
-if (_matches) { retryCount=0, clearLockout; save+emit; return true; }
+if (matches(config, entry, now)) { retryCount=0, clearLockout; save+emit; return true; }
 retries    = retryCount + 1;
 lockout    = PinLockoutPolicy.lockoutFor(retries);
 lockedUntil = lockout == null ? null : now + lockout;
@@ -183,6 +194,10 @@ return false;
 PIN or a completed recovery. Because both `retryCount` and `lockedUntil` live in
 secure storage, the escalation and any active cooldown **survive an app restart**;
 force-quitting during a lockout does not clear it.
+
+The match itself is `PinCubit.matches(config, entry, now)` — a static,
+clock-injected `@visibleForTesting` method (the repo's pure-logic idiom), so
+date/time matching is testable with a fixed clock.
 
 **`PinLockoutPolicy.lockoutFor(retryCount)`** (in `pin_config.dart`) maps the
 post-increment attempt count to a cooldown:
@@ -208,6 +223,14 @@ post-increment attempt count to a cooldown:
 > successful fingerprint/face unlock succeeds regardless of an active retry
 > cooldown — the ladder only gates the numeric keypad. Biometrics are gated only
 > by `biometricEnabled` being set at setup.
+
+> **Device credential is included.** `local_auth`'s `biometricOnly` defaults to
+> `false`, so the OS sheet also accepts the device PIN/pattern/password. The
+> setup toggle and lock-screen semantics are labeled "fingerprint or device
+> credential" to say so honestly. A stale success is discarded: `_tryBiometric`
+> fires the gate's unlock only while its route `isCurrent`, so a credential
+> prompt completing under a newer route (e.g. the auto-relock) can't pop the
+> wrong screen.
 
 ---
 
@@ -253,7 +276,7 @@ The full-screen keypad. One widget, three roles, selected by its callbacks:
 
 | Role | Trigger | `onUnlocked` | `onCancel` |
 |------|---------|--------------|-----------|
-| **Launch gate** | routed to `/pin/lock` from splash | `null` → screen calls `context.go(Routes.home)` itself | absent (forced) |
+| **Launch gate** | routed to `/pin/lock` from splash | supplied by the router: resumes the gating order (permissions → home); a `null` falls back to `context.go(Routes.home)` | absent (forced) |
 | **Inline guard** | `PinGuard` wraps a screen | reveals the child | `maybePop()` |
 | **Action gate** | `requirePin()` pushes it | pops `true` | pops `false` |
 
@@ -297,7 +320,14 @@ Save validation (`_save`):
    nothing was configured).
 2. custom: PIN ≥ 4 digits, and PIN == confirm (both toast on failure).
 3. at least one scope selected.
-4. `setup(..., biometricEnabled: _biometric && _biometricAvailable)`, toast, pop.
+4. `setup(..., biometricEnabled: _biometric && _biometricAvailable, autoLock:
+   _autoLock, secureScreen: _secureScreen)`, toast, pop.
+
+When the **app** scope is selected, a **Smart Auto Lock** section appears: a
+bottom-sheet radio picker for the auto-lock timeout (`_AutoLockPicker`, same
+pattern as the PIN-type picker) and a "Hide screen in Recents" toggle
+(labeled as also blocking screenshots — FLAG_SECURE does both). The biometric
+toggle is labeled "Unlock with fingerprint or device credential".
 
 The screen states inline that there is no reset and that a forgotten PIN means
 reinstalling — shown *before* the user commits, not discovered afterwards.
@@ -344,36 +374,98 @@ call is safe even when no PIN is set — it's a pass-through until the user opts
 
 ---
 
-## 10. Wiring & integration
+## 10. Smart Auto Lock — resume re-lock & Recents privacy
+
+**`AutoLockTimeout`** (enum in `pin_config.dart`, wire tokens): `never`
+(`NEVER` — the pre-auto-lock behavior, locked only on cold start),
+`immediately`, `s15`, `s30`, `m1` (default), `m5`, and `screenOff`
+(`SCREEN_OFF` — stay unlocked while the screen stays on; re-lock once it has
+turned off during the absence). Configs stored by older builds have no
+`autoLock` key and upgrade to `m1` via `fromJson`.
+
+**Decision** — `AutoLockPolicy.shouldRelock({config, pausedAt, now,
+lastScreenOffMillis})`, pure and unit-tested: false unless the lock is
+configured and guards `PinScope.app`; `screenOff` compares the native
+screen-off stamp against the pause stamp; timed options compare elapsed
+background time against the timeout.
+
+**Mechanism** — `PinAutoRelock` (in `main.dart`, wrapping
+`MaterialApp.router`) is a `WidgetsBindingObserver`:
+
+- Stamps `_pausedAt` on **`paused` only** — biometric and permission prompts
+  surface as `inactive` (and `hidden` precedes `paused`), so stamping those
+  would re-lock during in-app system sheets.
+- On `resumed`, consumes the stamp, queries `lastScreenOff` only for the
+  `screenOff` option, and when `shouldRelock` says yes pushes a **forced
+  `PinLockScreen` on the root navigator**
+  (`router.routerDelegate.navigatorKey`) — the same idiom as `requirePin`, so
+  navigation state, open dialogs and sheets survive underneath and the lock's
+  `PopScope` blocks system back.
+- **Never double-locks**: `PinLockScreen.appGateVisible` (a static visibility
+  counter incremented only by forced app-scope gates — the launch gate and the
+  relock) is checked before and after the async gap; backgrounding at the lock
+  itself pushes nothing new.
+
+**Recents privacy** — the `secureScreen` flag drives the `setSecureScreen`
+channel command (`CommandHandler.kt` → `FLAG_SECURE` on the activity window).
+It is applied at three choke points — `PinCubit.load()` / `setup()` /
+`disable()` — so it survives activity recreation (splash always awaits
+`load()`) and always clears when the lock is turned off. FLAG_SECURE blanks
+the Recents card **and** blocks screenshots/`adb screencap`; note for QA: the
+`detoxo-auto-test` screenshot layer records black frames while it is on
+(default off).
+
+**Screen-off tracking** — `MainActivity` registers an `ACTION_SCREEN_OFF`
+receiver (`ContextCompat.registerReceiver`, `RECEIVER_NOT_EXPORTED`) and keeps
+a `@Volatile` wall-clock stamp in its companion, read back via the
+`lastScreenOff` command. In-memory only: process death cold-starts through the
+splash gate anyway. Known ceilings (marked `ponytail:` in code): wall-clock
+comparison skews if the user changes the clock, and API-34 broadcast deferral
+can deliver one late screen-off (a single missed relock that self-heals).
+
+**Reboot** — auto-lock after reboot needs no code: unlock state lives only in
+memory, so any cold start (reboot included) passes through the splash launch
+gate.
+
+---
+
+## 11. Wiring & integration
 
 - **DI** (`lib/core/di/injector.dart`): `registerLazySingleton<PinRepository>(() =>
-  PinRepositoryImpl(sl()))` (the `sl()` resolves `LocalStore`).
+  PinRepositoryImpl(sl(), sl()))` (resolving `LocalStore` + `EngineChannel`).
 - **Provider** (`lib/main.dart`): `BlocProvider(create: (_) =>
-  PinCubit(sl<PinRepository>()))` — one app-wide cubit.
+  PinCubit(sl<PinRepository>()))` — one app-wide cubit. `_RouterState` wraps
+  `MaterialApp.router` in `PinAutoRelock(router: _router, ...)` (§10).
 - **Routes** (`lib/core/navigation/routes.dart` + `app_router.dart`):
-  `pinSetup = '/pin/setup'` → `PinSetupScreen`, `pinLock = '/pin/lock'` →
-  `PinLockScreen` (launch-gate form).
+  `pinSetup = '/pin/setup'` → `PinGuard(scope: settings, child: PinSetupScreen())`
+  — the route itself is gated, so every entry point (settings tile, drawer
+  shortcut) passes the same guard; `pinLock = '/pin/lock'` → `PinLockScreen`
+  with a router-supplied `onUnlocked` that resumes the splash's gating order
+  (permissions → home), so PIN users can't skip the permissions gate.
 - **Splash gating** (`lib/app/splash_screen.dart`): `pin.load()` runs in the boot
   `Future.wait`; routing order is **onboarding → PIN lock → permissions → home** —
   if `pin.isConfigured && pin.guards(PinScope.app)`, splash sends the user to
   `/pin/lock` before anything else.
 - **Settings** (`lib/features/settings/presentation/settings_screen.dart`): the PIN
-  toggle pushes `/pin/setup`; every protected mutation (disabling blocking,
-  resetting data, editing the PIN) is fenced behind `requirePin(context,
-  PinScope.settings)`. The `LOCK_APP` block mode requires a configured PIN, so
-  choosing it without one routes the user to PIN setup rather than selecting a mode
-  that can't enforce anything.
+  toggle pushes `/pin/setup` (the route's own `PinGuard` asks for the PIN);
+  the remaining protected mutations (turning the lock off from the master
+  switch, disabling blocking, resetting data) are fenced behind
+  `requirePin(context, PinScope.settings)`. The `LOCK_APP` block mode requires
+  a configured PIN, so choosing it without one routes the user to PIN setup
+  rather than selecting a mode that can't enforce anything.
 
 ---
 
-## 11. Status / follow-ups
+## 12. Status / follow-ups
 
 | Item | State |
 |------|-------|
 | Custom PIN storage | live — salted SHA-256, plaintext never persisted; legacy plaintext auto-migrated |
 | Date/Time PINs | live — clock-derived convenience locks, no stored secret |
 | Retry-lockout ladder | live — cumulative, persisted, survives restart |
-| Biometric unlock | live via `local_auth` (Android); bypasses the keypad lockout by design |
+| Biometric / device-credential unlock | live via `local_auth` (Android); bypasses the keypad lockout by design |
+| Smart Auto Lock (resume re-lock) | live — `never`/`immediately`/15 s/30 s/1 m/5 m/`screenOff`; default 1 minute |
+| Recents privacy (FLAG_SECURE) | live — opt-in toggle; also blocks screenshots (QA screenshots go black while on) |
 | PIN recovery | **removed by design** — the `000000` dev backdoor is gone and no replacement is planned; reinstalling is the escape hatch (§7) |
 | Hash KDF hardening | follow-up — single-round SHA-256 today |
 | `LOCK_APP` native enforcement | follow-up — engine degrades to a back press (see [03-detection-engine.md](03-detection-engine.md)) |
@@ -391,15 +483,18 @@ call is safe even when no PIN is set — it's a pass-through until the user opts
 - `lib/features/access_protection/data/repositories/pin_repository_impl.dart`
 - `lib/features/access_protection/presentation/pin_cubit.dart`
 - `lib/features/access_protection/presentation/pin_gate.dart`
+- `lib/features/access_protection/presentation/pin_auto_relock.dart`
 - `lib/features/access_protection/presentation/pin_lock_screen.dart`
 - `lib/features/access_protection/presentation/pin_setup_screen.dart`
 - `lib/features/access_protection/presentation/pin_help_sheet.dart`
 - `lib/features/blocking/shared/domain/entities/enums.dart` (`PinType`, `PinScope`)
 - `lib/core/storage/local_store.dart` (`StoreKeys.pinConfig`)
-- `lib/core/utils/result.dart` (`Result` / `Ok` / `Err`)
 - `lib/core/widgets/common_widgets.dart` (`formatCountdown`)
 - `lib/core/di/injector.dart` (`PinRepository` registration)
 - `lib/main.dart` (`PinCubit` provider)
 - `lib/core/navigation/routes.dart`, `lib/core/navigation/app_router.dart` (`/pin/setup`, `/pin/lock`)
 - `lib/app/splash_screen.dart` (launch gating)
 - `lib/features/settings/presentation/settings_screen.dart` (`requirePin` call sites)
+- `lib/core/constants/channel_constants.dart`, `lib/core/platform_channels/engine_channel.dart` (`setSecureScreen`, `lastScreenOff`)
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/MainActivity.kt` (screen-off receiver)
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/channels/CommandHandler.kt` (`setSecureScreen`, `lastScreenOff` branches)

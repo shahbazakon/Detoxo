@@ -242,8 +242,9 @@ from Detoxo's own settings or Android's Security settings. Disclose it as a user
 self-control feature that prevents impulsive uninstall and enables the optional
 lock-screen block action.
 
-**`SYSTEM_ALERT_WINDOW`.** Used to draw Detoxo's own block screen, PIN prompt and reel
-counter bubble over other apps. It never reads or interacts with other apps' content.
+**`SYSTEM_ALERT_WINDOW`.** Used to draw Detoxo's own block screen and reel-counter
+bubble over other apps. It never reads or interacts with other apps' content. (The PIN
+prompt is an ordinary in-app screen — it does not use this permission.)
 
 **`PACKAGE_USAGE_STATS`.** Powers user-configured daily app usage limits; read on-device,
 never uploaded. Granted by the user on Android's own Usage-access screen.

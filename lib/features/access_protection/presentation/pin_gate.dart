@@ -8,9 +8,9 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 /// when no PIN guards the scope; otherwise pushes a full-screen [PinLockScreen]
 /// and resolves to whether the user unlocked (vs. cancelled).
 ///
-/// Use at the trigger of a protected action (e.g. switching the plan):
+/// Use at the trigger of a protected action:
 /// ```dart
-/// if (await requirePin(context, PinScope.planSwitch)) {
+/// if (await requirePin(context, PinScope.settings)) {
 ///   // proceed
 /// }
 /// ```

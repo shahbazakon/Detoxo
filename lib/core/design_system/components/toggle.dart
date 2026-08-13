@@ -11,6 +11,7 @@ class AppToggle extends StatelessWidget {
     this.enabled = true,
     this.activeColor,
     this.label,
+    this.semanticLabel,
     super.key,
   });
 
@@ -23,6 +24,11 @@ class AppToggle extends StatelessWidget {
 
   /// Optional inline label rendered to the left of the switch.
   final String? label;
+
+  /// Screen-reader name for the switch when no visible [label] is wanted —
+  /// e.g. `AppToggleTile` passes its title so TalkBack doesn't announce a
+  /// nameless "switch".
+  final String? semanticLabel;
 
   static const double _trackW = 48;
   static const double _trackH = 28;
@@ -103,7 +109,7 @@ class AppToggle extends StatelessWidget {
           enabled: live,
           haptic: false, // selection click, not the default light impact
           pressedScale: hasLabel ? 0.98 : 0.92,
-          semanticLabel: label,
+          semanticLabel: semanticLabel ?? label,
           minTapTarget: hasLabel ? null : AppSizes.minTapTargetSquare,
           child: hasLabel ? _row(context, visual) : visual,
         ),

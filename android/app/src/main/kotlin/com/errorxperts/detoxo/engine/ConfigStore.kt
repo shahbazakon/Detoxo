@@ -32,6 +32,15 @@ class ConfigStore(context: Context) {
         get() = prefs.getStringSet(KEY_ENABLED, emptySet()) ?: emptySet()
         set(value) = prefs.edit().putStringSet(KEY_ENABLED, value).apply()
 
+    /**
+     * Packages Detoxo must completely ignore (privacy-protected apps: banking,
+     * UPI, password managers…). While one is foreground the service does no
+     * counting, no reading, no blocking. Overrides the monitored catalog.
+     */
+    var protectedPackages: Set<String>
+        get() = prefs.getStringSet(KEY_PROTECTED, emptySet()) ?: emptySet()
+        set(value) = prefs.edit().putStringSet(KEY_PROTECTED, value).apply()
+
     var vibrationEnabled: Boolean
         get() = prefs.getBoolean(KEY_VIBRATION, true)
         set(value) = prefs.edit().putBoolean(KEY_VIBRATION, value).apply()
@@ -159,6 +168,7 @@ class ConfigStore(context: Context) {
         private const val KEY_PLAN = "active_plan"
         private const val KEY_BLOCK_MODE = "default_block_mode"
         private const val KEY_ENABLED = "enabled_platforms"
+        private const val KEY_PROTECTED = "protected_packages"
         private const val KEY_VIBRATION = "vibration_enabled"
         private const val KEY_MASTER = "master_enabled"
         private const val KEY_PAUSE_UNTIL = "pause_until"

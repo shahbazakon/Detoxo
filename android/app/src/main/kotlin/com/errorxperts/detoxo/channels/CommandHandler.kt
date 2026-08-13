@@ -16,6 +16,8 @@ import android.os.Looper
 import android.os.PowerManager
 import android.os.Process
 import android.provider.Settings
+import android.view.WindowManager
+import com.errorxperts.detoxo.MainActivity
 import com.errorxperts.detoxo.accessibility.DetoxoAccessibilityService
 import com.errorxperts.detoxo.admin.DetoxoDeviceAdminReceiver
 import com.errorxperts.detoxo.engine.ConfigStore
@@ -104,6 +106,14 @@ class CommandHandler(
                 DetoxoAccessibilityService.instance?.reload()
                 result.success(true)
             }
+            "pushProtectedApps" -> {
+                // Enabled package names only — names/categories never cross the
+                // channel, and protected packages are never logged.
+                store.protectedPackages =
+                    call.argument<List<String>>("packages")?.toSet() ?: emptySet()
+                DetoxoAccessibilityService.instance?.reload()
+                result.success(true)
+            }
             "consciousState" -> result.success(
                 DetoxoAccessibilityService.instance?.consciousSnapshot() ?: mapOf(
                     "bankMs" to store.consciousBankMs,
@@ -182,6 +192,17 @@ class CommandHandler(
                 DetoxoAccessibilityService.instance?.lockScreen()
                 result.success(true)
             }
+            "setSecureScreen" -> {
+                // PIN lock privacy: FLAG_SECURE hides the window in Recents and
+                // blocks screenshots. Runs on the platform (UI) thread.
+                val on = call.argument<Boolean>("enabled") ?: false
+                activity?.window?.let { w ->
+                    if (on) w.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                    else w.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                }
+                result.success(true)
+            }
+            "lastScreenOff" -> result.success(MainActivity.lastScreenOffMillis)
             "blockStats" -> {
                 val (today, total, date) = store.blockStats()
                 result.success(mapOf("today" to today, "total" to total, "date" to date))

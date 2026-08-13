@@ -35,6 +35,8 @@ import 'package:detoxo/features/limits/web_blocker/domain/repositories/web_block
 import 'package:detoxo/features/limits/web_blocker/domain/repositories/web_block_stats_repository.dart';
 import 'package:detoxo/features/permissions/data/repositories/permission_repository_impl.dart';
 import 'package:detoxo/features/permissions/domain/repositories/permission_repository.dart';
+import 'package:detoxo/features/protected_apps/data/repositories/protected_apps_repository_impl.dart';
+import 'package:detoxo/features/protected_apps/domain/repositories/protected_apps_repository.dart';
 import 'package:get_it/get_it.dart';
 
 /// Service locator. Composition root for the whole app; blocs resolve their
@@ -65,7 +67,7 @@ Future<void> configureDependencies() async {
     ..registerLazySingleton<PermissionRepository>(
       () => PermissionRepositoryImpl(sl()),
     )
-    ..registerLazySingleton<PinRepository>(() => PinRepositoryImpl(sl()))
+    ..registerLazySingleton<PinRepository>(() => PinRepositoryImpl(sl(), sl()))
     ..registerLazySingleton<WebBlockRepository>(
       () => WebBlockRepositoryImpl(sl()),
     )
@@ -74,6 +76,9 @@ Future<void> configureDependencies() async {
     )
     ..registerLazySingleton<AppBlockRepository>(
       () => AppBlockRepositoryImpl(sl()),
+    )
+    ..registerLazySingleton<ProtectedAppsRepository>(
+      () => ProtectedAppsRepositoryImpl(sl()),
     )
     ..registerLazySingleton<DailyLimitRepository>(
       () => DailyLimitRepositoryImpl(sl()),

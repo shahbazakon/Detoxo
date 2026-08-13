@@ -21,6 +21,17 @@ Your **content** stays private — what you watch, browse, and type never leaves
 
 In short: Detoxo keeps what you *see and do* private, and shares only anonymous "how the app is used / did it crash" signals to make it better. (A switch to turn diagnostics off is planned.)
 
+## Can Detoxo see my banking or payment apps?
+
+No. Well-known sensitive apps — banking, UPI, DigiLocker, password managers,
+authenticators and the like — are protected **automatically and permanently**;
+there's nothing to configure and no way to accidentally switch it off. While a
+protected app is on screen, Detoxo pauses itself completely: it doesn't read
+the screen, doesn't count anything, never shows its bubble or blocks anything,
+and its diagnostics don't record that you opened the app. When you switch back
+to social media, protection resumes by itself. See what's covered — and add
+apps of your own — under **Settings → Privacy → Protected apps**.
+
 ## Android says "restricted setting" and won't let me turn on Accessibility
 
 If you installed Detoxo from an APK rather than the Play Store, Android blocks a few powerful switches until you confirm you meant to enable them. You'll see *"Restricted setting"* or *"App was denied access"*.
@@ -126,6 +137,19 @@ No — Detoxo is **Android-only**, and this isn't a temporary gap. The whole pro
 - To **turn blocking off entirely**, open **Settings** and switch off **Protection** (the master switch for all detection). If you've set a PIN, Detoxo will ask for it first — that's the intentional speed bump that stops an impulsive "just turn it off."
 
 The reel counter is controlled separately (in the reel counter screen), so you can keep counting even with blocking off.
+
+## I set a PIN — why does Detoxo ask for it again when I switch back?
+
+That's **Smart Auto Lock**. When the PIN guards opening the app, Detoxo re-locks
+after you leave it — immediately, after a delay you pick (15 s to 5 minutes;
+1 minute is the default), or only when the screen turns off. Tune it in
+**Settings → PIN lock → Re-lock after leaving Detoxo**, or set it to **Never**
+to only lock on relaunch. Detoxo always asks again after a phone restart.
+
+While you're there, **Hide screen in Recents** blanks Detoxo's card in the app
+switcher so your settings and counts aren't visible at a glance (it also blocks
+screenshots of the app). And the lock screen accepts three ways in: your Detoxo
+PIN, your fingerprint or face, or your device PIN/pattern/password.
 
 ## I set a PIN and forgot it — how do I get back in?
 

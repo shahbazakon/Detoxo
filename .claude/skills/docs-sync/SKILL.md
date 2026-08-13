@@ -17,7 +17,7 @@ Run this after you add, remove, or meaningfully change:
 Skip it for pure test/formatting changes with no behavioral or structural effect.
 
 ## Documentation layout
-- `docs/code_docs/` — engineering docs (`00-index.md`, `01`–`18`). Authored **from source**;
+- `docs/code_docs/` — engineering docs (`00-index.md`, `01`–`24`). Authored **from source**;
   each ends with a **`## Source files`** section listing the real files it documents.
 - `docs/info_docs/` — end-user / marketing docs (`00-index.md`, `01`–`04`): product overview,
   feature walkthroughs, permissions explained, FAQs.
@@ -45,6 +45,7 @@ Skip it for pure test/formatting changes with no behavioral or structural effect
 | `lib/features/content_counter/**`, native `engine/ContentCounter*.kt`, `overlay/**`, `widget/**` | 17 |
 | `lib/features/additional_feature/appearance/**` (Appearance screen: theme + background + reel-counter hub) | 17 (theme/background source is `blocking/shared` `SettingsCubit`; **user-facing** → `info_docs/02` §8–§9) |
 | `lib/core/constants/channel_constants.dart`, native `channels/**` | 18 |
+| `lib/features/protected_apps/**`, the service's privacy guard (`isProtected` sites in `DetoxoAccessibilityService.kt`) | 24 (+ 03, 04, 09, 18; **user-facing** → `info_docs/02` §13 + `04`) |
 | `lib/core/services/firebase/**`, `lib/firebase_options.dart`, Firebase Gradle plugins (`android/settings.gradle.kts`, `android/app/build.gradle.kts`) | 19 (+ 12, 14, 16; **privacy** → `info_docs/03` + `04`) |
 | `lib/features/help/**`, `lib/features/additional_feature/showcase_view/**` | 20 (+ user-facing → `info_docs/02` + `04`) |
 | `lib/features/additional_feature/app_upgrader/**`, `lib/core/design_system/components/{dialog,overlays}.dart` (blocking-dialog params), the update entry points in `settings_screen.dart` (`_VersionBanner`) / `daily_limit_screen.dart` (`InfoBanner`) | 21 (+ user-facing → `info_docs/02` + `04`) |

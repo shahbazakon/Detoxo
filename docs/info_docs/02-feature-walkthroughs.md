@@ -315,17 +315,27 @@ A PIN keeps you from disabling Detoxo (or changing protected settings) on impuls
    - **App** — ask for the PIN every time Detoxo launches.
    - **Settings** — ask before disabling blocking, resetting data, or changing the
      PIN.
-4. Optionally turn on **biometric unlock**.
-5. Save.
+4. With the App scope on, tune **Smart Auto Lock**:
+   - **Re-lock after leaving Detoxo** — pick when the lock re-arms after you
+     switch away: immediately, after 15 or 30 seconds, 1 or 5 minutes (the
+     default), when the screen turns off, or never (only on relaunch). Detoxo
+     always locks again after a phone restart.
+   - **Hide screen in Recents** — blanks Detoxo's card in the app switcher so
+     nobody glimpses your settings or counts. This also blocks screenshots of
+     the app while it's on.
+5. Optionally turn on **Unlock with fingerprint or device credential**.
+6. Save.
 
    The screen warns you plainly that there is no reset — pick something you'll
    remember.
 
-### Biometric unlock
+### Fingerprint & device-credential unlock
 
-If your phone supports fingerprint or face unlock and you enabled it at setup, the
-lock screen offers a biometric shortcut (and can prompt automatically). It shows
-"Unlock Detoxo" and lets you in without typing.
+If your phone supports it and you enabled it at setup, the lock screen offers a
+fingerprint shortcut (and can prompt automatically). The system sheet shows
+"Unlock Detoxo" and also accepts your **device PIN, pattern or password** as a
+fallback — so you have three ways in: Detoxo's PIN, a fingerprint or face, or
+your device credential.
 
 ### If you forget your PIN
 
@@ -428,6 +438,7 @@ Open **Settings** from the top bar or menu. It's grouped into:
 **Protection**
 
 - **Daily limit** — jumps to the daily-cap screen (§6).
+- *(A **Privacy** group sits just below Protection — see §13 Protected apps.)*
 - **When a reel is detected** — choose what blocking actually does:
   - **Press back** — gently exits the reel (recommended).
   - **Close the app** — force-closes the offending app.
@@ -531,6 +542,42 @@ Occasionally an update is **required** (for example, an important fix). In that 
 the card can't be dismissed — the only option is **Update now** — so everyone stays
 on a safe, working version. This only happens on Android; on iPhone the app is a
 preview and doesn't check for updates.
+
+---
+
+## 13. Protected apps: Detoxo steps aside for your private apps
+
+> **Protected applications**
+>
+> Detoxo automatically pauses its monitoring when you open protected
+> applications such as banking, payment, identity, and password-manager apps.
+>
+> Your protected apps are never interrupted by Detoxo interventions.
+
+Open **Settings → Privacy → Protected apps**. While a protected app is on
+screen, Detoxo does **nothing at all** — no counting, no blocking, no bubble,
+no reading what's on screen. The moment you leave it, protection resumes on its
+own. You never have to toggle anything.
+
+**Automatic, always.** Well-known sensitive apps — banks like HDFC or SBI's
+YONO, UPI apps like Google Pay and PhonePe, DigiLocker, password managers,
+authenticators and more — are protected automatically and **permanently**.
+There is nothing to set up and nothing to get wrong: they can't be switched
+off or removed, and one you install *later* is covered the moment it lands on
+your phone. The screen lists them under **Auto-protected** so you can see
+exactly what's covered.
+
+**Adding your own.** Tap **Add app** and enter the app's name and package id
+(it's in the app's Play Store URL). Your additions appear under **Your apps**,
+and those you can delete any time.
+
+**One honest guard-rail:** protection beats blocking — so protecting, say,
+Instagram would quietly switch its blocking off. If you try to protect an app
+Detoxo can block, Detoxo asks for your Settings PIN first (when you have one),
+exactly like turning blocking off.
+
+Your protected list never leaves your phone, and Detoxo's diagnostics never
+mention these apps — not even that you opened one.
 
 ---
 

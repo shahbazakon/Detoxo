@@ -113,7 +113,12 @@ class AppToggleTile extends StatelessWidget {
             tone: AppTone.warning,
             icon: Icons.lock_outline,
           )
-        : AppToggle(value: value, onChanged: onChanged, enabled: enabled);
+        : AppToggle(
+            value: value,
+            onChanged: onChanged,
+            enabled: enabled,
+            semanticLabel: title,
+          );
     return GlassListTile(
       leading: leading,
       title: title,

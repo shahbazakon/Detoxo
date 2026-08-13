@@ -51,10 +51,12 @@ never depends on blocking being active.
 ```
 onAccessibilityEvent(event):
   pkg = event.packageName            ; return if null
+  pkgProtected = isProtected(pkg)    ; privacy-protected app? (cached set)
   if WINDOW_STATE_CHANGED:           ; track foreground for Conscious + counter
       foregroundPkg = pkg
-      if no platforms for pkg: lastReelAtMs = 0      ; end "watching"
-      contentCounter.onForegroundChanged(pkg, isReelBearing)
+      if pkgProtected or no platforms for pkg: lastReelAtMs = 0  ; end "watching"
+      contentCounter.onForegroundChanged(pkg, !pkgProtected && isReelBearing)
+  if pkgProtected or isProtected(foregroundPkg): return  ; PRIVACY GUARD (see 24)
   if pkg == our own package: return
   if contentCounter.isEnabled: countContent(event, pkg)   ; side-effect-free
   if !store.masterEnabled: return                          ; master kill-switch
@@ -78,28 +80,37 @@ onAccessibilityEvent(event):
 
 1. **Null package** → return.
 2. **Foreground tracking** (on `TYPE_WINDOW_STATE_CHANGED` only): set
-   `foregroundPkg`; if the new app has *no* configured platforms, reset
-   `lastReelAtMs = 0` (immediately ends "watching" so the Conscious bank can
-   start earning); notify the content counter of the foreground change with a
-   flag for whether the app carries reel surfaces.
-3. **Self-package** (`pkg == packageName`) → return (never act on Detoxo's own UI).
-4. **Content counting** — `if (contentCounter.isEnabled) countContent(event, pkg)`.
+   `foregroundPkg`; if the new app is privacy-protected **or** has *no*
+   configured platforms, reset `lastReelAtMs = 0` (immediately ends "watching"
+   so the Conscious bank can start earning — and so a stale watching window can
+   never survive a switch into a protected app); notify the content counter of
+   the foreground change with a flag for whether the app carries reel surfaces
+   (forced `false` for a protected app, which hides the bubble).
+3. **Privacy guard** — `if (pkgProtected || isProtected(foregroundPkg)) return`.
+   The single protected-apps decision point: while a protected app (banking,
+   UPI, password manager…) is the event source *or* the focused window, nothing
+   below runs — no counting, no browser URL reads, no tree walks, no blocking.
+   The dual check keeps split-screen safe (`rootInActiveWindow` is the
+   *focused* pane, so an event from the other pane must never walk it).
+   Full design in [24-protected-apps.md](24-protected-apps.md).
+4. **Self-package** (`pkg == packageName`) → return (never act on Detoxo's own UI).
+5. **Content counting** — `if (contentCounter.isEnabled) countContent(event, pkg)`.
    Runs even when blocking is off/paused/disabled (see §6).
-5. **Master switch** — `if (!store.masterEnabled) return`. Default `true`.
-6. **Pause gate** — `if (System.currentTimeMillis() < store.pauseUntil) return`.
+6. **Master switch** — `if (!store.masterEnabled) return`. Default `true`.
+7. **Pause gate** — `if (System.currentTimeMillis() < store.pauseUntil) return`.
    Clock-based; suspends *all* blocking regardless of the pushed plan name (see §5).
-7. **Per-package throttle** — see §3. Immediately *before* this throttle, under the
+8. **Per-package throttle** — see §3. Immediately *before* this throttle, under the
    `ONE_REEL` plan a `TYPE_VIEW_SCROLLED` from a monitored app stamps
    `lastScrollAtMs` — a throttled scroll would hide a reel advance and leak the next
    reel past the allowance (see §5.3).
-8. **Browser branch** — if the package is a known browser, run web blocking
+9. **Browser branch** — if the package is a known browser, run web blocking
    (only on `WINDOW_STATE_CHANGED` / `WINDOW_CONTENT_CHANGED`, and only if the
    blocklist has rules) and `return`. Browsers carry no reel surfaces, so the
    reel path is skipped either way. Detailed in
    [06-app-and-web-blocker.md](06-app-and-web-blocker.md).
-9. **Reel detection** — iterate the package's platforms/detectors (§4), apply the
-   Conscious allowance check (§5.2) **or the One Reel / Unblock gate (§5.3)**, then
-   execute the block (§4.4).
+10. **Reel detection** — iterate the package's platforms/detectors (§4), apply the
+    Conscious allowance check (§5.2) **or the One Reel / Unblock gate (§5.3)**, then
+    execute the block (§4.4).
 
 ---
 
@@ -324,6 +335,8 @@ if plan != CURIOUS: return
 elapsed = clamp(now - anchor, >=0); anchor = now      // advance first, always
 if !masterEnabled: emit; return                        // freeze (no drain/accrue)
 if now < pauseUntil: emit; return                      // freeze during a live Pause (Conscious base)
+if isProtected(foregroundPkg):                         // privacy: freeze + drop stale watching
+    lastReelAtMs = 0; emit; return                     // never BACK-press into a protected app
 watching = (now - lastReelAtMs) < WATCH_STALE_MS (2500 ms)
 inReelApp = foregroundPkg has any configured platform
 if watching:
@@ -349,6 +362,12 @@ Key nuances:
 - `CONSCIOUS_MAX_STEP_MS = 5000` caps a single drain step so a delayed/coalesced
   tick can't dump the whole bank at once.
 - `WATCH_STALE_MS = 2500`: a reel seen within 2.5 s still counts as "watching".
+- A **privacy-protected foreground app** freezes the bank *and* zeroes
+  `lastReelAtMs` — without this, the 2.5 s stale-watching window could survive a
+  reel-app → banking-app switch and the timer would press BACK inside the bank
+  when the bank hits 0. `performBackInternal` / `killApp` / `lockScreen` carry
+  the same guard as a fail-closed backstop (see
+  [24-protected-apps.md](24-protected-apps.md)).
 
 **`consciousState` event / `consciousSnapshot`** carries
 `{bankMs, maxBankMs, watching, blocked, active}` where
