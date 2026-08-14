@@ -1,5 +1,4 @@
 import 'package:detoxo/core/design_system/design_system.dart';
-import 'package:detoxo/core/widgets/common_widgets.dart';
 import 'package:detoxo/features/blocking/blocklist/presentation/targets_cubit.dart';
 import 'package:detoxo/features/blocking/blocklist/presentation/widgets/block_app_tile.dart';
 import 'package:detoxo/features/blocking/shared/presentation/settings_cubit.dart';

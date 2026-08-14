@@ -9,6 +9,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.drawable.Drawable
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
@@ -26,6 +29,7 @@ import com.errorxperts.detoxo.widget.ContentCounterWidgetProvider
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
 import java.text.SimpleDateFormat
 import java.util.Locale
 import java.util.concurrent.Executors
@@ -264,28 +268,41 @@ class CommandHandler(
                     mainHandler.post { result.success(packages) }
                 }
             }
+            "installedApps" -> {
+                // Label + icon loads are slower still (per-app resource reads);
+                // same off-thread pattern. Dart caches the result.
+                ioExecutor.execute {
+                    val apps = queryInstalledApps()
+                    mainHandler.post { result.success(apps) }
+                }
+            }
             else -> result.notImplemented()
+        }
+    }
+
+    /**
+     * MAIN/LAUNCHER activities. Satisfied by the manifest `<queries>` MAIN
+     * entry, so it does not strictly need QUERY_ALL_PACKAGES. Throws on
+     * failure — callers map that to null ("install state unknown").
+     */
+    private fun resolveLaunchables(): List<ResolveInfo> {
+        val pm = context.packageManager
+        val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(0L))
+        } else {
+            @Suppress("DEPRECATION")
+            pm.queryIntentActivities(intent, 0)
         }
     }
 
     /**
      * User-facing, launchable apps: every package exposing a MAIN/LAUNCHER
      * activity, de-duplicated (an app may register several launcher aliases).
-     * Satisfied by the manifest `<queries>` MAIN entry, so it does not strictly
-     * need QUERY_ALL_PACKAGES. Returns an empty list on failure so the Dart side
-     * still treats install state as "unknown" rather than dropping the blocklist.
      */
     private fun queryLaunchablePackages(): List<String>? {
         return try {
-            val pm = context.packageManager
-            val intent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-            val resolved: List<ResolveInfo> =
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(0L))
-                } else {
-                    @Suppress("DEPRECATION")
-                    pm.queryIntentActivities(intent, 0)
-                }
+            val resolved = resolveLaunchables()
             val seen = LinkedHashSet<String>(resolved.size)
             for (info in resolved) {
                 info.activityInfo?.packageName?.let { seen.add(it) }
@@ -296,6 +313,55 @@ class CommandHandler(
             // the full blocklist rather than hiding every app.
             null
         }
+    }
+
+    /**
+     * Launchable apps with display metadata for the add-app picker:
+     * `{package, label, icon}` per app, icon a 96px PNG (or null). Detoxo
+     * itself is excluded — blocking or protecting it is meaningless. Null on
+     * total failure, mirroring [queryLaunchablePackages].
+     */
+    private fun queryInstalledApps(): List<Map<String, Any?>>? {
+        return try {
+            val pm = context.packageManager
+            val seen = HashSet<String>()
+            val out = ArrayList<Map<String, Any?>>()
+            for (info in resolveLaunchables()) {
+                val pkg = info.activityInfo?.packageName ?: continue
+                if (pkg == context.packageName || !seen.add(pkg)) continue
+                val label = try {
+                    info.loadLabel(pm).toString()
+                } catch (_: Throwable) {
+                    pkg
+                }
+                // Per-app: one corrupt icon must not kill the whole list.
+                val icon = try {
+                    rasterizeIcon(info.loadIcon(pm))
+                } catch (_: Throwable) {
+                    null
+                }
+                out.add(mapOf("package" to pkg, "label" to label, "icon" to icon))
+            }
+            out
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * Draws any Drawable (adaptive / vector / bitmap) into a 96px PNG. Drawing
+     * at target bounds is the downscale — no intermediate full-size bitmap.
+     */
+    private fun rasterizeIcon(drawable: Drawable?): ByteArray? {
+        if (drawable == null) return null
+        val edge = 96
+        val bmp = Bitmap.createBitmap(edge, edge, Bitmap.Config.ARGB_8888)
+        drawable.setBounds(0, 0, edge, edge)
+        drawable.draw(Canvas(bmp))
+        val bytes = ByteArrayOutputStream()
+        bmp.compress(Bitmap.CompressFormat.PNG, 100, bytes)
+        bmp.recycle()
+        return bytes.toByteArray()
     }
 
     /** Requests the launcher pin the reel counter widget. Returns false if unsupported. */

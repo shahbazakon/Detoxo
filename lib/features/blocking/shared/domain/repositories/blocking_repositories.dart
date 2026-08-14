@@ -1,9 +1,13 @@
+import 'package:detoxo/core/platform_channels/installed_app.dart';
 import 'package:detoxo/features/blocking/plans/domain/entities/conscious_state.dart';
 import 'package:detoxo/features/blocking/plans/domain/entities/reel_session_state.dart';
 import 'package:detoxo/features/blocking/shared/domain/entities/app_notice.dart';
 import 'package:detoxo/features/blocking/shared/domain/entities/app_settings.dart';
 import 'package:detoxo/features/blocking/shared/domain/entities/block_target.dart';
 import 'package:detoxo/features/blocking/shared/domain/entities/engine_event.dart';
+
+// Surface the contract's own parameter/return types to consumers.
+export 'package:detoxo/core/platform_channels/installed_app.dart';
 
 /// Loads the detection config (offline bundle, refreshed remotely) and exposes
 /// it as user-facing block targets.
@@ -76,4 +80,9 @@ abstract interface class EngineRepository {
   /// Package names of the device's user-launchable apps, or `null` when install
   /// state can't be determined (off-Android / channel error).
   Future<Set<String>?> installedPackages();
+
+  /// The device's user-launchable apps with label + icon for the add-app
+  /// picker, or `null` when unknown (off-Android / channel error). Cached
+  /// after the first successful scan; [refresh] forces a rescan.
+  Future<List<InstalledApp>?> installedApps({bool refresh = false});
 }

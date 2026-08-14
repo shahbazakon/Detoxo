@@ -1,12 +1,17 @@
+import 'dart:typed_data';
+
 import 'package:detoxo/core/design_system/design_system.dart';
 import 'package:detoxo/core/di/injector.dart';
+import 'package:detoxo/core/widgets/app_picker_sheet.dart';
 import 'package:detoxo/core/widgets/common_widgets.dart';
+import 'package:detoxo/features/blocking/blocking.dart';
 import 'package:detoxo/features/blocking/blocklist/presentation/targets_cubit.dart';
 import 'package:detoxo/features/blocking/blocklist/presentation/widgets/block_app_tile.dart';
 import 'package:detoxo/features/blocking/shared/presentation/settings_cubit.dart';
 import 'package:detoxo/features/limits/app_blocker/domain/entities/app_block_entry.dart';
 import 'package:detoxo/features/limits/app_blocker/domain/repositories/app_block_repository.dart';
 import 'package:detoxo/features/limits/app_blocker/presentation/app_block_cubit.dart';
+import 'package:detoxo/features/protected_apps/protected_apps.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
@@ -37,6 +42,22 @@ class _AppBlockView extends StatefulWidget {
 
 class _AppBlockViewState extends State<_AppBlockView> {
   String _query = '';
+
+  /// Device icons by package, from the engine's cached scan — also pre-warms
+  /// the cache so the add-picker opens instantly. Null until loaded; rows fall
+  /// back to letter tiles.
+  Map<String, Uint8List>? _appIcons;
+
+  @override
+  void initState() {
+    super.initState();
+    sl<EngineRepository>().installedApps().then((apps) {
+      if (!mounted || apps == null) return;
+      setState(() {
+        _appIcons = {for (final a in apps) a.packageName: ?a.icon};
+      });
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -74,8 +95,12 @@ class _AppBlockViewState extends State<_AppBlockView> {
                 96 + MediaQuery.viewPaddingOf(context).bottom,
               ),
               children: [
-                ..._customSection(context, custom),
-                const SizedBox(height: AppSpacing.lg),
+                // No section at all until the first custom app: the FAB is the
+                // entry point, and an empty hint would just push the catalog down.
+                if (custom.isNotEmpty) ...[
+                  ..._customSection(context, custom),
+                  const SizedBox(height: AppSpacing.lg),
+                ],
                 ..._curatedSection(context, targets, enabledIds),
               ],
             );
@@ -92,34 +117,33 @@ class _AppBlockViewState extends State<_AppBlockView> {
   ) {
     return [
       const SectionHeader('Custom apps'),
-      if (custom.isEmpty)
-        const InlineHint(
-          icon: Icons.add_circle_outline,
-          text: 'No custom apps yet.',
-        )
-      else
-        for (var i = 0; i < custom.length; i++)
-          Padding(
-            padding: const EdgeInsets.only(bottom: AppSpacing.sm),
-            child: AppCard(
-              title: custom[i].appName,
-              subtitle: custom[i].packageName,
-              trailing: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  AppToggle(
-                    value: custom[i].enabled,
-                    onChanged: (v) =>
-                        context.read<AppBlockCubit>().toggle(i, enabled: v),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.delete_outline),
-                    onPressed: () => context.read<AppBlockCubit>().removeAt(i),
-                  ),
-                ],
-              ),
+      for (var i = 0; i < custom.length; i++)
+        Padding(
+          padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+          child: AppCard(
+            leading: AppIconAvatar(
+              iconUrl: '',
+              iconBytes: _appIcons?[custom[i].packageName],
+              appName: custom[i].appName,
+            ),
+            title: custom[i].appName,
+            subtitle: custom[i].packageName,
+            trailing: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                AppToggle(
+                  value: custom[i].enabled,
+                  onChanged: (v) =>
+                      context.read<AppBlockCubit>().toggle(i, enabled: v),
+                ),
+                IconButton(
+                  icon: const Icon(Icons.delete_outline),
+                  onPressed: () => context.read<AppBlockCubit>().removeAt(i),
+                ),
+              ],
             ),
           ),
+        ),
     ];
   }
 
@@ -207,42 +231,58 @@ class _AppBlockViewState extends State<_AppBlockView> {
 
   Future<void> _showAdd(BuildContext context) async {
     final cubit = context.read<AppBlockCubit>();
-    final pkgController = TextEditingController();
-    final nameController = TextEditingController();
-    await AppDialog.show<void>(
-      context: context,
+    // Protected apps can't be blocked (an app has one role; protection wins
+    // natively anyway) — surface that in the picker instead of failing silently.
+    final protected = await sl<ProtectedAppsRepository>().load();
+    if (!context.mounted) return;
+    final picked = await showAppPickerSheet(
+      context,
       title: 'Block an app',
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          TextField(
-            controller: nameController,
-            decoration: const InputDecoration(labelText: 'App name'),
-          ),
-          const SizedBox(height: AppSpacing.sm),
-          TextField(
-            controller: pkgController,
-            decoration: const InputDecoration(
-              labelText: 'Package (com.example.app)',
-            ),
-          ),
-        ],
-      ),
-      actions: [
-        GhostButton(
-          label: 'Cancel',
-          onPressed: () => Navigator.of(context).pop(),
-        ),
-        PrimaryButton(
-          label: 'Add',
-          onPressed: () {
-            cubit.add(pkgController.text, nameController.text);
-            Navigator.of(context).pop();
-          },
-        ),
-      ],
+      confirmLabel: 'Block',
+      loadApps: sl<EngineRepository>().installedApps,
+      refreshApps: () => sl<EngineRepository>().installedApps(refresh: true),
+      unavailable: {
+        for (final e in cubit.state) e.packageName: 'Added',
+        for (final a in ProtectedAppCatalog.apps)
+          a.packageName: 'Auto-protected',
+        for (final a in protected) a.packageName: 'Protected',
+      },
     );
-    pkgController.dispose();
-    nameController.dispose();
+    if (picked == null || picked.isEmpty) return;
+    final results = <AppBlockAddResult>[
+      for (final app in picked) await cubit.add(app.packageName, app.appName),
+    ];
+    if (!context.mounted) return;
+    _showAddOutcome(context, picked, results);
+  }
+
+  /// The toast tells the truth: "Added" only counts adds that landed, and a
+  /// batch where nothing landed says why instead of celebrating a no-op.
+  /// ("Added", not "Blocked": custom locks record intent — enforcement is the
+  /// documented follow-up.)
+  void _showAddOutcome(
+    BuildContext context,
+    List<InstalledApp> picked,
+    List<AppBlockAddResult> results,
+  ) {
+    final added = results.where((r) => r == AppBlockAddResult.added).length;
+    if (added > 0) {
+      GlassToast.show(
+        context,
+        added == picked.length
+            ? (added == 1
+                  ? 'Added ${picked.first.appName}'
+                  : 'Added $added apps')
+            : 'Added $added of ${picked.length} apps',
+        tone: AppTone.success,
+      );
+      return;
+    }
+    final message = switch (results.first) {
+      AppBlockAddResult.sensitive => 'Sensitive app — Detoxo never blocks it.',
+      AppBlockAddResult.duplicate => 'Already in your list.',
+      _ => 'That doesn’t look like a package id.',
+    };
+    GlassToast.show(context, message, tone: AppTone.warning);
   }
 }

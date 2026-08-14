@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 
+import 'package:detoxo/core/design_system/foundations/animated_icons.dart';
 import 'package:detoxo/core/design_system/foundations/glass_container.dart';
 import 'package:detoxo/core/design_system/theme/app_theme.dart';
 import 'package:detoxo/core/design_system/tokens/app_blur.dart';
@@ -261,6 +262,73 @@ class ProgressBar extends StatelessWidget {
             ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// A friendly empty / placeholder state. Pass [animatedIcon] for a morphing
+/// glyph — [loopAnimation] runs it continuously (ambient), otherwise it plays
+/// once on appear.
+class EmptyState extends StatelessWidget {
+  const EmptyState({
+    required this.icon,
+    required this.title,
+    this.subtitle,
+    this.action,
+    this.animatedIcon,
+    this.loopAnimation = false,
+    super.key,
+  });
+
+  final IconData icon;
+  final String title;
+  final String? subtitle;
+  final Widget? action;
+  final AppIcon? animatedIcon;
+  final bool loopAnimation;
+
+  @override
+  Widget build(BuildContext context) {
+    final outline = Theme.of(context).colorScheme.outline;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(AppSpacing.xl),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (animatedIcon != null)
+              AppAnimatedIcon(
+                icon: animatedIcon!,
+                size: 44,
+                color: outline,
+                loop: loopAnimation,
+                playOnAppear: !loopAnimation,
+              )
+            else
+              Icon(icon, size: 44, color: outline),
+            const SizedBox(height: AppSpacing.sm),
+            Text(
+              title,
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.titleMedium,
+            ),
+            if (subtitle != null) ...[
+              const SizedBox(height: AppSpacing.xs),
+              Text(
+                subtitle!,
+                textAlign: TextAlign.center,
+                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  color: Theme.of(context).colorScheme.outline,
+                ),
+              ),
+            ],
+            if (action != null) ...[
+              const SizedBox(height: AppSpacing.lg),
+              action!,
+            ],
+          ],
+        ),
       ),
     );
   }

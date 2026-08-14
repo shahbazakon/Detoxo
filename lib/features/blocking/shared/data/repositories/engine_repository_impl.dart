@@ -150,4 +150,30 @@ class EngineRepositoryImpl implements EngineRepository {
 
   @override
   Future<Set<String>?> installedPackages() => _channel.installedPackages();
+
+  // lazySingleton => process-lifetime cache; the picker never rescans unless
+  // asked. Never caches a null (transient) failure — stale beats nothing.
+  // Concurrent misses share one in-flight scan (the native walk is seconds,
+  // not millis, on busy devices — a double-open must not run it twice).
+  List<InstalledApp>? _installedApps;
+  Future<List<InstalledApp>?>? _installedAppsInFlight;
+
+  @override
+  Future<List<InstalledApp>?> installedApps({bool refresh = false}) {
+    if (!refresh && _installedApps != null) {
+      return Future.value(_installedApps);
+    }
+    return _installedAppsInFlight ??= () async {
+      try {
+        final apps = await _channel.installedApps();
+        if (apps == null) return _installedApps;
+        apps.sort(
+          (a, b) => a.appName.toLowerCase().compareTo(b.appName.toLowerCase()),
+        );
+        return _installedApps = apps;
+      } finally {
+        _installedAppsInFlight = null;
+      }
+    }();
+  }
 }

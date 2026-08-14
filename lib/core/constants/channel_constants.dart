@@ -66,6 +66,10 @@ abstract final class ChannelMethods {
   // Installed user-launchable apps (drives the install-aware blocklist).
   static const String installedPackages = 'installedPackages';
 
+  /// Installed launchable apps with label + 96px PNG icon bytes (drives the
+  /// add-app picker). Returns `List<{package, label, icon: Uint8List?}>`.
+  static const String installedApps = 'installedApps';
+
   // Conscious (earn-as-you-abstain) bank snapshot.
   static const String consciousState = 'consciousState';
 

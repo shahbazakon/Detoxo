@@ -87,7 +87,7 @@ Note the service is **never** started manually. An enabled AccessibilityService 
 
 ## 3. CommandHandler (Dart → native)
 
-`channels/CommandHandler.kt` implements `MethodChannel.MethodCallHandler`. It is the single entry point for every Dart-initiated command. It holds a `ConfigStore` and an optional `Activity` (for launching Settings screens), plus a single-thread `ioExecutor` for the one potentially-slow call (`installedPackages`).
+`channels/CommandHandler.kt` implements `MethodChannel.MethodCallHandler`. It is the single entry point for every Dart-initiated command. It holds a `ConfigStore` and an optional `Activity` (for launching Settings screens), plus a single-thread `ioExecutor` for the potentially-slow calls (`installedPackages`, `installedApps`).
 
 Broadly the methods fall into four groups. (Argument/return shapes are in [18-platform-channel-contracts.md](18-platform-channel-contracts.md).)
 
@@ -129,6 +129,8 @@ Broadly the methods fall into four groups. (Argument/return shapes are in [18-pl
 
 **Device / package info**:
 `deviceInfo` (brand/manufacturer/model/sdkInt); `installedPackages` runs `queryLaunchablePackages()` on the `ioExecutor` and posts the result back on the platform thread (Flutter requires the reply on the main thread). It enumerates `MAIN`/`LAUNCHER` activities and de-dups by package, returning **`null` (not empty)** on failure so Dart treats install-state as "unknown" and keeps showing the full blocklist rather than hiding every app.
+
+`installedApps` is the picker-grade sibling (drives the add-app picker in App Blocker and Protected apps): the same `resolveLaunchables()` walk (shared helper), plus per-app `loadLabel` and `rasterizeIcon(loadIcon())` — any `Drawable` (adaptive/vector/bitmap) drawn straight into a 96×96 `ARGB_8888` bitmap and PNG-compressed, so drawing at target bounds *is* the downscale. Detoxo's own package is skipped, each icon load has its own try/catch (`icon: null` on failure, never a dead list), and the whole command runs on the same `ioExecutor`. Same `null`-on-total-failure contract as `installedPackages`.
 
 The Conscious plan token is `PLAN_CONSCIOUS = "CURIOUS"` — the internal/wire value is `CURIOUS`; its user-facing label is **"Conscious"**. Do not rename the token. The One Reel / Unblock token is `PLAN_ONE_REEL = "ONE_REEL"`.
 

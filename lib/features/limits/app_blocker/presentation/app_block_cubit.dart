@@ -1,5 +1,7 @@
+import 'package:detoxo/core/utils/package_name.dart';
 import 'package:detoxo/features/limits/app_blocker/domain/entities/app_block_entry.dart';
 import 'package:detoxo/features/limits/app_blocker/domain/repositories/app_block_repository.dart';
+import 'package:detoxo/features/protected_apps/protected_apps.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
 /// Manages the full-app blocklist (CRUD + persistence).
@@ -10,9 +12,20 @@ class AppBlockCubit extends Cubit<List<AppBlockEntry>> {
 
   Future<void> load() async => emit(await _repo.load());
 
-  Future<void> add(String packageName, String appName) async {
+  /// Adds a whole-app lock, or says why it can't — the caller's toast must
+  /// tell the truth, so a refusal is never silent.
+  Future<AppBlockAddResult> add(String packageName, String appName) async {
     final pkg = packageName.trim();
-    if (pkg.isEmpty || state.any((e) => e.packageName == pkg)) return;
+    if (!isValidPackageName(pkg)) return AppBlockAddResult.invalid;
+    // Sensitive catalog apps may never be blocked, whatever the entry path.
+    // (User-protected apps are only screened in the UI: this cubit has no
+    // ProtectedAppsRepository, and the engine lets protection win regardless.)
+    if (ProtectedAppCatalog.byPackage(pkg) != null) {
+      return AppBlockAddResult.sensitive;
+    }
+    if (state.any((e) => e.packageName == pkg)) {
+      return AppBlockAddResult.duplicate;
+    }
     final next = [
       ...state,
       AppBlockEntry(
@@ -21,6 +34,7 @@ class AppBlockCubit extends Cubit<List<AppBlockEntry>> {
       ),
     ];
     await _commit(next);
+    return AppBlockAddResult.added;
   }
 
   Future<void> toggle(int index, {required bool enabled}) async {

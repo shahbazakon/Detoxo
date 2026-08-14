@@ -197,6 +197,7 @@ setting the plan to `CURIOUS`.
 | `contentCounterSnapshot` | — | `{enabled: Bool, bubbleEnabled: Bool, today: Int, total: Int, date: String, perAppToday: Map<String,Int>, perAppTotal: Map<String,Int>, timeTodayMs: Long, timeTotalMs: Long, bubbleStyle: String, widgetStyle: String}` | `contentCounterSnapshot() → Map` |
 | `deviceInfo` | — | `{brand, manufacturer, model, sdkInt}` | *(no Dart wrapper)* |
 | `installedPackages` | — | `List<String>` of launchable packages, or `null` on failure | `installedPackages() → Set<String>?` |
+| `installedApps` | — | `List<{package: String, label: String, icon: ByteArray?}>` (icon = 96px PNG), or `null` on failure | `installedApps() → List<InstalledApp>?` |
 
 Notes:
 - **`consciousState`** prefers the live service snapshot; if the service is dead it
@@ -210,6 +211,13 @@ Notes:
   can take 100s of ms) and posts back on it. It returns **`null`** (not empty) on
   failure so Dart treats install state as "unknown" and shows the full blocklist
   rather than hiding every app.
+- **`installedApps`** is the picker-grade variant: the same MAIN/LAUNCHER walk
+  plus per-app `loadLabel` and a 96px PNG rasterization of `loadIcon` (adaptive /
+  vector / bitmap all drawn at target bounds). Also off-thread; Detoxo's own
+  package is excluded; a single bad icon degrades to `icon: null` (per-app
+  try/catch) instead of failing the list. Dart caches the result process-wide
+  in `EngineRepositoryImpl` — the payload (~1–3 MB with icons) crosses the
+  channel once per launch, not per picker open.
 
 ### Content-counter controls
 

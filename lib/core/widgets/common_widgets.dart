@@ -1,6 +1,9 @@
 import 'package:detoxo/core/design_system/design_system.dart';
 import 'package:flutter/material.dart';
 
+export 'package:detoxo/core/design_system/components/feedback.dart'
+    show EmptyState;
+
 /// Shared composites kept at their original names/APIs so the ~13 screens that
 /// already use them keep compiling — now reskinned over the glass design system.
 /// New screens should prefer the design-system components directly
@@ -118,72 +121,8 @@ class StatTile extends StatelessWidget {
   }
 }
 
-/// A friendly empty / placeholder state. Pass [animatedIcon] for a morphing
-/// glyph — [loopAnimation] runs it continuously (ambient), otherwise it plays
-/// once on appear.
-class EmptyState extends StatelessWidget {
-  const EmptyState({
-    required this.icon,
-    required this.title,
-    this.subtitle,
-    this.action,
-    this.animatedIcon,
-    this.loopAnimation = false,
-    super.key,
-  });
-
-  final IconData icon;
-  final String title;
-  final String? subtitle;
-  final Widget? action;
-  final AppIcon? animatedIcon;
-  final bool loopAnimation;
-
-  @override
-  Widget build(BuildContext context) {
-    final outline = Theme.of(context).colorScheme.outline;
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(AppSpacing.xl),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (animatedIcon != null)
-              AppAnimatedIcon(
-                icon: animatedIcon!,
-                size: 44,
-                color: outline,
-                loop: loopAnimation,
-                playOnAppear: !loopAnimation,
-              )
-            else
-              Icon(icon, size: 44, color: outline),
-            const SizedBox(height: AppSpacing.sm),
-            Text(
-              title,
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-            if (subtitle != null) ...[
-              const SizedBox(height: AppSpacing.xs),
-              Text(
-                subtitle!,
-                textAlign: TextAlign.center,
-                style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                  color: Theme.of(context).colorScheme.outline,
-                ),
-              ),
-            ],
-            if (action != null) ...[
-              const SizedBox(height: AppSpacing.lg),
-              action!,
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-}
+// EmptyState now lives in the design system (components/feedback.dart) and is
+// re-exported below so existing `common_widgets.dart` importers keep compiling.
 
 /// A labelled navigation tile for the "more features" list. Pass [animatedIcon]
 /// for a morphing badge glyph that plays on appear and replays on every tap;

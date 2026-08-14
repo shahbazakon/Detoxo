@@ -230,8 +230,15 @@ needed.
 
 ### Your own apps
 
-Below the catalog you can add any app by name and package (for example
-`com.example.app`) with the **Add app** button, then toggle or delete it.
+Below the catalog you can add any app with the **Add app** button: it opens a
+picker showing every app on your phone — icon, name and all — so you just
+search, tap one or several, and confirm. Apps you've already added are marked
+and can't be picked twice. Can't find one (some work-profile apps hide from the
+list)? Use **"Can't find it? Add manually"** to enter its name and package id
+(for example `com.example.app`) — Detoxo checks the id's shape and tells you if
+it can't be right, and just installed the app? Tap the **refresh** button next
+to the search box. Your added apps show their real icons and can be toggled or
+deleted any time; this section only appears once you've added something.
 
 > **Good to know:** adding your *own* custom app records your intent, but
 > full whole-app locking for arbitrary apps is a planned follow-up in this build.
@@ -567,14 +574,25 @@ off or removed, and one you install *later* is covered the moment it lands on
 your phone. The screen lists them under **Auto-protected** so you can see
 exactly what's covered.
 
-**Adding your own.** Tap **Add app** and enter the app's name and package id
-(it's in the app's Play Store URL). Your additions appear under **Your apps**,
-and those you can delete any time.
+**Adding your own.** Tap **Add app** and pick straight from a list of the apps
+on your phone — search by name, select one or several, done. Apps that are
+already covered show a small label ("Auto-protected" or "Protected") so you
+can't add them twice, and apps you've blocked show "Blocked" — an app can be
+protected *or* blocked, never both; remove it from one list to add it to the
+other. (The same rule appears in **Block apps**: protected apps — including
+the always-on sensitive ones — can't be blocked.) If an app doesn't appear in
+the list (some work-profile apps hide themselves), **"Can't find it? Add
+manually"** lets you enter its name and package id (it's in the app's Play
+Store URL) — Detoxo checks the id's shape and tells you if it can't be right,
+so a typo never leaves a bank looking protected when it isn't. Just installed
+the app? Tap the **refresh** button next to the search box. Your additions
+appear under **Your apps** with their real icons, and those you can delete any
+time.
 
 **One honest guard-rail:** protection beats blocking — so protecting, say,
-Instagram would quietly switch its blocking off. If you try to protect an app
-Detoxo can block, Detoxo asks for your Settings PIN first (when you have one),
-exactly like turning blocking off.
+Instagram would quietly switch its blocking off. If any app you're protecting
+is one Detoxo can block, Detoxo asks for your Settings PIN once for the whole
+batch (when you have one), exactly like turning blocking off.
 
 Your protected list never leaves your phone, and Detoxo's diagnostics never
 mention these apps — not even that you opened one.

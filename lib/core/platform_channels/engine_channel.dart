@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:detoxo/core/constants/channel_constants.dart';
 import 'package:detoxo/core/platform/platform_capabilities.dart';
+import 'package:detoxo/core/platform_channels/installed_app.dart';
 import 'package:detoxo/core/utils/app_logger.dart';
 import 'package:flutter/services.dart';
 
@@ -182,5 +183,26 @@ class EngineChannel {
   Future<Set<String>?> installedPackages() async {
     final res = await _invoke<List<dynamic>>(ChannelMethods.installedPackages);
     return res?.cast<String>().toSet();
+  }
+
+  /// The device's user-launchable apps with label and icon, or `null` when the
+  /// native engine is unavailable (iOS / tests / channel error).
+  ///
+  /// Mapping happens inside the same null-on-error contract as [_invoke]: a
+  /// drifted native payload (wrong-typed element) must degrade to "unknown",
+  /// not leave callers waiting on a thrown future. Rows without a package name
+  /// are dropped — they could never match an event package.
+  Future<List<InstalledApp>?> installedApps() async {
+    final res = await _invoke<List<dynamic>>(ChannelMethods.installedApps);
+    if (res == null) return null;
+    try {
+      return res
+          .map((e) => InstalledApp.fromChannel(e as Map))
+          .where((a) => a.packageName.isNotEmpty)
+          .toList();
+    } on Object catch (e) {
+      AppLogger.e('channel ${ChannelMethods.installedApps} bad payload', e);
+      return null;
+    }
   }
 }

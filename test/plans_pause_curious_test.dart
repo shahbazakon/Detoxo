@@ -401,6 +401,10 @@ class _FakeEngineRepo implements EngineRepository {
   final List<AppSettings> pushed = [];
 
   @override
+  Future<List<InstalledApp>?> installedApps({bool refresh = false}) async =>
+      null;
+
+  @override
   Future<void> pushSettings(AppSettings settings) async => pushed.add(settings);
 
   @override

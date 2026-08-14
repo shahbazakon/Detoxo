@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:detoxo/core/design_system/components/cards.dart';
 import 'package:detoxo/core/design_system/tokens/app_spacing.dart';
@@ -9,9 +11,10 @@ const String _iconPackDir = 'assets/images/social_icon_pack/';
 /// A rounded app/platform icon.
 ///
 /// Resolution order:
-/// 1. empty `iconUrl` → letter-tile fallback;
-/// 2. `http…` → remote icon via [CachedNetworkImage] (remote config);
-/// 3. bundled asset path (`assets/…`) → [Image.asset].
+/// 1. [iconBytes] → in-memory icon (device apps, from the native engine);
+/// 2. empty `iconUrl` → letter-tile fallback;
+/// 3. `http…` → remote icon via [CachedNetworkImage] (remote config);
+/// 4. bundled asset path (`assets/…`) → [Image.asset].
 ///
 /// When no icon is available it shows the grey letter tile for the app's initial
 /// (`a.png`…`z.png`), and finally [ultimateFallback] (a neutral badge) for names
@@ -20,6 +23,7 @@ class AppIconAvatar extends StatelessWidget {
   const AppIconAvatar({
     required this.iconUrl,
     required this.appName,
+    this.iconBytes,
     this.size = 34,
     this.borderRadius,
     this.dimmed = false,
@@ -29,6 +33,9 @@ class AppIconAvatar extends StatelessWidget {
 
   final String iconUrl;
   final String appName;
+
+  /// Raw PNG bytes from the device (takes precedence over [iconUrl]).
+  final Uint8List? iconBytes;
   final double size;
   final BorderRadius? borderRadius;
 
@@ -48,6 +55,21 @@ class AppIconAvatar extends StatelessWidget {
   }
 
   Widget _icon(BorderRadius radius, Widget fallback) {
+    final bytes = iconBytes;
+    if (bytes != null && bytes.isNotEmpty) {
+      return ClipRRect(
+        borderRadius: radius,
+        child: Image.memory(
+          bytes,
+          width: size,
+          height: size,
+          fit: BoxFit.cover,
+          gaplessPlayback: true,
+          errorBuilder: (_, _, _) => fallback,
+        ),
+      );
+    }
+
     if (iconUrl.isEmpty) return fallback;
 
     if (iconUrl.startsWith('http')) {

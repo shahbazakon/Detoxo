@@ -79,8 +79,31 @@ channel.
 is a *management* surface unifying two systems that **enforce differently**:
 
 1. **Custom apps** — the whole-app locks above (`AppBlockCubit`). An "Add app"
-   FAB opens a dialog taking an app name + package (`com.example.app`); each row
-   has an enable toggle and a delete button.
+   FAB opens the shared installed-app picker (`core/widgets/app_picker_sheet.dart`
+   → `showAppPickerSheet`): a searchable, multi-select bottom sheet of the
+   device's launchable apps (icon + name + package, from
+   `EngineRepository.installedApps()` — cached process-wide). Apps already in the
+   custom list show an "Added" pill and can't be re-picked, and **protected
+   apps can't be blocked** (one role per app): catalog packages show an
+   "Auto-protected" pill, user-protected packages (loaded from
+   `ProtectedAppsRepository` before the sheet opens) a "Protected" pill. A
+   manual name + package form remains as the fallback for apps the system hides
+   (work profiles, engine unavailable) — it enforces the same `unavailable` map
+   (inline hint + disabled confirm), keeps any list selections when confirming,
+   and configures the package field like the web-blocker host field
+   (`autocorrect: false`, URL keyboard). A refresh button beside the search
+   field rescans (`installedApps(refresh: true)`) for mid-session installs.
+   Each selection routes through `cubit.add`, which returns an
+   `AppBlockAddResult` (`added | invalid | sensitive | duplicate`, EVO-006):
+   garbage package ids never persist (`isValidPackageName`,
+   `lib/core/utils/package_name.dart`), and sensitive catalog packages
+   (`ProtectedAppCatalog.byPackage`) are refused regardless of entry path. The
+   toast tells the truth — **"Added X"** (not "Blocked": custom locks record
+   intent, enforcement is the follow-up below) counts only landed adds, and an
+   all-refused batch shows the refusal reason as a warning instead. Each saved
+   row shows the app's real device icon (from the cached scan; letter-tile
+   fallback), an enable toggle and a delete button; when the custom list is
+   empty the section is hidden entirely (the FAB is the entry point).
 2. **Apps & feeds** — the curated, install-aware catalog of built-in feed
    surfaces. This section is driven by the *blocking* feature's global
    `TargetsCubit` (install-aware target list) and `SettingsCubit`
@@ -409,6 +432,9 @@ subset of that work.
 - `lib/features/limits/app_blocker/data/repositories/app_block_repository_impl.dart`
 - `lib/features/limits/app_blocker/presentation/app_block_cubit.dart`
 - `lib/features/limits/app_blocker/presentation/app_block_screen.dart`
+- `lib/core/widgets/app_picker_sheet.dart` (shared installed-app picker)
+- `lib/core/platform_channels/installed_app.dart`
+- `lib/core/utils/package_name.dart` (package-id validation)
 - `lib/features/limits/web_blocker/domain/entities/web_block_entry.dart`
 - `lib/features/limits/web_blocker/domain/entities/web_block_source.dart`
 - `lib/features/limits/web_blocker/domain/entities/web_block_stats.dart`

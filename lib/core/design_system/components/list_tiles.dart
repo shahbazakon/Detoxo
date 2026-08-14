@@ -70,6 +70,8 @@ class GlassListTile extends StatelessWidget {
     if (onTap == null) return row;
     return AppPressable(
       onTap: onTap!,
+      // Forward to Semantics so screen readers announce the picked state.
+      selected: selected,
       minTapTarget: const Size(0, AppSizes.minTapTarget),
       child: row,
     );
