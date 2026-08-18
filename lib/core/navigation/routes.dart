@@ -11,6 +11,7 @@ abstract final class Routes {
   static const String pinLock = '/pin/lock';
   static const String settings = '/settings';
   static const String webBlock = '/web-block';
+  static const String webProtection = '/web-block/protection';
   static const String appBlock = '/app-block';
   static const String protectedApps = '/protected-apps';
   static const String dailyLimit = '/daily-limit';

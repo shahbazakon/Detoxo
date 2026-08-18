@@ -260,7 +260,9 @@ This works by reading the address bar in your browser, so it needs the same
 **Focus saved (min)**, and your **most-blocked** site — once you've blocked
 something.
 
-**Protection toggles:**
+**Protection** — the first pill in the Popular sites rows (tinted, with a
+shield and arrow) opens its own screen with two switches that each block a
+whole category at once; the pill shows how many are on:
 
 - **Block websites of blocked apps** — automatically blocks the websites that match
   the apps you've already blocked (e.g. blocking the Instagram app also blocks

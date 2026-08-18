@@ -169,6 +169,10 @@ Device Admin is an opt-in feature that stops Detoxo from being uninstalled on im
 
 Detoxo targets the short-video feeds inside popular apps (think Reels, Shorts, and similar infinite-scroll video), plus it can bounce you off blocked websites — including an optional built-in adult-site list — when you browse. It focuses on the *feed*, so the rest of an app (messages, search, posting) keeps working normally.
 
+## Where are the "block adult content" and "block websites of blocked apps" switches?
+
+On the **Website blocker** screen, tap the tinted **Protection** pill at the start of the Popular sites row — it opens a small screen with both switches, and shows how many are on.
+
 ## How do I get help, report a bug, or suggest a feature?
 
 Open the menu (top-right) and tap **Help & support**. You'll find: **Report an issue** (explains and turns on the feedback button, or lets you file a bug with a screenshot right away), a searchable **FAQ**, **Feature tutorials** (replay the dashboard walkthrough or a quick tour of the feedback button), and **Share an idea** (a simple box that opens your email pre-filled to us) — all routing to **errorxperts@gmail.com**. Under **Legal**, you can also open the **Privacy Policy** and **Terms & Conditions** right inside the app.

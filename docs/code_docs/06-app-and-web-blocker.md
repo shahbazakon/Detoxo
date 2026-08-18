@@ -312,14 +312,18 @@ Latent since inception, first triggered 2026-08-17 by the first on-device
 - **Stats dashboard** (`_StatsSection`) — three `StatCard`s (Blocked today,
   Total blocked, Focus saved [min]) plus a "Most blocked" line; only shown
   when `state.hasStats`.
-- **Protection** — two `AppToggleTile`s: "Block websites of blocked apps"
-  (`setBlockForApps`) and "Block adult content (18+)" (`setBlockAdult`).
 - **Popular sites** — `AppChip`s from `PopularSites.all` split across two rows
   inside one horizontal `SingleChildScrollView` (both rows scroll together);
-  selected state driven by `state.activePopularIds`. A trailing "Add website"
-  chip closes the second row and opens the same add sheet as the FAB. Tapping a
-  chip whose domain already exists as a *custom* entry upgrades that entry to
-  the popular one in place (never deletes the user's entry).
+  selected state driven by `state.activePopularIds`. A **Protection pill**
+  (`_ProtectionChip`) leads the first row and a trailing "Add website" chip
+  closes the second (each row carries one extra chip, so the site split is an
+  even half). The pill is deliberately not an `AppChip`: always seed-tinted
+  with a trailing chevron so it reads as "opens a screen", not "toggles a
+  site"; it shows how many batch protections are on ("Protection · N"),
+  pushes `Routes.webProtection`, and re-`load()`s the cubit on return so the
+  count is fresh. The "Add website" chip opens the same add sheet as the FAB.
+  Tapping a chip whose domain already exists as a *custom* entry upgrades that
+  entry to the popular one in place (never deletes the user's entry).
 - **Your blocklist** — searchable rows (search appears past 8 entries, matching
   the sibling screens, and stays visible while a query is active so the filter
   can always be cleared; the section header shows the entry count). Each row
@@ -341,7 +345,18 @@ Latent since inception, first triggered 2026-08-17 by the first on-device
 
 On-screen explanatory copy is kept to a minimum: the app-bar `InfoButton`
 (tap-to-open `Tooltip`) carries the feature explanation instead of an intro
-paragraph and per-toggle subtitles.
+paragraph.
+
+### Protection screen
+
+`web_blocker/presentation/web_protection_screen.dart` — titled
+**"Protection"**, route `Routes.webProtection` (`/web-block/protection`). The
+two batch toggles, split out of the main screen to keep it clean: "Block
+websites of blocked apps" (`setBlockForApps`) and "Block adult content (18+)"
+(`setBlockAdult`), each an `AppToggleTile` with a subtitle and `selected`
+highlight, under a one-line intro. It creates its **own `WebBlockCubit`**
+(same DI as the main screen) — safe because the toggles live in settings and
+both screens re-load on entry, so two instances never drift.
 
 ---
 
@@ -536,6 +551,7 @@ subset of that work.
 - `lib/features/limits/web_blocker/presentation/web_block_cubit.dart`
 - `lib/features/limits/web_blocker/presentation/web_block_state.dart`
 - `lib/features/limits/web_blocker/presentation/web_block_screen.dart`
+- `lib/features/limits/web_blocker/presentation/web_protection_screen.dart`
 - `lib/features/blocking/shared/domain/entities/enums.dart` (`WebMatchType`, `AppLockAction`, `BlockingMode`)
 - `lib/core/constants/channel_constants.dart` (`pushWebBlocklist`, `webBlocked`)
 - `lib/core/platform_channels/engine_channel.dart` (`pushWebBlocklist`)

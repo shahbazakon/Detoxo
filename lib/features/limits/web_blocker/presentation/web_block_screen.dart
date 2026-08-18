@@ -1,5 +1,6 @@
 import 'package:detoxo/core/design_system/design_system.dart';
 import 'package:detoxo/core/di/injector.dart';
+import 'package:detoxo/core/navigation/routes.dart';
 import 'package:detoxo/core/widgets/common_widgets.dart';
 import 'package:detoxo/features/blocking/shared/domain/repositories/blocking_repositories.dart';
 import 'package:detoxo/features/limits/app_blocker/domain/repositories/app_block_repository.dart';
@@ -15,11 +16,12 @@ import 'package:detoxo/features/limits/web_blocker/presentation/web_block_state.
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_slidable/flutter_slidable.dart';
+import 'package:go_router/go_router.dart';
 
-/// Manage website blocking: two protection toggles (block the web versions of
-/// blocked apps, block adult sites), one-tap popular-site chips, a searchable
-/// custom blocklist, and a stats dashboard. Enforcement runs natively by
-/// reading the browser address bar and pressing back on a blocked domain.
+/// Manage website blocking: one-tap popular-site chips (led by a Protection
+/// pill that opens the batch-protection screen), a searchable custom
+/// blocklist, and a stats dashboard. Enforcement runs natively by reading the
+/// browser address bar and pressing back on a blocked domain.
 class WebBlockScreen extends StatelessWidget {
   const WebBlockScreen({super.key});
 
@@ -49,8 +51,8 @@ class _WebBlockView extends StatelessWidget {
         actions: [
           InfoButton(
             'Blocks distracting sites in any browser — Detoxo reads the '
-            'address bar and closes the tab. Turn on a category, tap a '
-            'popular site, or add your own.',
+            'address bar and closes the tab. Tap a popular site, add your '
+            'own, or open Protection to block whole categories.',
           ),
         ],
       ),
@@ -91,8 +93,6 @@ class _WebBlockView extends StatelessWidget {
                   inset(_StatsSection(stats: state.stats)),
                   const SizedBox(height: AppSpacing.xs),
                 ],
-                inset(const SectionHeader('Protection')),
-                inset(_ProtectionTiles(state: state)),
                 inset(const SectionHeader('Popular sites')),
                 _PopularChips(state: state),
                 inset(
@@ -212,40 +212,62 @@ class _StatsSection extends StatelessWidget {
   }
 }
 
-// ── The two protection toggle tiles ─────────────────────────────────────────
-class _ProtectionTiles extends StatelessWidget {
-  const _ProtectionTiles({required this.state});
+// ── Protection pill: batch protections live on their own screen ─────────────
+/// Leads the popular-sites row but is deliberately not an [AppChip]: it is
+/// always seed-tinted with a trailing chevron so it reads as "opens a screen",
+/// not "toggles a site". Shows how many batch protections are on.
+class _ProtectionChip extends StatelessWidget {
+  const _ProtectionChip({required this.activeCount});
 
-  final WebBlockState state;
+  final int activeCount;
 
   @override
   Widget build(BuildContext context) {
-    final cubit = context.read<WebBlockCubit>();
-    return Column(
-      children: [
-        AppToggleTile(
-          title: 'Block websites of blocked apps',
-          leading: const IconBadge(
-            icon: Icons.apps_outlined,
-            color: AppColors.seed,
-            shape: BoxShape.rectangle,
+    const seed = AppColors.seed;
+    Future<void> open() async {
+      final cubit = context.read<WebBlockCubit>();
+      await context.push<void>(Routes.webProtection);
+      // The sub-screen edits the same persisted settings; re-load so this
+      // pill's count is fresh when the user comes back.
+      await cubit.load();
+    }
+
+    return Semantics(
+      label: 'Protection, $activeCount of 2 on, opens screen',
+      button: true,
+      excludeSemantics: true,
+      child: AppPressable(
+        onTap: open,
+        pressedScale: 0.94,
+        minTapTarget: const Size(0, AppSizes.minTapTarget),
+        child: GlassContainer(
+          enableBlur: false,
+          padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.md,
+            vertical: AppSpacing.xs,
           ),
-          value: state.blockForApps,
-          onChanged: (v) => cubit.setBlockForApps(value: v),
-        ),
-        const SizedBox(height: AppSpacing.sm),
-        AppToggleTile(
-          title: 'Block adult content (18+)',
-          leading: const IconBadge(
-            icon: Icons.shield_outlined,
-            color: AppColors.danger,
-            shape: BoxShape.rectangle,
+          borderRadius: AppRadius.pill,
+          tintTop: seed.withValues(alpha: 0.30),
+          tintBottom: seed.withValues(alpha: 0.14),
+          borderColor: seed.withValues(alpha: 0.6),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              const Icon(Icons.shield_outlined, size: 16, color: seed),
+              const SizedBox(width: AppSpacing.xxs),
+              Text(
+                activeCount > 0 ? 'Protection · $activeCount' : 'Protection',
+                style: Theme.of(
+                  context,
+                ).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w700),
+              ),
+              const SizedBox(width: AppSpacing.xxs),
+              const Icon(Icons.chevron_right, size: 16),
+            ],
           ),
-          value: state.blockAdult,
-          onChanged: (v) => cubit.setBlockAdult(value: v),
         ),
-      ],
-    ).animate().fadeIn(duration: AppDurations.normal);
+      ),
+    );
   }
 }
 
@@ -260,9 +282,12 @@ class _PopularChips extends StatelessWidget {
     final cubit = context.read<WebBlockCubit>();
     final active = state.activePopularIds;
     final sites = state.popular;
-    // Two rows sharing one horizontal scroll; the "Add website" chip closes
-    // the second row so it sits at the end of the scroll.
-    final half = (sites.length + 1) ~/ 2;
+    // Two rows sharing one horizontal scroll; the Protection pill opens the
+    // first row and the "Add website" chip closes the second, so each row
+    // carries one extra chip and the split is an even half.
+    final half = sites.length ~/ 2;
+    final protectionCount =
+        (state.blockForApps ? 1 : 0) + (state.blockAdult ? 1 : 0);
     Widget chip(PopularSite site) => Padding(
       padding: const EdgeInsets.only(right: AppSpacing.xs),
       child: AppChip(
@@ -279,7 +304,15 @@ class _PopularChips extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Row(children: [for (final site in sites.take(half)) chip(site)]),
+          Row(
+            children: [
+              Padding(
+                padding: const EdgeInsets.only(right: AppSpacing.xs),
+                child: _ProtectionChip(activeCount: protectionCount),
+              ),
+              for (final site in sites.take(half)) chip(site),
+            ],
+          ),
           const SizedBox(height: AppSpacing.xs),
           Row(
             children: [

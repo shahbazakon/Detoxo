@@ -20,6 +20,7 @@ import 'package:detoxo/features/help/share_ideas/presentation/share_ideas_screen
 import 'package:detoxo/features/limits/app_blocker/presentation/app_block_screen.dart';
 import 'package:detoxo/features/limits/daily_limit/presentation/daily_limit_screen.dart';
 import 'package:detoxo/features/limits/web_blocker/presentation/web_block_screen.dart';
+import 'package:detoxo/features/limits/web_blocker/presentation/web_protection_screen.dart';
 import 'package:detoxo/features/onboarding/presentation/onboarding_screen.dart';
 import 'package:detoxo/features/permissions/presentation/permissions_cubit.dart';
 import 'package:detoxo/features/permissions/presentation/permissions_screen.dart';
@@ -69,6 +70,10 @@ GoRouter buildRouter() => GoRouter(
     ),
     GoRoute(path: Routes.settings, builder: (_, _) => const SettingsScreen()),
     GoRoute(path: Routes.webBlock, builder: (_, _) => const WebBlockScreen()),
+    GoRoute(
+      path: Routes.webProtection,
+      builder: (_, _) => const WebProtectionScreen(),
+    ),
     GoRoute(path: Routes.appBlock, builder: (_, _) => const AppBlockScreen()),
     GoRoute(
       path: Routes.protectedApps,
