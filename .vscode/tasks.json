@@ -1,0 +1,100 @@
+{
+  // Every task shells out to tool/qa.sh or tool/dev.sh — the same entry points
+  // CI and the /detoxo-auto-test skill use. Nothing here duplicates a command.
+  //
+  // Device tasks take no -d: qa.sh auto-resolves when exactly one phone is
+  // attached, and fails with the list when there is more than one. Set the
+  // QA_SERIAL env var (or use the "…(pick device)" variants) to pin one.
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "QA: functional (no device)",
+      "detail": "format + analyze + 188 unit/widget tests + boundary check",
+      "type": "shell",
+      "command": "bash tool/qa.sh functional",
+      "problemMatcher": ["$dart-analyze"],
+      "group": { "kind": "test", "isDefault": true },
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "Dev: precommit",
+      "detail": "the full gate — what QA: functional delegates to",
+      "type": "shell",
+      "command": "bash tool/dev.sh precommit",
+      "problemMatcher": ["$dart-analyze"],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "Dev: build_runner",
+      "detail": "regenerate freezed / json models",
+      "type": "shell",
+      "command": "dart run build_runner build --delete-conflicting-outputs",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+    {
+      "label": "QA: devices",
+      "detail": "list attached, authorised devices",
+      "type": "shell",
+      "command": "bash tool/qa.sh devices",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared" }
+    },
+    {
+      "label": "QA: prep device",
+      "detail": "grant accessibility + overlay. Required before any on-device run.",
+      "type": "shell",
+      "command": "bash tool/qa.sh prep",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated" }
+    },
+    {
+      "label": "QA: e2e walk + screenshots",
+      "detail": "boots the real app, walks every gate, writes build/qa/shots/",
+      "type": "shell",
+      "command": "bash tool/qa.sh e2e",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "QA: perf (gate vs baseline)",
+      "detail": "cold start + frame timeline + memory + apk size, diffed against baseline.json",
+      "type": "shell",
+      "command": "bash tool/qa.sh perf",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "QA: perf (adopt new baseline)",
+      "detail": "DESTRUCTIVE to comparisons — overwrites build/qa/baseline.json",
+      "type": "shell",
+      "command": "bash tool/qa.sh --baseline perf",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "QA: blocking smoke",
+      "detail": "engine bound-check, then watches logcat 60s while you scroll a reel",
+      "type": "shell",
+      "command": "bash tool/qa.sh blocking",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    },
+    {
+      "label": "QA: restore device",
+      "detail": "put accessibility + stay-awake back as they were. Run when you are done.",
+      "type": "shell",
+      "command": "bash tool/qa.sh restore",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "shared" }
+    },
+    {
+      "label": "QA: all (functional -> e2e -> perf)",
+      "detail": "the full suite. Order is load-bearing; expect one manual overlay grant.",
+      "type": "shell",
+      "command": "bash tool/qa.sh all",
+      "problemMatcher": [],
+      "presentation": { "reveal": "always", "panel": "dedicated", "clear": true }
+    }
+  ]
+}

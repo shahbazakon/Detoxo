@@ -322,13 +322,19 @@ Latent since inception, first triggered 2026-08-17 by the first on-device
   the popular one in place (never deletes the user's entry).
 - **Your blocklist** — searchable rows (search appears past 8 entries, matching
   the sibling screens, and stays visible while a query is active so the filter
-  can always be cleared); each row has an enable toggle (with a
-  site-named `semanticLabel`), a pause/resume button (EVO-012: a
-  `GlassBottomSheet` of 5/15/30/60-minute chips; paused rows show "Paused until
-  HH:MM" and native re-arms the block at expiry), an edit button (custom only —
-  also enforced in `editEntry`), and delete; all tooltips carry the site name
-  for TalkBack. The primary empty state is an `EmptyState` with an "Add
-  website" CTA. Add/edit use a `GlassBottomSheet` with inline feedback from the
+  can always be cleared; the section header shows the entry count). Each row
+  keeps only the enable toggle inline (with a site-named `semanticLabel`);
+  pause/resume (EVO-012: a `GlassBottomSheet` of 5/15/30/60-minute chips;
+  paused rows show a warning `Pill` "Paused until HH:MM" and native re-arms the
+  block at expiry; paused/disabled rows dim their leading badge), edit (custom
+  only — also enforced in `editEntry`) and delete live in a **flutter_slidable
+  end action pane** (`DrawerMotion`; each `_RowAction` is its own rounded
+  surface — `AppRadius.continuous(AppRadius.lg)`, tone fill at 0.18 alpha,
+  tone border at 0.35 — with an `AppSpacing.xs` gap so the pane reads as
+  sibling cards of the row; site-named `Semantics` labels for TalkBack).
+  Swiping left or tapping the card opens the pane; `SlidableAutoCloseBehavior`
+  keeps one pane open at a time. This is the repo's first/only swipe surface. The primary empty state is
+  an `EmptyState` with an "Add website" CTA. Add/edit use a `GlassBottomSheet` with inline feedback from the
   shared `DomainValidator.check` rule; the sheet awaits the cubit commit and
   only announces success ("Blocked X") after persist + push landed — a failed
   save reverts the optimistic list and shows the error toast instead.

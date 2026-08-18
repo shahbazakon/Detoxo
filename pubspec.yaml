@@ -85,6 +85,8 @@ dependencies:
   cupertino_native: ^0.1.1
   flutter_floating_bottom_bar: ^1.2.1
   not_static_icons: ^0.46.0
+  # Swipe-to-reveal row actions (web blocklist rows). First/only swipe surface.
+  flutter_slidable: ^4.0.0
   sleek_circular_slider: ^2.1.0
   showcaseview: ^5.1.0
 

@@ -1,0 +1,52 @@
+{
+  // App launches + the two real-boot integration tests.
+  //
+  // The integration configs carry `preLaunchTask: "QA: prep device"` because the
+  // app CANNOT get past /permissions without the accessibility + overlay grants,
+  // and /permissions has no skip. Launching them without prep parks the run at
+  // the permission wall until it times out.
+  //
+  // For the frame timeline use the "QA: perf" TASK, not a launch config:
+  // `flutter drive` needs --no-dds (traceAction opens its own VM Service socket,
+  // which DDS is holding) and --keep-app-running, and VS Code cannot pass either
+  // through a launch config.
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Detoxo (debug)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "flutterMode": "debug"
+    },
+    {
+      "name": "Detoxo (profile)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "flutterMode": "profile"
+    },
+    {
+      "name": "Detoxo (release)",
+      "request": "launch",
+      "type": "dart",
+      "program": "lib/main.dart",
+      "flutterMode": "release"
+    },
+    {
+      "name": "E2E walk (device, needs prep)",
+      "request": "launch",
+      "type": "dart",
+      "program": "integration_test/app_e2e_test.dart",
+      "flutterMode": "debug",
+      "preLaunchTask": "QA: prep device"
+    },
+    {
+      "name": "PIN setup flow (device)",
+      "request": "launch",
+      "type": "dart",
+      "program": "integration_test/pin_setup_flow_test.dart",
+      "flutterMode": "debug"
+    }
+  ]
+}

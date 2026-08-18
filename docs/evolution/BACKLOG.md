@@ -1,0 +1,21 @@
+# Evolution Backlog
+
+Ledger for `/detoxo-evolution` (see `.claude/skills/detoxo-evolution/SKILL.md`).
+Lifecycle: `proposed` → `approved` → `done` (commit-stamped) | `rejected` (kept
+forever — the settled-decisions memory). IDs are monotonic and never reused.
+
+| ID | Title | Feature | Tier | Status | Effort | Proposed | Decided |
+|---|---|---|---|---|---|---|---|
+| EVO-001 | Smart Auto Lock for the PIN lock | access_protection | 2 | done | M | 2026-08-07 | 2026-08-07 |
+| EVO-002 | Harden the PIN KDF (PBKDF2, transparent re-hash) | access_protection | 2 | proposed | S | 2026-08-08 | — |
+| EVO-003 | Commitment delay on disabling the PIN lock | access_protection | 2 | proposed | M | 2026-08-08 | — |
+| EVO-004 | "While you were away" failed-attempt notice | access_protection | 2 | proposed | S | 2026-08-08 | — |
+| EVO-005 | Exclude sensitive stores from Android backup | protected_apps | 2 | proposed | S | 2026-08-13 | — |
+| EVO-006 | Validate + give feedback on manual adds (protected + blocker) | protected_apps, app_blocker | 2 | done | S | 2026-08-13 | 2026-08-14 |
+| EVO-007 | Installed-app picker (labels + icons) for manual adds | protected_apps, app_blocker, core | 2 | done | M | 2026-08-13 | 2026-08-14 |
+| EVO-008 | Real device icons on saved Block/Protected rows | app_blocker, protected_apps | 2 | done | S | 2026-08-14 | 2026-08-14 |
+| EVO-009 | "Suggested" section at the top of the add-app picker | core (picker) + native | 2 | proposed | M | 2026-08-14 | — |
+| EVO-010 | Refresh affordance in the add-app picker | core (picker) | 2 | done | S | 2026-08-14 | 2026-08-14 |
+| EVO-011 | "Blocked by Detoxo" toast at the block moment | web_blocker (native) | 2 | done | S | 2026-08-17 | 2026-08-17 |
+| EVO-012 | Per-site pause, activating dormant pausedUntil | web_blocker + native | 2 | done | M | 2026-08-17 | 2026-08-17 |
+| EVO-013 | Honest protection status when OS kills the service | blocking/engine + native | 2 | done | S | 2026-08-17 | 2026-08-17 |

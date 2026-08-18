@@ -14,6 +14,7 @@ import 'package:detoxo/features/limits/web_blocker/presentation/web_block_cubit.
 import 'package:detoxo/features/limits/web_blocker/presentation/web_block_state.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:flutter_slidable/flutter_slidable.dart';
 
 /// Manage website blocking: two protection toggles (block the web versions of
 /// blocked apps, block adult sites), one-tap popular-site chips, a searchable
@@ -94,7 +95,13 @@ class _WebBlockView extends StatelessWidget {
                 inset(_ProtectionTiles(state: state)),
                 inset(const SectionHeader('Popular sites')),
                 _PopularChips(state: state),
-                inset(const SectionHeader('Your blocklist')),
+                inset(
+                  SectionHeader(
+                    state.hasEntries
+                        ? 'Your blocklist (${state.entries.length})'
+                        : 'Your blocklist',
+                  ),
+                ),
                 inset(_Blocklist(state: state)),
               ],
             );
@@ -332,11 +339,19 @@ class _Blocklist extends StatelessWidget {
             child: EmptyState(icon: Icons.search_off, title: 'No matches'),
           )
         else
-          for (final entry in entries)
-            Padding(
-              padding: const EdgeInsets.only(bottom: AppSpacing.sm),
-              child: _BlocklistRow(entry: entry),
+          // Only one swipe pane open at a time across the list.
+          SlidableAutoCloseBehavior(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                for (final entry in entries)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+                    child: _BlocklistRow(entry: entry),
+                  ),
+              ],
             ),
+          ),
       ],
     );
   }
@@ -363,50 +378,158 @@ class _BlocklistRow extends StatelessWidget {
       return 'Paused until $h:$m';
     }
 
-    return AppCard(
-      leading: IconBadge(
-        icon: site?.icon ?? Icons.public,
-        color: color,
-        shape: BoxShape.rectangle,
-        fillAlpha: 0.18,
-      ),
-      title: entry.label,
-      // Popular rows show the domain under the brand name; custom rows' title
-      // already IS the domain, so their second line is the pause state or none.
-      subtitle: paused ? pausedLabel() : (isCustom ? null : entry.pattern),
-      trailing: Row(
-        mainAxisSize: MainAxisSize.min,
+    // How many actions the pane holds decides how far it opens.
+    final actionCount = 1 + (entry.enabled ? 1 : 0) + (isCustom ? 1 : 0);
+    // Disabled and paused rows read at a glance via a dimmed badge.
+    final dimmed = paused || !entry.enabled;
+    // No outer clip: Slidable clips its own pane to the drag ratio, and each
+    // action carries its own rounded surface.
+    return Slidable(
+      key: ValueKey(entry.pattern),
+      groupTag: 'web-blocklist',
+      endActionPane: ActionPane(
+        motion: const DrawerMotion(),
+        // Per-action gaps need a bit more room than the old edge-to-edge
+        // pane; keeps every inner surface >= 48dp wide on a 360dp screen.
+        extentRatio: const [0.30, 0.52, 0.70][actionCount - 1],
         children: [
-          AppToggle(
-            value: entry.enabled,
-            semanticLabel: 'Block ${entry.label}',
-            onChanged: (v) => cubit.toggleEntry(entry, enabled: v),
-          ),
           if (entry.enabled)
-            IconButton(
-              visualDensity: VisualDensity.compact,
-              icon: Icon(paused ? Icons.play_arrow : Icons.timer_outlined),
-              tooltip: paused
+            _RowAction(
+              icon: paused ? Icons.play_arrow : Icons.timer_outlined,
+              label: paused ? 'Resume' : 'Pause',
+              tone: AppColors.warning,
+              semanticLabel: paused
                   ? 'Resume blocking ${entry.label}'
                   : 'Pause blocking ${entry.label}',
-              onPressed: () => paused
+              onPressed: (context) => paused
                   ? cubit.resumeEntry(entry)
                   : _showPauseSheet(context, entry),
             ),
           if (isCustom)
-            IconButton(
-              visualDensity: VisualDensity.compact,
-              icon: const Icon(Icons.edit_outlined),
-              tooltip: 'Edit ${entry.label}',
-              onPressed: () => _showSiteSheet(context, entry: entry),
+            _RowAction(
+              icon: Icons.edit_outlined,
+              label: 'Edit',
+              tone: AppColors.seed,
+              semanticLabel: 'Edit ${entry.label}',
+              onPressed: (context) => _showSiteSheet(context, entry: entry),
             ),
-          IconButton(
-            visualDensity: VisualDensity.compact,
-            icon: const Icon(Icons.delete_outline),
-            tooltip: 'Remove ${entry.label}',
-            onPressed: () => cubit.removeEntry(entry),
+          _RowAction(
+            icon: Icons.delete_outline,
+            label: 'Delete',
+            tone: AppColors.danger,
+            semanticLabel: 'Remove ${entry.label}',
+            onPressed: (_) => cubit.removeEntry(entry),
           ),
         ],
+      ),
+      child: Builder(
+        builder: (rowContext) => AppCard(
+          // Tap toggles the pane: swipe discoverability + a non-swipe path.
+          onTap: () {
+            final slidable = Slidable.of(rowContext);
+            if (slidable == null) return;
+            if (slidable.ratio == 0) {
+              slidable.openEndActionPane();
+            } else {
+              slidable.close();
+            }
+          },
+          leading: AnimatedOpacity(
+            opacity: dimmed ? 0.45 : 1,
+            duration: AppDurations.fast,
+            child: IconBadge(
+              icon: site?.icon ?? Icons.public,
+              color: color,
+              shape: BoxShape.rectangle,
+              fillAlpha: 0.18,
+            ),
+          ),
+          title: entry.label,
+          // Popular rows show the domain under the brand name; custom rows'
+          // title already IS the domain. Pause state gets its own pill below.
+          subtitle: isCustom ? null : entry.pattern,
+          trailing: AppToggle(
+            value: entry.enabled,
+            semanticLabel: 'Block ${entry.label}',
+            onChanged: (v) => cubit.toggleEntry(entry, enabled: v),
+          ),
+          // Row keeps the Pill intrinsic-width in AppCard's stretch column.
+          child: paused
+              ? Row(
+                  children: [
+                    Pill(
+                      label: pausedLabel(),
+                      tone: AppTone.warning,
+                      icon: Icons.timer_outlined,
+                    ),
+                  ],
+                )
+              : null,
+        ),
+      ),
+    );
+  }
+}
+
+/// One swipe action as its own rounded surface — same radius as the row card,
+/// separated by a small gap so the pane reads as sibling cards.
+class _RowAction extends StatelessWidget {
+  const _RowAction({
+    required this.icon,
+    required this.label,
+    required this.tone,
+    required this.semanticLabel,
+    required this.onPressed,
+  });
+
+  final IconData icon;
+  final String label;
+  final Color tone;
+  final String semanticLabel;
+  final void Function(BuildContext) onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomSlidableAction(
+      onPressed: onPressed,
+      backgroundColor: Colors.transparent,
+      foregroundColor: tone,
+      // The gap between the row card / previous action and this surface.
+      padding: const EdgeInsets.only(left: AppSpacing.xs),
+      // Press overlay tracks the rounded shape.
+      borderRadius: AppRadius.brLg,
+      child: Semantics(
+        label: semanticLabel,
+        button: true,
+        excludeSemantics: true,
+        // Fill the pane height so the surface matches the row card height.
+        child: SizedBox.expand(
+          child: DecoratedBox(
+            decoration: ShapeDecoration(
+              color: tone.withValues(alpha: 0.18),
+              shape: AppRadius.continuous(
+                AppRadius.lg,
+                side: BorderSide(color: tone.withValues(alpha: 0.35)),
+              ),
+            ),
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(icon, color: tone),
+                const SizedBox(height: AppSpacing.xxs),
+                Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: tone,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
