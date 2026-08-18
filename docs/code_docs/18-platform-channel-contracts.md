@@ -64,7 +64,7 @@ Method-name constants live in `ChannelMethods` (Dart) and are matched by string 
 |---|---|---|---|---|
 | `pushConfig` | `{json: String}` | `store.platformsConfigJson = json`; `service.reload()` | `true` | `pushConfig(String json)` |
 | `pushSettings` | settings map (see below) | applies each present key to `ConfigStore`; `service.reload()` | `true` | `pushSettings(Map settings)` |
-| `pushWebBlocklist` | `{json: String}` | `store.webBlocklistJson = json`; `service.reload()` | `true` | `pushWebBlocklist(String json)` |
+| `pushWebBlocklist` | `{json: String}` | fail-safe like `pushProtectedApps`: null / non-JSON-array arg is a **no-op** (never a wipe; clearing needs an explicit `"[]"`), else `store.webBlocklistJson = json`; `service.reload()` | `true` | `pushWebBlocklist(String json)` |
 | `pushProtectedApps` | `{packages: List<String>}` | set-if-changed: absent/malformed arg is a **no-op** (never a wipe), unchanged set skips everything, changed set → `store.protectedPackages` + `service.refreshProtectedPackages()` (no full `reload()`) | `true` | `pushProtectedApps(List<String> packages)` |
 
 **`pushConfig` payload** — `json` is the full `platforms_config.json` string
@@ -89,9 +89,11 @@ Method-name constants live in `ChannelMethods` (Dart) and are matched by string 
 | `blockWebsitesForBlockedApps` | `bool` | |
 
 **`pushWebBlocklist` payload** — `json` is a JSON-encoded array of
-`{pattern, matchType}` rules. `matchType` is `WebMatchType.wire`:
+`{pattern, matchType[, pausedUntil]}` rules. `matchType` is `WebMatchType.wire`:
 `DOMAIN` \| `EXACT` \| `WILDCARD` (native `WebBlockEngine` matches browser hosts
-against these).
+against these). `pausedUntil` (optional, epoch ms — EVO-012) makes native skip
+the rule until that instant; expiry is enforced natively so a per-site pause
+re-arms even if the Flutter app never runs again.
 
 **`pushProtectedApps` payload** — `packages` is a flat list of privacy-protected
 package names: the **entire bundled catalog** (always protected, installed or
@@ -110,6 +112,7 @@ a system settings/consent intent and returns a `Boolean` = *launch succeeded*
 | Method | Args | Returns | Dart wrapper |
 |---|---|---|---|
 | `isAccessibilityEnabled` | — | `Boolean` (service present in `ENABLED_ACCESSIBILITY_SERVICES`, matched in both long and short flattened `ComponentName` forms) | `isAccessibilityEnabled()` |
+| `serviceAlive` | — | `Boolean` (`DetoxoAccessibilityService.instance != null` — the setting can say enabled while the service is dead after an OEM force-stop; EVO-013. `currentStatus()` requires **both** for "running") | `serviceAlive()` |
 | `openAccessibilitySettings` | — | `Boolean` | `openAccessibilitySettings()` |
 | `canDrawOverlays` | — | `Boolean` (`Settings.canDrawOverlays`) | `canDrawOverlays()` |
 | `requestOverlayPermission` | — | `Boolean` | `requestOverlay()` |

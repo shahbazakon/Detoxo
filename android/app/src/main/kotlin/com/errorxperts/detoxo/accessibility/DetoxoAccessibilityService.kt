@@ -19,6 +19,7 @@ import android.os.VibratorManager
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import com.errorxperts.detoxo.R
 import com.errorxperts.detoxo.admin.DetoxoDeviceAdminReceiver
@@ -416,7 +417,12 @@ class DetoxoAccessibilityService : AccessibilityService() {
             "webBlocked",
             mapOf("host" to host, "mode" to "PRESS_BACK", "today" to today, "total" to total),
         )
-        Log.i(TAG, "web-blocked $host in $pkg")
+        // Never log the host: it's accessibility-derived browsing data and
+        // release logcat is readable by adb / OEM log collectors.
+        Log.i(TAG, "web-blocked in $pkg")
+        // EVO-011: make the intervention legible — attribute the bounce.
+        // ponytail: plain text toast; upgrade path is an overlay block chip.
+        Toast.makeText(this, "$host blocked by Detoxo", Toast.LENGTH_SHORT).show()
         pressBackWithRateLimit()
     }
 

@@ -28,6 +28,7 @@ import com.errorxperts.detoxo.engine.ContentCounterStore
 import com.errorxperts.detoxo.widget.ContentCounterWidgetProvider
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.text.SimpleDateFormat
@@ -106,8 +107,14 @@ class CommandHandler(
                 result.success(true)
             }
             "pushWebBlocklist" -> {
-                store.webBlocklistJson = call.argument<String>("json")
-                DetoxoAccessibilityService.instance?.reload()
+                // Fail-safe like pushProtectedApps: an absent or malformed arg
+                // is a no-op, never a wipe. Clearing requires an explicit "[]".
+                call.argument<String>("json")?.let { json ->
+                    if (runCatching { JSONArray(json) }.isSuccess) {
+                        store.webBlocklistJson = json
+                        DetoxoAccessibilityService.instance?.reload()
+                    }
+                }
                 result.success(true)
             }
             "pushProtectedApps" -> {
@@ -161,6 +168,10 @@ class CommandHandler(
                 ),
             )
             "isAccessibilityEnabled" -> result.success(isAccessibilityEnabled())
+            // EVO-013: the setting can say enabled while the service is dead
+            // (OEM force-stop). The instance is the truth for "running".
+            "serviceAlive" ->
+                result.success(DetoxoAccessibilityService.instance != null)
             "openAccessibilitySettings" ->
                 result.success(launch(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)))
             "canDrawOverlays" -> result.success(Settings.canDrawOverlays(context))

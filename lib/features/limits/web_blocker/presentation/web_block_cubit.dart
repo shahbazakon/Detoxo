@@ -1,10 +1,7 @@
 import 'dart:async';
-import 'dart:convert';
 
-import 'package:detoxo/features/blocking/shared/domain/entities/enums.dart';
 import 'package:detoxo/features/blocking/shared/domain/repositories/blocking_repositories.dart';
 import 'package:detoxo/features/limits/app_blocker/domain/repositories/app_block_repository.dart';
-import 'package:detoxo/features/limits/web_blocker/domain/entities/app_domain_catalog.dart';
 import 'package:detoxo/features/limits/web_blocker/domain/entities/popular_site.dart';
 import 'package:detoxo/features/limits/web_blocker/domain/entities/web_block_entry.dart';
 import 'package:detoxo/features/limits/web_blocker/domain/entities/web_block_source.dart';
@@ -12,6 +9,7 @@ import 'package:detoxo/features/limits/web_blocker/domain/entities/web_block_sta
 import 'package:detoxo/features/limits/web_blocker/domain/repositories/web_block_repository.dart';
 import 'package:detoxo/features/limits/web_blocker/domain/repositories/web_block_stats_repository.dart';
 import 'package:detoxo/features/limits/web_blocker/domain/utils/domain_validator.dart';
+import 'package:detoxo/features/limits/web_blocker/domain/web_block_sync.dart';
 import 'package:detoxo/features/limits/web_blocker/presentation/web_block_state.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
@@ -58,31 +56,49 @@ class WebBlockCubit extends Cubit<WebBlockState> {
     }
   }
 
-  /// Adds a user-typed domain after validation + dedupe.
-  Future<void> addCustom(String domain) async {
-    final host = DomainValidator.normalize(domain);
-    if (host == null) {
-      emit(state.copyWith(error: 'Enter a valid domain like youtube.com'));
-      return;
+  /// Adds a user-typed domain after validation + dedupe. Returns false when
+  /// rejected or the commit failed (the error is in [WebBlockState.error]).
+  Future<bool> addCustom(String domain) async {
+    final checked = DomainValidator.check(
+      domain,
+      state.entries.map((e) => e.pattern),
+    );
+    if (checked.host == null) {
+      emit(state.copyWith(error: checked.error));
+      return false;
     }
-    if (state.entries.any((e) => e.pattern == host)) {
-      emit(state.copyWith(error: '$host is already blocked'));
-      return;
-    }
-    await _commit([
+    return _commit([
       ...state.entries,
       // source defaults to WebBlockSource.custom.
-      WebBlockEntry(pattern: host, createdAt: DateTime.now()),
+      WebBlockEntry(pattern: checked.host!, createdAt: DateTime.now()),
     ]);
   }
 
-  /// Enables/disables a popular site with a single tap.
+  /// Enables/disables a popular site with a single tap. A custom entry that
+  /// already covers the primary domain is converted to the popular entry
+  /// instead of being silently deleted (and vice versa on removal, only
+  /// popular-sourced entries are removed).
   Future<void> togglePopular(PopularSite site) async {
-    final exists = state.entries.any((e) => e.pattern == site.primaryDomain);
-    if (exists) {
+    final existing = state.entries
+        .where((e) => e.pattern == site.primaryDomain)
+        .firstOrNull;
+    if (existing != null && existing.source == WebBlockSource.popular) {
       await _commit(
         state.entries.where((e) => e.pattern != site.primaryDomain).toList(),
       );
+    } else if (existing != null) {
+      // Custom entry with the same pattern: upgrade it in place.
+      await _commit([
+        for (final e in state.entries)
+          if (e.pattern == site.primaryDomain)
+            e.copyWith(
+              displayName: site.name,
+              source: WebBlockSource.popular,
+              brandColor: site.brandColor,
+            )
+          else
+            e,
+      ]);
     } else {
       await _commit([
         ...state.entries,
@@ -100,7 +116,11 @@ class WebBlockCubit extends Cubit<WebBlockState> {
   Future<void> toggleEntry(WebBlockEntry entry, {required bool enabled}) async {
     await _commit([
       for (final e in state.entries)
-        if (e.pattern == entry.pattern) e.copyWith(enabled: enabled) else e,
+        if (e.pattern == entry.pattern)
+          // Re-enabling or disabling also drops any pause window.
+          e.copyWith(enabled: enabled, clearPause: true)
+        else
+          e,
     ]);
   }
 
@@ -110,21 +130,45 @@ class WebBlockCubit extends Cubit<WebBlockState> {
     );
   }
 
-  /// Edits a custom entry's domain (re-validates + dedupes). Only custom entries
-  /// are editable, so there is no display name to preserve.
-  Future<void> editEntry(WebBlockEntry entry, String newDomain) async {
-    final host = DomainValidator.normalize(newDomain);
-    if (host == null) {
-      emit(state.copyWith(error: 'Enter a valid domain like youtube.com'));
-      return;
-    }
-    if (host != entry.pattern && state.entries.any((e) => e.pattern == host)) {
-      emit(state.copyWith(error: '$host is already blocked'));
-      return;
-    }
+  /// EVO-012: allow [entry]'s site for [window] — native re-arms it at expiry
+  /// even if this app never runs again.
+  Future<void> pauseEntry(WebBlockEntry entry, Duration window) async {
     await _commit([
       for (final e in state.entries)
-        if (e.pattern == entry.pattern) e.copyWith(pattern: host) else e,
+        if (e.pattern == entry.pattern)
+          e.copyWith(pausedUntil: DateTime.now().add(window))
+        else
+          e,
+    ]);
+  }
+
+  /// Ends a per-site pause immediately.
+  Future<void> resumeEntry(WebBlockEntry entry) async {
+    await _commit([
+      for (final e in state.entries)
+        if (e.pattern == entry.pattern) e.copyWith(clearPause: true) else e,
+    ]);
+  }
+
+  /// Edits a custom entry's domain (re-validates + dedupes). Only custom
+  /// entries are editable — enforced here, not just by the screen's affordance.
+  Future<bool> editEntry(WebBlockEntry entry, String newDomain) async {
+    if (entry.source != WebBlockSource.custom) return false;
+    final checked = DomainValidator.check(
+      newDomain,
+      state.entries.map((e) => e.pattern),
+      ignoring: entry.pattern,
+    );
+    if (checked.host == null) {
+      emit(state.copyWith(error: checked.error));
+      return false;
+    }
+    return _commit([
+      for (final e in state.entries)
+        if (e.pattern == entry.pattern)
+          e.copyWith(pattern: checked.host)
+        else
+          e,
     ]);
   }
 
@@ -150,43 +194,27 @@ class WebBlockCubit extends Cubit<WebBlockState> {
 
   void clearError() => emit(state.copyWith(clearError: true));
 
-  Future<void> _commit(List<WebBlockEntry> entries) async {
+  /// Persists + pushes; on failure reverts the optimistic emit and surfaces the
+  /// error (a green "Blocked X" over a failed save is worse than an error).
+  Future<bool> _commit(List<WebBlockEntry> entries) async {
+    final previous = state.entries;
     emit(state.copyWith(entries: entries, clearError: true));
-    await _repo.save(entries);
-    await _pushAll();
+    try {
+      await _repo.save(entries);
+    } on Object {
+      emit(
+        state.copyWith(entries: previous, error: "Couldn't save — try again"),
+      );
+      return false;
+    }
+    await _pushAll(); // best-effort by contract; never throws
+    return true;
   }
 
-  /// Builds the merged, deduped active blocklist and ships it to native.
-  ///
-  /// Includes every active entry, the aliases of any popular entry, and — when
-  /// [WebBlockState.blockForApps] is on — the domains derived from the enabled
-  /// App Blocker entries via [AppDomainCatalog].
-  Future<void> _pushAll() async {
-    final patterns = <String, String>{}; // pattern -> matchType wire
-    for (final e in state.entries) {
-      if (!e.isActive) continue;
-      patterns[e.pattern] = e.matchType.wire;
-      if (e.source == WebBlockSource.popular) {
-        for (final alias in PopularSites.aliasesFor(e.pattern)) {
-          patterns.putIfAbsent(alias, () => WebMatchType.domain.wire);
-        }
-      }
-    }
-    if (state.blockForApps) {
-      final apps = await _appBlocks.load();
-      for (final app in apps) {
-        if (!app.enabled) continue;
-        for (final domain in AppDomainCatalog.domainsFor(app.packageName)) {
-          patterns.putIfAbsent(domain, () => WebMatchType.domain.wire);
-        }
-      }
-    }
-    final wire = [
-      for (final entry in patterns.entries)
-        {'pattern': entry.key, 'matchType': entry.value},
-    ];
-    await _engine.pushWebBlocklist(jsonEncode(wire));
-  }
+  /// Ships the merged active blocklist to native. Every caller persists before
+  /// pushing, so repo state always matches cubit state here.
+  Future<void> _pushAll() =>
+      syncWebBlocklist(_repo, _settings, _appBlocks, _engine);
 
   @override
   Future<void> close() {

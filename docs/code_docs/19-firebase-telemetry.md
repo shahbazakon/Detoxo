@@ -73,7 +73,13 @@ runApp(const DetoxoApp());
 ```
 
 `installGlobalHandlers()` (static) routes `FlutterError.onError` →
-`recordFlutterFatalError` and `PlatformDispatcher.instance.onError` → `recordError(fatal: true)`.
+`recordFlutterFatalError` (after `FlutterError.presentError`, so the console
+still shows the error) and `PlatformDispatcher.instance.onError` →
+`recordError(fatal: true)`. Both are guarded by a **5-minute per-error
+dedupe** (keyed on the error string's hash): a repeating per-frame failure —
+e.g. a build/layout error loop — must not record at 60fps, because each
+report copies its full stack onto the Java heap and the flood OOM-killed the
+app on-device (2026-08-17). The first occurrence is always recorded.
 
 `FirebaseServices.start(sl)` (in `firebase_services.dart`) does the rest, once:
 1. `setCollectionEnabled(true)` on all three services. **Collection is on in every build** (no

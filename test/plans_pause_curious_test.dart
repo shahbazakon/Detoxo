@@ -388,7 +388,7 @@ class _FakeSettingsRepo implements SettingsRepository {
   AppSettings? saved;
 
   @override
-  Future<AppSettings> load() async => _initial;
+  Future<AppSettings> load() async => saved ?? _initial;
 
   @override
   Future<void> save(AppSettings settings) async => saved = settings;

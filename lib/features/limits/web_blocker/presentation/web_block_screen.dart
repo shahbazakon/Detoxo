@@ -65,6 +65,9 @@ class _WebBlockView extends StatelessWidget {
             GlassToast.show(context, state.error!, tone: AppTone.danger);
             context.read<WebBlockCubit>().clearError();
           },
+          // No buildWhen: stats events are rare while this screen is visible
+          // (blocks happen while the user is in the browser), so the full
+          // rebuild is the cheap option over selector plumbing.
           builder: (context, state) {
             if (state.isLoading) {
               return const LoadingState(message: 'Loading…');
@@ -133,8 +136,12 @@ class _StatsSection extends StatelessWidget {
     return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            // No `crossAxisAlignment: stretch` here: this Row sits in a
+            // ListView, so its height is unbounded — stretch hands the cards
+            // an infinite height constraint and layout aborts the frame
+            // (blank body, then per-frame `!semantics.parentDataDirty` spam).
+            // The three cards are identical, so they match heights anyway.
             Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Expanded(
                   child: StatCard(
@@ -294,16 +301,25 @@ class _Blocklist extends StatelessWidget {
   Widget build(BuildContext context) {
     final cubit = context.read<WebBlockCubit>();
     if (!state.hasEntries) {
-      return const InlineHint(
+      // Same idiom as sibling screens: primary empty list = EmptyState + CTA.
+      return EmptyState(
         icon: Icons.public_off,
-        text: 'No sites blocked yet.',
+        title: 'No sites blocked yet',
+        subtitle: 'Tap a popular site above or add your own.',
+        action: PrimaryButton(
+          label: 'Add website',
+          onPressed: () => _showSiteSheet(context),
+        ),
       );
     }
     final entries = state.visibleEntries;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        if (state.entries.length > 6) ...[
+        // The query keeps the field visible even when deletions shrink the
+        // list below the threshold — otherwise an active filter would have no
+        // affordance to clear it. Threshold 8 matches the sibling screens.
+        if (state.entries.length > 8 || state.query.isNotEmpty) ...[
           AppSearchField(
             hintText: 'Search blocked sites',
             onChanged: cubit.search,
@@ -336,9 +352,17 @@ class _BlocklistRow extends StatelessWidget {
     final cubit = context.read<WebBlockCubit>();
     final isCustom = entry.source == WebBlockSource.custom;
     final site = PopularSites.byPrimaryDomain(entry.pattern);
+    final paused = entry.isPausedAt(DateTime.now());
     final color = entry.brandColor != null
         ? Color(entry.brandColor!)
         : Theme.of(context).colorScheme.secondary;
+    String pausedLabel() {
+      final t = entry.pausedUntil!;
+      final h = t.hour.toString().padLeft(2, '0');
+      final m = t.minute.toString().padLeft(2, '0');
+      return 'Paused until $h:$m';
+    }
+
     return AppCard(
       leading: IconBadge(
         icon: site?.icon ?? Icons.public,
@@ -347,30 +371,77 @@ class _BlocklistRow extends StatelessWidget {
         fillAlpha: 0.18,
       ),
       title: entry.label,
-      subtitle: isCustom ? 'Custom site' : entry.pattern,
+      // Popular rows show the domain under the brand name; custom rows' title
+      // already IS the domain, so their second line is the pause state or none.
+      subtitle: paused ? pausedLabel() : (isCustom ? null : entry.pattern),
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
           AppToggle(
             value: entry.enabled,
+            semanticLabel: 'Block ${entry.label}',
             onChanged: (v) => cubit.toggleEntry(entry, enabled: v),
           ),
+          if (entry.enabled)
+            IconButton(
+              visualDensity: VisualDensity.compact,
+              icon: Icon(paused ? Icons.play_arrow : Icons.timer_outlined),
+              tooltip: paused
+                  ? 'Resume blocking ${entry.label}'
+                  : 'Pause blocking ${entry.label}',
+              onPressed: () => paused
+                  ? cubit.resumeEntry(entry)
+                  : _showPauseSheet(context, entry),
+            ),
           if (isCustom)
             IconButton(
               visualDensity: VisualDensity.compact,
               icon: const Icon(Icons.edit_outlined),
-              tooltip: 'Edit',
+              tooltip: 'Edit ${entry.label}',
               onPressed: () => _showSiteSheet(context, entry: entry),
             ),
           IconButton(
             visualDensity: VisualDensity.compact,
             icon: const Icon(Icons.delete_outline),
-            tooltip: 'Remove',
+            tooltip: 'Remove ${entry.label}',
             onPressed: () => cubit.removeEntry(entry),
           ),
         ],
       ),
     );
+  }
+}
+
+/// EVO-012: pick how long to allow the site; native re-arms the block at
+/// expiry even if the app never reopens.
+Future<void> _showPauseSheet(BuildContext context, WebBlockEntry entry) async {
+  final cubit = context.read<WebBlockCubit>();
+  final minutes = await GlassBottomSheet.show<int>(
+    context: context,
+    title: 'Allow ${entry.label} for…',
+    child: Builder(
+      builder: (sheetContext) => Wrap(
+        spacing: AppSpacing.xs,
+        children: [
+          for (final m in const [5, 15, 30, 60])
+            AppChip(
+              label: '$m min',
+              selected: false,
+              onSelected: () => Navigator.of(sheetContext).pop(m),
+            ),
+        ],
+      ),
+    ),
+  );
+  if (minutes != null) {
+    await cubit.pauseEntry(entry, Duration(minutes: minutes));
+    if (context.mounted) {
+      GlassToast.show(
+        context,
+        '${entry.label} allowed for $minutes min',
+        tone: AppTone.success,
+      );
+    }
   }
 }
 
@@ -399,25 +470,28 @@ class _SiteSheetState extends State<_SiteSheet> {
     super.dispose();
   }
 
-  void _submit() {
-    final host = DomainValidator.normalize(_controller.text);
-    if (host == null) {
-      setState(() => _error = 'Enter a valid domain like youtube.com');
-      return;
-    }
-    final clash = widget.cubit.state.entries.any(
-      (e) => e.pattern == host && e.pattern != widget.entry?.pattern,
+  Future<void> _submit() async {
+    // Same rule the cubit enforces — one shared helper, no drifting copies.
+    final checked = DomainValidator.check(
+      _controller.text,
+      widget.cubit.state.entries.map((e) => e.pattern),
+      ignoring: widget.entry?.pattern,
     );
-    if (clash) {
-      setState(() => _error = '$host is already blocked');
+    if (checked.host == null) {
+      setState(() => _error = checked.error);
       return;
     }
-    if (_isEdit) {
-      widget.cubit.editEntry(widget.entry!, _controller.text);
+    // Await the commit: success is only announced once persist + push ran.
+    final ok = _isEdit
+        ? await widget.cubit.editEntry(widget.entry!, _controller.text)
+        : await widget.cubit.addCustom(_controller.text);
+    if (!mounted) return;
+    if (ok) {
+      Navigator.of(context).pop(checked.host);
     } else {
-      widget.cubit.addCustom(_controller.text);
+      // The cubit surfaced the reason via the screen's error toast.
+      Navigator.of(context).pop();
     }
-    Navigator.of(context).pop(host);
   }
 
   @override

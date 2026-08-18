@@ -29,6 +29,7 @@ abstract final class ChannelMethods {
 
   // Permission + service status queries.
   static const String isAccessibilityEnabled = 'isAccessibilityEnabled';
+  static const String serviceAlive = 'serviceAlive';
   static const String openAccessibilitySettings = 'openAccessibilitySettings';
   static const String canDrawOverlays = 'canDrawOverlays';
   static const String requestOverlayPermission = 'requestOverlayPermission';

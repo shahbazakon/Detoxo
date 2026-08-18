@@ -52,17 +52,23 @@ class WebBlockStatsRepositoryImpl implements WebBlockStatsRepository {
 
   Map<String, dynamic> _read() {
     final raw = _store.read(StoreKeys.webBlockStats);
-    if (raw == null) {
-      return {
-        'date': _todayKey(),
-        'today': 0,
-        'total': 0,
-        'hosts': <String, dynamic>{},
-      };
+    if (raw != null) {
+      // A corrupt stats blob must not kill the live watch() stream — fall back
+      // to a fresh day (stats are advisory; the native counters self-heal it).
+      try {
+        final map = jsonDecode(raw) as Map<String, dynamic>;
+        map['hosts'] ??= <String, dynamic>{};
+        return map;
+      } on Object {
+        // fall through to the fresh blob
+      }
     }
-    final map = jsonDecode(raw) as Map<String, dynamic>;
-    map['hosts'] ??= <String, dynamic>{};
-    return map;
+    return {
+      'date': _todayKey(),
+      'today': 0,
+      'total': 0,
+      'hosts': <String, dynamic>{},
+    };
   }
 
   /// Resets the day counter when the stored date is no longer today.

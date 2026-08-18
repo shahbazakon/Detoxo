@@ -68,10 +68,13 @@ Straight CRUD over the repository:
 - `add(packageName, appName)` — trims, ignores empty or duplicate packages,
   defaults `appName` to the package when blank.
 - `toggle(index, enabled:)` / `removeAt(index)`.
-- `_commit(entries)` — `emit` then `save` (optimistic UI, persist after).
+- `_commit(entries)` — `emit` then `save` (optimistic UI, persist after), then
+  fires the optional `onChanged` callback fire-and-forget.
 
-No engine push happens here — the App Blocker never touches the platform
-channel.
+No engine push happens here directly — the cubit takes an optional
+`onChanged` callback, which the screen wires to `syncWebBlocklist` (see the
+web blocker below) so the app-derived web rules never go stale when the app
+list changes. A failed sync never blocks the app-blocker UI.
 
 ### Screen
 
@@ -148,26 +151,37 @@ through the existing reel/short detection engine (see
 Derived getters: `label` (display name or pattern) and
 `isActive == enabled && (pausedUntil == null || pausedUntil.isBefore(now))`.
 
-Two serialization shapes matter:
+Serialization is `toJson()` / `fromJson()` — the full persistence shape. The
+minimal `{pattern, matchType[, pausedUntil]}` wire payload is built by
+`syncWebBlocklist` (there is no `toWire()` on the entity: the wire list also
+contains alias and app-derived patterns that never exist as entries). Enable
+state, source and colors stay Dart-side; **the per-site pause window crosses
+the wire** (EVO-012) so native enforces expiry itself — a paused site re-arms
+even if the app is never reopened. `blockMode` was removed from the entity
+(dead: native hardcodes `PRESS_BACK`; `fromJson` ignores the legacy key).
+`isActiveAt(now)` is the clock-injectable form of `isActive`.
 
-- `toJson()` / `fromJson()` — full persistence shape.
-- **`toWire()` — the minimal `{pattern, matchType}` pushed to the native
-  matcher.** Everything else (enable state, pause, source, colors) stays Dart-side
-  and is resolved *before* the payload is built, not by native. (Note: the cubit
-  actually builds the wire map itself rather than calling `toWire()` per entry —
-  see `_pushAll` — but the shape is identical.)
-
-`WebMatchType` and `WebBlockSource` live in
-`web_blocker/domain/entities/web_block_source.dart` and the shared enums.
+`WebBlockSource` lives in `web_blocker/domain/entities/web_block_source.dart`;
+`WebMatchType` in the shared enums
+(`blocking/shared/domain/entities/enums.dart`).
 
 ### Domain validation
 
 `web_blocker/domain/utils/domain_validator.dart` — `DomainValidator.normalize()`
-accepts `example.com`, `www.example.com`, `sub.example.com`, and full URLs
-(`https://example.com/path?x#y:8080`), then strips scheme → path → query/fragment
-→ port → leading `www.`, lowercases, and validates against a host regex (dotted
-labels + a 2–24 char TLD). Rejects empty input, spaces, scheme-only text, and
-single-label hosts. `isDuplicate(host, existing)` checks the current list.
+accepts `example.com`, `www.example.com`, `sub.example.com`, trailing-dot FQDNs
+(`example.com.`) and full URLs (`https://user:pass@example.com:8080/path?x#y`),
+then strips scheme → path → query/fragment → userinfo → port → leading `www.` →
+trailing dot, lowercases, and validates against a host regex (dotted labels +
+a 2–24 char TLD). Rejects empty input, spaces, scheme-only text, and
+single-label hosts.
+
+`DomainValidator.check(input, existingPatterns, ignoring:)` is the single
+validate+dedupe rule (returns `(host, error)`), shared by the add/edit sheet's
+inline validation and the cubit — the error strings live only here.
+
+Deliberate limits, mirrored from the native matcher's `HOST_GUARD` (accepting
+more here would create entries native can never match): ASCII hostnames only
+(no IDN — users can paste the punycode form), no IPv4/IPv6 literals.
 
 ### Curated catalogs
 
@@ -189,7 +203,10 @@ single-label hosts. `isDuplicate(host, existing)` checks the current list.
 ### Persistence & stats
 
 - **Blocklist:** `web_block_repository_impl.dart` → `LocalStore` key
-  `StoreKeys.webBlocklist` (`"web_blocklist"`), JSON list of full entries.
+  `StoreKeys.webBlocklist` (`"web_blocklist"`), JSON list of full entries. A
+  corrupt blob loads as `[]` instead of throwing (fail-soft: the screen and the
+  boot-time sync keep working, the raw value is only overwritten by a user
+  edit, and native keeps enforcing its own persisted copy regardless).
 - **Stats:** `web_block_stats_repository_impl.dart` → `LocalStore` key
   `StoreKeys.webBlockStats` (`"web_block_stats"`). This repo is the Dart mirror
   of website-block analytics:
@@ -233,17 +250,44 @@ Key operations:
 - `search` / `clearError`.
 - `_commit(entries)` — `emit` → `_repo.save` → `_pushAll()`.
 
-<a id="pushall"></a>**`_pushAll()` — building the native payload.** This is the
-one place the merged blocklist is assembled and shipped:
+<a id="pushall"></a>**`syncWebBlocklist` — building the native payload.** The
+merged blocklist is assembled and shipped in one place:
+`web_blocker/domain/web_block_sync.dart` (exported via the `limits.dart`
+barrel). It reads persisted state (`WebBlockRepository.load()`,
+`SettingsRepository.load()`, `AppBlockRepository.load()`) rather than cubit
+state — safe because every caller persists before pushing.
 
-1. For each **active** entry (`isActive`, so disabled/paused entries are
-   skipped), add `pattern → matchType.wire`.
-2. For any active **popular** entry, add each `PopularSites.aliasesFor(pattern)`
-   as a `DOMAIN` rule (`putIfAbsent`, so explicit rules win).
-3. If `blockForApps` is on, load the App Blocker list and, for each **enabled**
-   app, add every `AppDomainCatalog.domainsFor(package)` as a `DOMAIN` rule.
+**Best-effort by contract:** the whole body is wrapped in try/catch →
+`AppLogger.e` (non-fatal Crashlytics). A failed `load()` — e.g. a corrupt
+blocklist blob, which `WebBlockRepositoryImpl.load()` deliberately rethrows —
+**aborts the push**: native keeps enforcing its last-good persisted list (the
+fail-safe direction). Pushing `"[]"` on corruption would be interpreted by
+native as an intentional clear and wipe it. The catch also keeps the
+fire-and-forget call sites from booking `fatal: true` pseudo-crashes via
+`PlatformDispatcher.onError`. Its three callers:
+
+1. `WebBlockCubit._pushAll()` (a one-line delegate) — screen load and every
+   list mutation.
+2. The splash `_bootstrap()` (fire-and-forget, next to
+   `syncProtectedAppsAtBoot`) — repairs Dart→native drift at every launch,
+   e.g. after "Reset app data", without the Web Blocker screen ever opening.
+3. `AppBlockCubit.onChanged` (wired in `app_block_screen.dart`) — so
+   adding/toggling/removing a blocked app immediately updates the derived
+   web rules.
+
+The algorithm:
+
+1. For each **enabled** entry add `{pattern, matchType}`; a live per-site
+   pause adds `pausedUntil` (epoch ms) — native skips the rule until then and
+   re-arms it at expiry (EVO-012). Disabled entries are omitted.
+2. For any enabled **popular** entry, add each
+   `PopularSites.aliasesFor(pattern)` as a `DOMAIN` rule (`putIfAbsent`, so
+   explicit rules win); aliases inherit the primary's pause window.
+3. If `blockWebsitesForBlockedApps` is on, load the App Blocker list and, for
+   each **enabled** app, add every `AppDomainCatalog.domainsFor(package)` as a
+   `DOMAIN` rule.
 4. Serialize the deduped `pattern → matchType` map to a JSON array of
-   `{pattern, matchType}` and call `_engine.pushWebBlocklist(json)`.
+   `{pattern, matchType}` and call `engine.pushWebBlocklist(json)`.
 
 Because active-state, pausing, alias expansion, and app-derivation are all
 resolved here, the native side only ever sees a flat, already-filtered rule
@@ -254,21 +298,40 @@ the native engine support them.
 ### Screen
 
 `web_blocker/presentation/web_block_screen.dart` — titled **"Website
-blocker"**. `BlocConsumer` surfaces transient `error` strings as a toast. Layout:
+blocker"**. `BlocConsumer` surfaces transient `error` strings as a toast; no
+`buildWhen` — stats ticks are rare while this screen is visible (blocks happen
+while the user is in the browser), so the full rebuild beats selector
+plumbing. The stats `Row` deliberately does **not** use
+`CrossAxisAlignment.stretch`: inside the `ListView` its height is unbounded,
+and stretch hands the cards an infinite height constraint — layout aborts the
+frame (blank body) and then `!semantics.parentDataDirty` spams every frame.
+Latent since inception, first triggered 2026-08-17 by the first on-device
+`webBlocked` stat while the screen was open; guarded by
+`test/web_block_screen_semantics_test.dart`. Layout:
 
 - **Stats dashboard** (`_StatsSection`) — three `StatCard`s (Blocked today,
-  Total blocked, Focus saved [min]) plus a "Most blocked" line; only shown when
-  `state.hasStats`.
+  Total blocked, Focus saved [min]) plus a "Most blocked" line; only shown
+  when `state.hasStats`.
 - **Protection** — two `AppToggleTile`s: "Block websites of blocked apps"
   (`setBlockForApps`) and "Block adult content (18+)" (`setBlockAdult`).
 - **Popular sites** — `AppChip`s from `PopularSites.all` split across two rows
   inside one horizontal `SingleChildScrollView` (both rows scroll together);
   selected state driven by `state.activePopularIds`. A trailing "Add website"
-  chip closes the second row and opens the same add sheet as the FAB.
-- **Your blocklist** — searchable rows (search appears past 6 entries); each row
-  has an enable toggle, an edit button (custom only), and delete. Add/edit use a
-  `GlassBottomSheet` with inline `DomainValidator` feedback (shared
-  `_showSiteSheet` helper).
+  chip closes the second row and opens the same add sheet as the FAB. Tapping a
+  chip whose domain already exists as a *custom* entry upgrades that entry to
+  the popular one in place (never deletes the user's entry).
+- **Your blocklist** — searchable rows (search appears past 8 entries, matching
+  the sibling screens, and stays visible while a query is active so the filter
+  can always be cleared); each row has an enable toggle (with a
+  site-named `semanticLabel`), a pause/resume button (EVO-012: a
+  `GlassBottomSheet` of 5/15/30/60-minute chips; paused rows show "Paused until
+  HH:MM" and native re-arms the block at expiry), an edit button (custom only —
+  also enforced in `editEntry`), and delete; all tooltips carry the site name
+  for TalkBack. The primary empty state is an `EmptyState` with an "Add
+  website" CTA. Add/edit use a `GlassBottomSheet` with inline feedback from the
+  shared `DomainValidator.check` rule; the sheet awaits the cubit commit and
+  only announces success ("Blocked X") after persist + push landed — a failed
+  save reverts the optimistic list and shows the error toast instead.
 
 On-screen explanatory copy is kept to a minimum: the app-bar `InfoButton`
 (tap-to-open `Tooltip`) carries the feature explanation instead of an intro
@@ -296,7 +359,10 @@ command instead (`blockAdultWebsites`, `blockWebsitesForBlockedApps` fields).
 
 **Native side** (`channels/CommandHandler.kt`):
 
-- `"pushWebBlocklist"` → `store.webBlocklistJson = json` then
+- `"pushWebBlocklist"` → fail-safe like `pushProtectedApps`: a null or
+  non-JSON-array `json` arg is a **no-op, never a wipe** (clearing requires an
+  explicit `"[]"`); a valid payload is stored
+  (`store.webBlocklistJson = json`) and applied via
   `DetoxoAccessibilityService.instance?.reload()`.
 - `"pushSettings"` → among other fields, sets `store.blockAdultWebsites` /
   `store.blockWebsitesForBlockedApps`, then `reload()`.
@@ -339,8 +405,13 @@ an optional adult-domain `HashSet`.
 | `matchType` | Rule |
 |---|---|
 | `DOMAIN` (default) | `host == pattern` **or** `host.endsWith("." + pattern)` — covers subdomains. |
-| `WILDCARD` | glob (`*` = any run) compiled to an anchored regex over the host. |
+| `WILDCARD` | glob (`*` = any run) — regex precompiled once at `parse()`, never on the per-event path. |
 | `EXACT` | matches only when a `fullUrl` is supplied and equals the pattern. |
+
+A rule with a future `pausedUntil` (epoch ms, from the wire — EVO-012) is
+skipped until `System.currentTimeMillis()` passes it, then matches again with
+no push needed. The `DOMAIN` subdomain check is allocation-free
+(`isSubdomainOf` — no `"." + pattern` concat per event).
 
 If adult blocking is on, the host is additionally walked up its parent labels
 (`foo.bar.example.com → bar.example.com → example.com`), returning true on any
@@ -369,6 +440,13 @@ stateless host extraction from a browser's accessibility tree.
   2. **Generic fallback:** a bounded DFS (`ArrayDeque`, capped at `maxNodes` =
      `MAX_NODES` = 12000, same cap as reel detection) over `EditText` /
      `url`-ish nodes, extending coverage to effectively any browser.
+
+  Both stages **skip focused nodes**: a focused address bar means the user is
+  typing, so half-typed hosts never trigger a back press mid-edit. Once
+  navigation commits, focus moves to the page and the load's content-change
+  events re-run extraction on the then-unfocused bar, so the block still
+  fires. Ceiling: a browser that kept its bar focused after page load would
+  never be blocked — none of the mapped ones do.
 - **`normalizeHost(raw)`** — lowercases, rejects strings containing spaces
   (search queries / "Search or type URL" placeholders), strips
   scheme/path/query/fragment/port and leading `www.`, and validates against a
@@ -400,11 +478,14 @@ if (BrowserUrlExtractor.isBrowser(pkg)) {
 4. `store.recordWebBlock(dateKey())`, read `(today, total)`, and post a
    `webBlocked` event: `{host, mode:"PRESS_BACK", today, total}`.
 5. `pressBackWithRateLimit()` (global back action, rate-limited by
-   `BACK_RATE_LIMIT_MS` = 1100 ms).
+   `BACK_RATE_LIMIT_MS` = 1100 ms), then a short **"$host blocked by Detoxo"
+   toast** (EVO-011) so the bounce is attributable rather than looking like a
+   browser glitch.
 
-The block **mode is always `PRESS_BACK`** here regardless of the entry's stored
-`blockMode` — only `{pattern, matchType}` crosses the channel, so native has no
-per-entry mode to honor. The emitted `webBlocked` event is consumed by
+The block **mode is always `PRESS_BACK`** here — only
+`{pattern, matchType[, pausedUntil]}` crosses the channel, so native has no
+per-entry mode to honor. The log line never includes the host (browsing data
+must not reach logcat); the `webBlocked` event is consumed by
 `WebBlockStatsRepositoryImpl.watch()` to update the Dart-side dashboard.
 
 ---
@@ -443,6 +524,7 @@ subset of that work.
 - `lib/features/limits/web_blocker/domain/repositories/web_block_repository.dart`
 - `lib/features/limits/web_blocker/domain/repositories/web_block_stats_repository.dart`
 - `lib/features/limits/web_blocker/domain/utils/domain_validator.dart`
+- `lib/features/limits/web_blocker/domain/web_block_sync.dart`
 - `lib/features/limits/web_blocker/data/repositories/web_block_repository_impl.dart`
 - `lib/features/limits/web_blocker/data/repositories/web_block_stats_repository_impl.dart`
 - `lib/features/limits/web_blocker/presentation/web_block_cubit.dart`

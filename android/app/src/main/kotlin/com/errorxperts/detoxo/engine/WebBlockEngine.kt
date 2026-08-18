@@ -16,7 +16,16 @@ import java.util.zip.GZIPInputStream
  */
 class WebBlockEngine(private val context: Context) {
 
-    private data class Rule(val pattern: String, val type: String)
+    // `regex` is precompiled at parse time for WILDCARD rules — never on the
+    // per-event hot path. `pausedUntil` (epoch ms, 0 = never) lets a rule sit
+    // dormant until it expires; expiry is enforced here, natively, so a per-site
+    // pause re-arms even if the Flutter app is never reopened.
+    private data class Rule(
+        val pattern: String,
+        val type: String,
+        val pausedUntil: Long = 0L,
+        val regex: Regex? = null,
+    )
 
     @Volatile private var rules: List<Rule> = emptyList()
     @Volatile private var adultEnabled = false
@@ -40,11 +49,13 @@ class WebBlockEngine(private val context: Context) {
     /** True if [host] (already normalized) is blocked. */
     fun matchHost(host: String, fullUrl: String? = null): Boolean {
         if (host.isEmpty()) return false
+        val now = System.currentTimeMillis()
         for (r in rules) {
+            if (now < r.pausedUntil) continue // per-site pause window
             val hit = when (r.type) {
                 "EXACT" -> fullUrl != null && fullUrl == r.pattern
-                "WILDCARD" -> wildcardMatch(host, r.pattern)
-                else -> host == r.pattern || host.endsWith("." + r.pattern)
+                "WILDCARD" -> r.regex?.matches(host) == true
+                else -> host == r.pattern || isSubdomainOf(host, r.pattern)
             }
             if (hit) return true
         }
@@ -71,7 +82,15 @@ class WebBlockEngine(private val context: Context) {
                 val o = arr.optJSONObject(i) ?: continue
                 val pattern = o.optString("pattern").trim().lowercase()
                 if (pattern.isEmpty()) continue
-                out.add(Rule(pattern, o.optString("matchType", "DOMAIN")))
+                val type = o.optString("matchType", "DOMAIN")
+                out.add(
+                    Rule(
+                        pattern,
+                        type,
+                        pausedUntil = o.optLong("pausedUntil", 0L),
+                        regex = if (type == "WILDCARD") compileWildcard(pattern) else null,
+                    ),
+                )
             }
             out
         } catch (_: Throwable) {
@@ -79,8 +98,14 @@ class WebBlockEngine(private val context: Context) {
         }
     }
 
-    /** Translate a glob (`*` = any run) to an anchored regex over the host. */
-    private fun wildcardMatch(host: String, pattern: String): Boolean {
+    /** Allocation-free `host.endsWith(".$pattern")` for the hot path. */
+    private fun isSubdomainOf(host: String, pattern: String): Boolean =
+        host.length > pattern.length &&
+            host[host.length - pattern.length - 1] == '.' &&
+            host.endsWith(pattern)
+
+    /** Translate a glob (`*` = any run) to an anchored regex — once, at parse. */
+    private fun compileWildcard(pattern: String): Regex? {
         val sb = StringBuilder("^")
         for (c in pattern) {
             when {
@@ -91,9 +116,9 @@ class WebBlockEngine(private val context: Context) {
         }
         sb.append('$')
         return try {
-            Regex(sb.toString()).matches(host)
+            Regex(sb.toString())
         } catch (_: Throwable) {
-            false
+            null
         }
     }
 

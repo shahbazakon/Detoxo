@@ -3,14 +3,13 @@ import 'package:detoxo/features/limits/web_blocker/domain/entities/web_block_sou
 import 'package:equatable/equatable.dart';
 
 /// A website blocklist entry. The actual host matching runs natively (see the
-/// `WebBlockEngine` on the Android side); the Dart layer owns CRUD, persistence
-/// and the minimal payload pushed over the channel ([toWire]).
+/// `WebBlockEngine` on the Android side); the Dart layer owns CRUD and
+/// persistence — the channel payload is built by `syncWebBlocklist`.
 class WebBlockEntry extends Equatable {
   const WebBlockEntry({
     required this.pattern,
     this.matchType = WebMatchType.domain,
     this.enabled = true,
-    this.blockMode = BlockingMode.pressBack,
     this.pausedUntil,
     this.displayName,
     this.source = WebBlockSource.custom,
@@ -22,7 +21,6 @@ class WebBlockEntry extends Equatable {
     pattern: json['pattern'] as String? ?? '',
     matchType: WebMatchType.fromWire(json['matchType'] as String?),
     enabled: json['enabled'] as bool? ?? true,
-    blockMode: BlockingMode.fromWire(json['blockMode'] as String?),
     pausedUntil: json['pausedUntil'] == null
         ? null
         : DateTime.fromMillisecondsSinceEpoch(json['pausedUntil'] as int),
@@ -37,7 +35,9 @@ class WebBlockEntry extends Equatable {
   final String pattern;
   final WebMatchType matchType;
   final bool enabled;
-  final BlockingMode blockMode;
+
+  /// Per-site pause: while in the future, native skips this rule and re-arms
+  /// it at expiry (enforced natively, so it survives the app never reopening).
   final DateTime? pausedUntil;
 
   /// Friendly label for the UI (e.g. "YouTube"); falls back to [pattern].
@@ -58,14 +58,20 @@ class WebBlockEntry extends Equatable {
   /// What to render as the row title.
   String get label => displayName ?? pattern;
 
-  bool get isActive =>
-      enabled && (pausedUntil == null || pausedUntil!.isBefore(DateTime.now()));
+  /// Pure, clock-injectable form of [isActive] (repo test idiom).
+  bool isActiveAt(DateTime now) =>
+      enabled && (pausedUntil == null || pausedUntil!.isBefore(now));
+
+  bool get isActive => isActiveAt(DateTime.now());
+
+  /// Whether the pause window is currently holding at [now].
+  bool isPausedAt(DateTime now) =>
+      enabled && pausedUntil != null && pausedUntil!.isAfter(now);
 
   WebBlockEntry copyWith({
     String? pattern,
     WebMatchType? matchType,
     bool? enabled,
-    BlockingMode? blockMode,
     DateTime? pausedUntil,
     bool clearPause = false,
     String? displayName,
@@ -76,7 +82,6 @@ class WebBlockEntry extends Equatable {
     pattern: pattern ?? this.pattern,
     matchType: matchType ?? this.matchType,
     enabled: enabled ?? this.enabled,
-    blockMode: blockMode ?? this.blockMode,
     pausedUntil: clearPause ? null : (pausedUntil ?? this.pausedUntil),
     displayName: displayName ?? this.displayName,
     source: source ?? this.source,
@@ -88,7 +93,6 @@ class WebBlockEntry extends Equatable {
     'pattern': pattern,
     'matchType': matchType.wire,
     'enabled': enabled,
-    'blockMode': blockMode.wire,
     'pausedUntil': pausedUntil?.millisecondsSinceEpoch,
     'displayName': displayName,
     'source': source.wire,
@@ -96,18 +100,11 @@ class WebBlockEntry extends Equatable {
     'createdAt': createdAt?.millisecondsSinceEpoch,
   };
 
-  /// The minimal shape pushed to the native matcher (pattern + match type only).
-  Map<String, dynamic> toWire() => {
-    'pattern': pattern,
-    'matchType': matchType.wire,
-  };
-
   @override
   List<Object?> get props => [
     pattern,
     matchType,
     enabled,
-    blockMode,
     pausedUntil,
     displayName,
     source,

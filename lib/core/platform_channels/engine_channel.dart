@@ -84,6 +84,11 @@ class EngineChannel {
   Future<bool> isAccessibilityEnabled() =>
       invokeBool(ChannelMethods.isAccessibilityEnabled);
 
+  /// Whether the accessibility service INSTANCE is live. Distinct from
+  /// [isAccessibilityEnabled] (the Settings.Secure string): some OEMs
+  /// (ColorOS force-stop) kill the service while the setting stays enabled.
+  Future<bool> serviceAlive() => invokeBool(ChannelMethods.serviceAlive);
+
   Future<void> openAccessibilitySettings() =>
       invokeVoid(ChannelMethods.openAccessibilitySettings);
 

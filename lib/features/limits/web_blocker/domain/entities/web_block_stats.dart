@@ -12,8 +12,8 @@ class WebBlockStats extends Equatable {
   final int blockedToday;
   final String? mostBlockedHost;
 
-  /// Estimated focus time reclaimed, using the app-wide 30s-per-block heuristic
-  /// (mirrors `dashboard_tab.dart`'s `_secondsSavedPerBlock`).
+  /// Estimated focus time reclaimed — a 30s-per-block heuristic. This is the
+  /// only definition; nothing else mirrors it.
   static const int secondsSavedPerBlock = 30;
 
   int get focusMinutesSaved =>

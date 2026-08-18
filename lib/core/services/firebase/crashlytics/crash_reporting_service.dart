@@ -33,9 +33,31 @@ class FirebaseCrashReportingService implements CrashReportingService {
   /// state, and must run before the DI container exists.
   static void installGlobalHandlers() {
     final crashlytics = FirebaseCrashlytics.instance;
-    FlutterError.onError = crashlytics.recordFlutterFatalError;
+    // A repeating error (e.g. a per-frame build/layout failure) must not
+    // flood Crashlytics: every report copies its full stack onto the Java
+    // heap, and a 60fps error loop OOM-killed the app on-device (2026-08-17).
+    // Record each distinct error once per cooldown window.
+    final recent = <int, DateTime>{};
+    bool shouldRecord(Object error) {
+      const cooldown = Duration(minutes: 5);
+      final now = DateTime.now();
+      recent.removeWhere((_, t) => now.difference(t) > cooldown);
+      return identical(
+        recent.putIfAbsent(error.toString().hashCode, () => now),
+        now,
+      );
+    }
+
+    FlutterError.onError = (details) {
+      FlutterError.presentError(details); // keep console/IDE visibility
+      if (shouldRecord(details.exception)) {
+        crashlytics.recordFlutterFatalError(details);
+      }
+    };
     PlatformDispatcher.instance.onError = (error, stack) {
-      crashlytics.recordError(error, stack, fatal: true);
+      if (shouldRecord(error)) {
+        crashlytics.recordError(error, stack, fatal: true);
+      }
       return true;
     };
   }

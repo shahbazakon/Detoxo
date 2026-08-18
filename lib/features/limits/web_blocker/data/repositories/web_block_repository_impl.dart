@@ -14,6 +14,10 @@ class WebBlockRepositoryImpl implements WebBlockRepository {
   Future<List<WebBlockEntry>> load() async {
     final raw = _store.read(StoreKeys.webBlocklist);
     if (raw == null) return const [];
+    // A corrupt blob THROWS (no silent [] fallback): syncWebBlocklist must
+    // abort rather than push an empty list, which native would honor as an
+    // intentional clear and wipe its last-good copy. The screen surfaces the
+    // error via the cubit's load() catch; a user re-add overwrites the blob.
     final list = jsonDecode(raw) as List<dynamic>;
     return list
         .map((e) => WebBlockEntry.fromJson(e as Map<String, dynamic>))

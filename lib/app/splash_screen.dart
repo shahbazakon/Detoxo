@@ -10,6 +10,7 @@ import 'package:detoxo/features/blocking/shared/domain/repositories/blocking_rep
 import 'package:detoxo/features/blocking/shared/presentation/settings_cubit.dart';
 import 'package:detoxo/features/content_counter/content_counter_core/domain/repositories/content_counter_repository.dart';
 import 'package:detoxo/features/content_counter/home_content_counter/domain/repositories/home_widget_repository.dart';
+import 'package:detoxo/features/limits/limits.dart';
 import 'package:detoxo/features/permissions/presentation/permissions_cubit.dart';
 import 'package:detoxo/features/protected_apps/protected_apps.dart';
 import 'package:detoxo/gen/assets.gen.dart';
@@ -71,6 +72,17 @@ class _SplashScreenState extends State<SplashScreen> {
     unawaited(
       syncProtectedAppsAtBoot(
         sl<ProtectedAppsRepository>(),
+        sl<EngineRepository>(),
+      ),
+    );
+
+    // Web blocklist: same drift repair — native gets the merged list (incl.
+    // app-derived domains) without the Web Blocker screen ever being opened.
+    unawaited(
+      syncWebBlocklist(
+        sl<WebBlockRepository>(),
+        sl<SettingsRepository>(),
+        sl<AppBlockRepository>(),
         sl<EngineRepository>(),
       ),
     );

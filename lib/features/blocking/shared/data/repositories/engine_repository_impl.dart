@@ -97,11 +97,15 @@ class EngineRepositoryImpl implements EngineRepository {
   @override
   Future<ServiceSnapshot> currentStatus() async {
     final enabled = await _channel.isAccessibilityEnabled();
+    // EVO-013: "running" needs the service INSTANCE alive, not just the
+    // setting — some OEMs (ColorOS force-stop) kill the service while the
+    // Settings.Secure string keeps listing it, and never rebind it.
+    final alive = enabled && await _channel.serviceAlive();
     final stats = await _channel.blockStats();
     _today = stats['today'] as int? ?? 0;
     _total = stats['total'] as int? ?? 0;
     return ServiceSnapshot(
-      status: enabled ? ServiceStatus.running : ServiceStatus.stopped,
+      status: alive ? ServiceStatus.running : ServiceStatus.stopped,
       blocksToday: _today,
       blocksTotal: _total,
     );

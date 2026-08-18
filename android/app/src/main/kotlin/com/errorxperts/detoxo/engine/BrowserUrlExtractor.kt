@@ -87,15 +87,27 @@ object BrowserUrlExtractor {
     fun extractHost(root: AccessibilityNodeInfo, pkg: String, maxNodes: Int): String? {
         // 1) Mapped fast path: the address bar by resource id.
         URL_BAR_IDS[pkg]?.let { ids ->
+            var sawMappedBar = false
             for (id in ids) {
                 val hits = root.findAccessibilityNodeInfosByViewId(id)
                 if (!hits.isNullOrEmpty()) {
+                    sawMappedBar = true
                     for (n in hits) {
+                        // A focused address bar means the user is typing — don't
+                        // match half-typed hosts (the page-load events after
+                        // commit re-run this on the then-unfocused bar). Ceiling:
+                        // a browser that keeps its bar focused after load would
+                        // never be blocked; none of the mapped ones do.
+                        if (n?.isFocused == true) continue
                         val host = normalizeHost(n?.text?.toString())
                         if (host != null) return host
                     }
                 }
             }
+            // The mapped bar existed but yielded nothing (focused, or showing
+            // non-URL text). It is authoritative — never fall through to the
+            // DFS, which would walk up to maxNodes on every event while typing.
+            if (sawMappedBar) return null
         }
         // 2) Generic fallback: bounded DFS over EditText / url-ish nodes.
         val deque = ArrayDeque<AccessibilityNodeInfo>()
@@ -106,7 +118,10 @@ object BrowserUrlExtractor {
             i++
             val isEdit = node.className?.toString()?.contains("EditText") == true
             val resName = node.viewIdResourceName
-            if (isEdit || (resName != null && resName.contains("url", ignoreCase = true))) {
+            // Skip focused nodes for the same typing-in-progress reason as above.
+            if (!node.isFocused &&
+                (isEdit || (resName != null && resName.contains("url", ignoreCase = true)))
+            ) {
                 val host = extractFromText(node.text?.toString())
                 if (host != null) return host
             }

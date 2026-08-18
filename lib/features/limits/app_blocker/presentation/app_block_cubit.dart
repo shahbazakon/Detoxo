@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:detoxo/core/utils/package_name.dart';
 import 'package:detoxo/features/limits/app_blocker/domain/entities/app_block_entry.dart';
 import 'package:detoxo/features/limits/app_blocker/domain/repositories/app_block_repository.dart';
@@ -6,9 +8,14 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 
 /// Manages the full-app blocklist (CRUD + persistence).
 class AppBlockCubit extends Cubit<List<AppBlockEntry>> {
-  AppBlockCubit(this._repo) : super(const []);
+  AppBlockCubit(this._repo, {this.onChanged}) : super(const []);
 
   final AppBlockRepository _repo;
+
+  /// Fired after every persisted mutation, fire-and-forget. The screen wires
+  /// this to `syncWebBlocklist` so app-derived web rules never go stale; a
+  /// failure there must never block the app-blocker UI.
+  final Future<void> Function()? onChanged;
 
   Future<void> load() async => emit(await _repo.load());
 
@@ -51,5 +58,6 @@ class AppBlockCubit extends Cubit<List<AppBlockEntry>> {
   Future<void> _commit(List<AppBlockEntry> entries) async {
     emit(entries);
     await _repo.save(entries);
+    if (onChanged != null) unawaited(onChanged!());
   }
 }

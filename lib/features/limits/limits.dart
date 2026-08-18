@@ -9,3 +9,4 @@ export 'package:detoxo/features/limits/streak/domain/entities/streak.dart';
 export 'package:detoxo/features/limits/streak/domain/repositories/streak_repository.dart';
 export 'package:detoxo/features/limits/web_blocker/domain/entities/web_block_entry.dart';
 export 'package:detoxo/features/limits/web_blocker/domain/repositories/web_block_repository.dart';
+export 'package:detoxo/features/limits/web_blocker/domain/web_block_sync.dart';

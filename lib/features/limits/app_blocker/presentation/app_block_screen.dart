@@ -11,6 +11,7 @@ import 'package:detoxo/features/blocking/shared/presentation/settings_cubit.dart
 import 'package:detoxo/features/limits/app_blocker/domain/entities/app_block_entry.dart';
 import 'package:detoxo/features/limits/app_blocker/domain/repositories/app_block_repository.dart';
 import 'package:detoxo/features/limits/app_blocker/presentation/app_block_cubit.dart';
+import 'package:detoxo/features/limits/web_blocker/domain/web_block_sync.dart';
 import 'package:detoxo/features/protected_apps/protected_apps.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -27,7 +28,11 @@ class AppBlockScreen extends StatelessWidget {
     // TargetsCubit + SettingsCubit are global (main.dart); only the custom-block
     // cubit is scoped to this route.
     return BlocProvider(
-      create: (_) => AppBlockCubit(sl<AppBlockRepository>())..load(),
+      create: (_) => AppBlockCubit(
+        sl<AppBlockRepository>(),
+        // Keep native's app-derived web rules in step with every mutation.
+        onChanged: () => syncWebBlocklist(sl(), sl(), sl(), sl()),
+      )..load(),
       child: const _AppBlockView(),
     );
   }
@@ -133,11 +138,13 @@ class _AppBlockViewState extends State<_AppBlockView> {
               children: [
                 AppToggle(
                   value: custom[i].enabled,
+                  semanticLabel: 'Block ${custom[i].appName}',
                   onChanged: (v) =>
                       context.read<AppBlockCubit>().toggle(i, enabled: v),
                 ),
                 IconButton(
                   icon: const Icon(Icons.delete_outline),
+                  tooltip: 'Remove ${custom[i].appName}',
                   onPressed: () => context.read<AppBlockCubit>().removeAt(i),
                 ),
               ],

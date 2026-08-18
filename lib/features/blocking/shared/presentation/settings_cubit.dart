@@ -38,7 +38,12 @@ class SettingsCubit extends Cubit<AppSettings> {
     _syncTicker(loaded);
   }
 
-  Future<void> _commit(AppSettings next) async {
+  /// Load-modify-write: the transform is applied to a FRESH load, not to the
+  /// in-memory state. Other writers exist (the Web Blocker's two protection
+  /// toggles write the repository directly), and building from `state.copyWith`
+  /// would silently revert their fields on the next unrelated commit here.
+  Future<void> _commit(AppSettings Function(AppSettings) update) async {
+    final next = update(await _settings.load());
     emit(next);
     await _settings.save(next);
     await _engine.pushSettings(next);
@@ -52,7 +57,7 @@ class SettingsCubit extends Cubit<AppSettings> {
     final isBase =
         plan == BlockingPlan.blockAll || plan == BlockingPlan.curious;
     return _commit(
-      state.copyWith(
+      (s) => s.copyWith(
         activePlan: plan,
         baseMode: isBase ? plan : null,
         clearPauseSession: true,
@@ -61,42 +66,42 @@ class SettingsCubit extends Cubit<AppSettings> {
   }
 
   Future<void> setDefaultBlockMode(BlockingMode mode) =>
-      _commit(state.copyWith(defaultBlockMode: mode));
+      _commit((s) => s.copyWith(defaultBlockMode: mode));
 
   Future<void> setMasterEnabled({required bool enabled}) =>
-      _commit(state.copyWith(masterEnabled: enabled));
+      _commit((s) => s.copyWith(masterEnabled: enabled));
 
   Future<void> setVibration({required bool enabled}) =>
-      _commit(state.copyWith(vibrationEnabled: enabled));
+      _commit((s) => s.copyWith(vibrationEnabled: enabled));
 
   /// Show/hide the global feedback button in screen app bars. UI-only (like
   /// [setThemeMode]); persisted through the single [_commit] path.
   Future<void> setShowFeedbackButton({required bool enabled}) =>
-      _commit(state.copyWith(showFeedbackButton: enabled));
+      _commit((s) => s.copyWith(showFeedbackButton: enabled));
 
   /// Appearance preference. UI-only; pushing to native is harmless (the engine
   /// ignores the field) and keeps a single persistence path.
   Future<void> setThemeMode(AppThemeMode mode) =>
-      _commit(state.copyWith(themeMode: mode));
+      _commit((s) => s.copyWith(themeMode: mode));
 
   /// Animated background choice for one theme. UI-only (like [setThemeMode]);
   /// the native engine ignores it and persistence flows through [_commit]. Pass
   /// [dark] for the mode being edited so each theme keeps its own pick.
   Future<void> setBackground(AppBackground background, {required bool dark}) =>
       _commit(
-        dark
-            ? state.copyWith(darkBackground: background)
-            : state.copyWith(lightBackground: background),
+        (s) => dark
+            ? s.copyWith(darkBackground: background)
+            : s.copyWith(lightBackground: background),
       );
 
   Future<void> setOnboarded({required bool value}) =>
-      _commit(state.copyWith(onboarded: value));
+      _commit((s) => s.copyWith(onboarded: value));
 
   /// Marks the one-time feature showcase as seen (true) or queues a replay
   /// (false). The Dashboard's coordinator starts the tour on the true→false edge
   /// and writes `true` back once the tour finishes or is dismissed.
   Future<void> setShowcaseSeen({required bool value}) =>
-      _commit(state.copyWith(hasSeenFeatureShowcase: value));
+      _commit((s) => s.copyWith(hasSeenFeatureShowcase: value));
 
   Future<void> togglePlatform(String platformId, {required bool enabled}) {
     final next = Set<String>.from(state.enabledPlatformIds);
@@ -105,11 +110,11 @@ class SettingsCubit extends Cubit<AppSettings> {
     } else {
       next.remove(platformId);
     }
-    return _commit(state.copyWith(enabledPlatformIds: next));
+    return _commit((s) => s.copyWith(enabledPlatformIds: next));
   }
 
   Future<void> setEnabledPlatforms(Set<String> ids) =>
-      _commit(state.copyWith(enabledPlatformIds: ids));
+      _commit((s) => s.copyWith(enabledPlatformIds: ids));
 
   // ── Pause ──────────────────────────────────────────────────────────────────
 
@@ -127,7 +132,7 @@ class SettingsCubit extends Cubit<AppSettings> {
       planToResume: state.baseMode,
     );
     return _commit(
-      state.copyWith(activePlan: state.baseMode, pauseSession: session),
+      (s) => s.copyWith(activePlan: s.baseMode, pauseSession: session),
     );
   }
 
@@ -135,7 +140,7 @@ class SettingsCubit extends Cubit<AppSettings> {
   Future<void> resumeNow() {
     if (state.pauseSession == null) return Future.value();
     return _commit(
-      state.copyWith(activePlan: state.baseMode, clearPauseSession: true),
+      (s) => s.copyWith(activePlan: s.baseMode, clearPauseSession: true),
     );
   }
 
@@ -161,7 +166,7 @@ class SettingsCubit extends Cubit<AppSettings> {
   Future<void> setOneReel({required int count}) async {
     final n = count.clamp(1, 20);
     await _commit(
-      state.copyWith(
+      (s) => s.copyWith(
         activePlan: BlockingPlan.oneReel,
         reelAllowance: n,
         clearPauseSession: true,
@@ -188,7 +193,8 @@ class SettingsCubit extends Cubit<AppSettings> {
     // the session. (activePlan is already the base; this just clears the banner.)
     if (s.pauseSession != null && !s.isPauseContractLive()) {
       await _commit(
-        s.copyWith(activePlan: s.baseMode, clearPauseSession: true),
+        (cur) =>
+            cur.copyWith(activePlan: cur.baseMode, clearPauseSession: true),
       );
     }
   }
@@ -203,7 +209,7 @@ class SettingsCubit extends Cubit<AppSettings> {
     if (state.activePlan == BlockingPlan.oneReel && rs.active && rs.blocked) {
       unawaited(
         _commit(
-          state.copyWith(activePlan: state.baseMode, clearPauseSession: true),
+          (s) => s.copyWith(activePlan: s.baseMode, clearPauseSession: true),
         ),
       );
     }
