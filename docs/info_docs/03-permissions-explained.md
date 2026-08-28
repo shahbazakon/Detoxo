@@ -96,7 +96,7 @@ Detoxo watches for this. If it notices a grant isn't taking, the button on the p
 
 **Why it's useful.** To save power, Android aggressively puts background apps to sleep. That's usually great — but a blocker that's asleep isn't blocking. Granting a **battery-optimization exemption** tells the system to leave Detoxo running so it's there the instant you open a feed.
 
-**How to grant it.** Tap **Grant** and Detoxo opens Android's **Battery optimization** list. That list often opens filtered to "Not optimized", so switch the dropdown to **All apps**, find **Detoxo**, and choose **Don't optimize**. Two taps more than a pop-up would take — Detoxo uses the list on purpose, because the one-tap version needs a permission Google Play reserves for apps that stop working without it, and Detoxo isn't one of them.
+**How to grant it.** Tap **Grant** and Android shows a one-tap confirmation asking whether to let Detoxo run in the background — choose **Allow**. (On some phones this opens the Battery optimization screen instead; there, find **Detoxo** and choose **Don't optimize**.)
 
 **What it does not do.** It doesn't drain your battery on purpose or run extra work — Detoxo's blocking is lightweight. It just asks Android not to force-stop the protection you turned on. Highly recommended, especially on phones that are strict about background apps.
 
@@ -119,7 +119,7 @@ Detoxo watches for this. If it notices a grant isn't taking, the button on the p
 
 **What you'll see:** "Notifications" — *Alerts you if protection stops.*
 
-**Why it's useful.** Detoxo keeps a quiet, always-on notification so you can see at a glance that it's active — and so it can alert you if protection ever stops. On newer Android versions, apps need your permission to post notifications, which is why it's on the list.
+**Why it's useful.** Detoxo keeps a quiet, always-on notification so you can see at a glance that it's active — and so it can alert you if protection ever stops. Some phones silently kill the protection service (for example after a force-stop), and Android doesn't let an app restart it by itself — so Detoxo checks in the background every few minutes and, if protection has died, posts a **"Protection stopped"** alert that takes you straight to the settings screen where one tap turns it back on. Without notification permission, that safety net can't reach you. On newer Android versions, apps need your permission to post notifications, which is why it's on the list.
 
 This is the one permission granted with a simple in-app "Allow?" pop-up rather than a trip to system settings. If you once dismissed that pop-up with "Don't ask again", Android stops showing it — so the button then reads **Open settings** and takes you straight to Detoxo's system settings to switch notifications back on.
 

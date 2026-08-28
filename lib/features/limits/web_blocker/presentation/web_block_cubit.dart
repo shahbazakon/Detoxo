@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:detoxo/core/utils/app_logger.dart';
+import 'package:detoxo/features/blocking/shared/domain/entities/app_settings.dart';
 import 'package:detoxo/features/blocking/shared/domain/repositories/blocking_repositories.dart';
 import 'package:detoxo/features/limits/app_blocker/domain/repositories/app_block_repository.dart';
 import 'package:detoxo/features/limits/web_blocker/domain/entities/popular_site.dart';
@@ -173,26 +175,53 @@ class WebBlockCubit extends Cubit<WebBlockState> {
   }
 
   Future<void> setBlockAdult({required bool value}) async {
+    final previous = state.blockAdult;
     emit(state.copyWith(blockAdult: value, clearError: true));
-    final next = (await _settings.load()).copyWith(blockAdultWebsites: value);
-    await _settings.save(next);
-    await _engine.pushSettings(next);
+    final ok = await _saveSettings(
+      (s) => s.copyWith(blockAdultWebsites: value),
+    );
+    if (!ok) emit(state.copyWith(blockAdult: previous, error: _saveFailed));
   }
 
   Future<void> setBlockForApps({required bool value}) async {
+    final previous = state.blockForApps;
     emit(state.copyWith(blockForApps: value, clearError: true));
-    final next = (await _settings.load()).copyWith(
-      blockWebsitesForBlockedApps: value,
+    final ok = await _saveSettings(
+      (s) => s.copyWith(blockWebsitesForBlockedApps: value),
     );
-    await _settings.save(next);
-    await _engine.pushSettings(next);
+    if (!ok) {
+      emit(state.copyWith(blockForApps: previous, error: _saveFailed));
+      return;
+    }
     // The derived app→domain rules changed, so re-push the blocklist too.
     await _pushAll();
+  }
+
+  /// Load-modify-write of the shared settings + a best-effort native push.
+  /// False when persisting failed (callers revert their optimistic emit — the
+  /// same contract as [_commit]). A failed push is only logged: the value IS
+  /// saved, and `SettingsCubit.resync` re-pushes the repository on resume.
+  Future<bool> _saveSettings(AppSettings Function(AppSettings) update) async {
+    final AppSettings next;
+    try {
+      next = update(await _settings.load());
+      await _settings.save(next);
+    } on Object {
+      return false;
+    }
+    try {
+      await _engine.pushSettings(next);
+    } on Object catch (e) {
+      AppLogger.e('web blocker settings push failed', e);
+    }
+    return true;
   }
 
   void search(String query) => emit(state.copyWith(query: query));
 
   void clearError() => emit(state.copyWith(clearError: true));
+
+  static const _saveFailed = "Couldn't save — try again";
 
   /// Persists + pushes; on failure reverts the optimistic emit and surfaces the
   /// error (a green "Blocked X" over a failed save is worse than an error).
@@ -202,9 +231,7 @@ class WebBlockCubit extends Cubit<WebBlockState> {
     try {
       await _repo.save(entries);
     } on Object {
-      emit(
-        state.copyWith(entries: previous, error: "Couldn't save — try again"),
-      );
+      emit(state.copyWith(entries: previous, error: _saveFailed));
       return false;
     }
     await _pushAll(); // best-effort by contract; never throws

@@ -23,6 +23,7 @@ required.
 | Reel/Short detection + block (AccessibilityService) | **Works on a real device** — 3-stage view-id detection, `PRESS_BACK`/`KILL_APP`/`LOCK_SCREEN`/`NONE` block modes, native throttle/debounce/rate-limit | [03-detection-engine.md](03-detection-engine.md), `DetoxoAccessibilityService.kt` |
 | Blocking plans (`blockAll` / `curious`=**Conscious** / `oneReel` / `paused`) + pause window | **Honored by the engine** — `activePlan` gate + `pauseUntil` clock window + Conscious time-bank accountant | [05-plans-pause-conscious.md](05-plans-pause-conscious.md) |
 | Web blocklist enforcement | **Wired natively** — `WebBlockEngine` reads the browser address bar in the hot path, matches wildcards, presses Back with per-host debounce, records stats | [06-app-and-web-blocker.md](06-app-and-web-blocker.md), `engine/WebBlockEngine.kt` |
+| Custom whole-app blocking | **Wired natively** — `pushAppBlocklist` → `ConfigStore.blockedAppPackages`; the service HOME-bounces a blocked app with toast + vibration, recorded to the shared block counter | [06-app-and-web-blocker.md](06-app-and-web-blocker.md), `DetoxoAccessibilityService.kt` (`onAppBlocked`) |
 | Content counter (decoupled from blocking) + bubble + home-screen widget | **Works** — side-effect-free counting pass runs even when blocking is off; drives overlay bubble + `home_widget` | [17-content-counter.md](17-content-counter.md) |
 | Blocklist (data-driven) | **Works** — parsed from bundled `assets/config/platforms_config.json`; per-platform enable/disable persisted natively | [02-detection-config-schema.md](02-detection-config-schema.md) |
 | PIN lock + biometric/device-credential + retry-lockout ladder + Smart Auto Lock (resume re-lock, FLAG_SECURE Recents privacy) | **Works** — `local_auth` + `flutter_secure_storage`. **No recovery channel by design**; the `000000` dev backdoor was removed, not wired | [08-pin-lock-recovery.md](08-pin-lock-recovery.md) |
@@ -33,26 +34,24 @@ required.
 
 > Note vs. the top-level `README.md` status table: the README groups "app/web/usage native
 > enforcement" as a single follow-up. That is conservative — in the actual code the **web blocklist
-> path is already wired natively** (`WebBlockEngine` is instantiated in the service and invoked on
-> the browser branch of `onAccessibilityEvent`). What remains a follow-up is **full-app blocking**
-> and **daily-limit / usage enforcement** (see §2).
+> path** and **full-app blocking** are already wired natively (`WebBlockEngine` plus the
+> `blockedApps` HOME-bounce branch in `onAccessibilityEvent`). What remains a follow-up is
+> **daily-limit / usage enforcement** (see §2).
 
 ---
 
-## 2. Native enforcement scope (v1) — what is *not* enforced yet
+## 2. Native enforcement scope — what is *not* enforced yet
 
-The v1 native engine focuses on the **reel/short view-id path** plus **web host blocking**. Two
-limit features are UI + persistence in Dart with **no native enforcement yet**:
+The native engine covers the **reel/short view-id path**, **web host blocking**, and **custom
+whole-app blocking**. One limit feature is still UI + persistence in Dart with **no native
+enforcement yet**:
 
 | Feature | What exists | What's missing (follow-up) |
 |---|---|---|
-| **App blocker** (`lib/features/limits/app_blocker`) | Full UI, blocked-app selection, Dart persistence; `killApp(pkg)` exists but only as a **reel block *mode***, not standalone app enforcement | `ConfigStore` has **no blocked-apps package set**; the service never bounces a fully-blocked app on foreground. Needs: push a blocked-package list to the engine + a foreground-package guard in `onAccessibilityEvent` |
+| **App blocker** (`lib/features/limits/app_blocker`) | **Natively enforced** — `syncAppBlocklist` pushes enabled packages via `pushAppBlocklist`; `ConfigStore.blockedAppPackages` persists them; the service HOME-bounces any blocked app on any event (toast + vibration, shared block counter, protected/self/launcher/systemui skips) | Per-entry `lockAction` / `dailyLimitMinutes` are still unused — every block acts as a HOME bounce |
 | **Daily limit** (`lib/features/limits/daily_limit`) | Full UI, quota math, reset logic, Dart persistence, unit-tested | `ConfigStore` has **no daily-limit/usage keys**; native does only permission checks (`hasUsageAccess`), no `UsageStats` polling or quota-triggered block. Needs: usage sampling + a native quota gate |
 
-The reason web works but app/usage don't: web blocking needs only the *host string already on
-screen* (cheap, in-tree), whereas full-app and usage enforcement need a package-level allow/deny
-model and usage sampling the engine doesn't carry yet. See
-[06-app-and-web-blocker.md](06-app-and-web-blocker.md) and
+See [06-app-and-web-blocker.md](06-app-and-web-blocker.md) and
 [07-daily-limit-scheduler.md](07-daily-limit-scheduler.md).
 
 ---

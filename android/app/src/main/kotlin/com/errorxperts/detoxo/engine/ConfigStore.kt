@@ -15,9 +15,26 @@ class ConfigStore(context: Context) {
     private val prefs: SharedPreferences =
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
+    // The ~31 KB platforms config lives in its OWN prefs file: every .apply()
+    // re-serialises the whole file, and the hot path writes counters into
+    // [PREFS] constantly — sharing a file meant multi-KB disk writes at scroll
+    // frequency.
+    private val configPrefs: SharedPreferences =
+        context.applicationContext.getSharedPreferences(CONFIG_PREFS, Context.MODE_PRIVATE)
+
+    init {
+        // One-time idempotent migration of the config out of the hot file.
+        prefs.getString(KEY_CONFIG, null)?.let { legacy ->
+            if (!configPrefs.contains(KEY_CONFIG)) {
+                configPrefs.edit().putString(KEY_CONFIG, legacy).apply()
+            }
+            prefs.edit().remove(KEY_CONFIG).apply()
+        }
+    }
+
     var platformsConfigJson: String?
-        get() = prefs.getString(KEY_CONFIG, null)
-        set(value) = prefs.edit().putString(KEY_CONFIG, value).apply()
+        get() = configPrefs.getString(KEY_CONFIG, null)
+        set(value) = configPrefs.edit().putString(KEY_CONFIG, value).apply()
 
     var activePlan: String
         get() = prefs.getString(KEY_PLAN, "BLOCK_ALL") ?: "BLOCK_ALL"
@@ -82,9 +99,18 @@ class ConfigStore(context: Context) {
             .apply()
     }
 
-    /** (today, total) website block counts. Call after [recordWebBlock]. */
-    fun webBlockStats(): Pair<Int, Int> = Pair(
-        prefs.getInt(KEY_WEB_BLOCK_TODAY, 0),
+    /**
+     * (today, total) website block counts for [dateKey]. Read-time rollover
+     * (mirrors [ContentCounterStore.snapshot]): a stale stored date reads
+     * today as 0 without writing — the next [recordWebBlock] does the durable
+     * reset.
+     */
+    fun webBlockStats(dateKey: String): Pair<Int, Int> = Pair(
+        if (prefs.getString(KEY_WEB_BLOCK_DATE, "") == dateKey) {
+            prefs.getInt(KEY_WEB_BLOCK_TODAY, 0)
+        } else {
+            0
+        },
         prefs.getInt(KEY_WEB_BLOCK_TOTAL, 0),
     )
 
@@ -95,15 +121,16 @@ class ConfigStore(context: Context) {
     // Flutter UI is dead. `bank` drains 1:1 while a reel is on screen and refills
     // at `1 / earnDivisor` of elapsed time while abstaining, capped at `maxBank`.
 
-    /** Currently banked Conscious allowance, in millis (0..maxBank). */
+    /**
+     * Currently banked Conscious allowance, in millis (0..maxBank). The live
+     * value is cached and write-batched inside the service (its 1 Hz accountant
+     * must not write prefs per tick); this is the durable copy, at most ~5s
+     * behind while the accountant runs. The tick anchor is runtime-only in the
+     * service — a restart re-anchors to now.
+     */
     var consciousBankMs: Long
         get() = prefs.getLong(KEY_CONSCIOUS_BANK, 0L)
         set(value) = prefs.edit().putLong(KEY_CONSCIOUS_BANK, value).apply()
-
-    /** Wall-clock anchor for the last bank accounting tick (epoch millis). */
-    var consciousAnchorMs: Long
-        get() = prefs.getLong(KEY_CONSCIOUS_ANCHOR, 0L)
-        set(value) = prefs.edit().putLong(KEY_CONSCIOUS_ANCHOR, value).apply()
 
     /** Earn divisor: bank += elapsed / divisor while abstaining (default 10). */
     var consciousEarnDivisor: Int
@@ -115,12 +142,9 @@ class ConfigStore(context: Context) {
         get() = prefs.getLong(KEY_CONSCIOUS_MAX, 600_000L).coerceAtLeast(0L)
         set(value) = prefs.edit().putLong(KEY_CONSCIOUS_MAX, value.coerceAtLeast(0L)).apply()
 
-    /** Begin a fresh Conscious session: empty bank, anchored to [now]. */
-    fun resetConsciousBank(now: Long) {
-        prefs.edit()
-            .putLong(KEY_CONSCIOUS_BANK, 0L)
-            .putLong(KEY_CONSCIOUS_ANCHOR, now)
-            .apply()
+    /** Begin a fresh Conscious session: empty bank. */
+    fun resetConsciousBank() {
+        prefs.edit().putLong(KEY_CONSCIOUS_BANK, 0L).apply()
     }
 
     // ── One Reel / Unblock (allow N reels, then re-block) ────────────────────
@@ -156,15 +180,53 @@ class ConfigStore(context: Context) {
             .apply()
     }
 
-    fun blockStats(): Triple<Int, Int, String> = Triple(
-        prefs.getInt(KEY_BLOCK_TODAY, 0),
+    /**
+     * (today, total, date) block counts for [dateKey]. Read-time rollover as in
+     * [webBlockStats]: after midnight, today reads 0 before the day's first
+     * block instead of yesterday's number.
+     */
+    fun blockStats(dateKey: String): Triple<Int, Int, String> = Triple(
+        if (prefs.getString(KEY_BLOCK_DATE, "") == dateKey) {
+            prefs.getInt(KEY_BLOCK_TODAY, 0)
+        } else {
+            0
+        },
         prefs.getInt(KEY_BLOCK_TOTAL, 0),
-        prefs.getString(KEY_BLOCK_DATE, "") ?: "",
+        dateKey,
     )
+
+    // ── Custom whole-app blocks ─────────────────────────────────────────────
+
+    /** Packages the user locked entirely: opening one bounces the user HOME. */
+    var blockedAppPackages: Set<String>
+        get() = prefs.getStringSet(KEY_APP_BLOCKLIST, emptySet()) ?: emptySet()
+        set(value) = prefs.edit().putStringSet(KEY_APP_BLOCKLIST, value).apply()
+
+    // ── Watchdog ────────────────────────────────────────────────────────────
+
+    /** The accessibility service connected at least once on this install. */
+    var serviceEverConnected: Boolean
+        get() = prefs.getBoolean(KEY_SERVICE_CONNECTED, false)
+        set(value) = prefs.edit().putBoolean(KEY_SERVICE_CONNECTED, value).apply()
+
+    /** Last "Protection stopped" notification (epoch ms) — re-notify debounce. */
+    var lastWatchdogNotifiedMs: Long
+        get() = prefs.getLong(KEY_WATCHDOG_NOTIFIED, 0L)
+        set(value) = prefs.edit().putLong(KEY_WATCHDOG_NOTIFIED, value).apply()
+
+    /** Day key of the last Conscious accounting tick — the bank resets daily. */
+    var consciousDate: String
+        get() = prefs.getString(KEY_CONSCIOUS_DATE, "") ?: ""
+        set(value) = prefs.edit().putString(KEY_CONSCIOUS_DATE, value).apply()
 
     companion object {
         private const val PREFS = "detoxo_engine_prefs"
+        private const val CONFIG_PREFS = "detoxo_platforms_config"
         private const val KEY_CONFIG = "platforms_config_json"
+        private const val KEY_APP_BLOCKLIST = "app_blocklist_packages"
+        private const val KEY_SERVICE_CONNECTED = "service_ever_connected"
+        private const val KEY_WATCHDOG_NOTIFIED = "last_watchdog_notified_ms"
+        private const val KEY_CONSCIOUS_DATE = "conscious_date"
         private const val KEY_PLAN = "active_plan"
         private const val KEY_BLOCK_MODE = "default_block_mode"
         private const val KEY_ENABLED = "enabled_platforms"
@@ -173,7 +235,6 @@ class ConfigStore(context: Context) {
         private const val KEY_MASTER = "master_enabled"
         private const val KEY_PAUSE_UNTIL = "pause_until"
         private const val KEY_CONSCIOUS_BANK = "conscious_bank_ms"
-        private const val KEY_CONSCIOUS_ANCHOR = "conscious_anchor_ms"
         private const val KEY_CONSCIOUS_DIVISOR = "conscious_earn_divisor"
         private const val KEY_CONSCIOUS_MAX = "conscious_max_bank_ms"
         private const val KEY_REEL_ALLOWANCE = "reel_allowance"

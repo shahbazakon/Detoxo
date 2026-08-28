@@ -30,7 +30,7 @@ Skip it for pure test/formatting changes with no behavioral or structural effect
 | native `accessibility/DetoxoAccessibilityService.kt`, `engine/**` | 03, 04 |
 | `lib/features/blocking/{engine,blocklist}/**` | 01, 04, 18 |
 | `lib/features/blocking/plans/**`, `assets/content/**` | 05 |
-| `lib/features/limits/{app_blocker,web_blocker}/**`, native `engine/WebBlockEngine.kt` | 06 |
+| `lib/features/limits/{app_blocker,web_blocker}/**`, native `engine/WebBlockEngine.kt`, `tool/web_blocker/**` (18+ list source + compiler → `adult_domains.txt.gz`) | 06 |
 | `lib/features/limits/daily_limit/**` | 07 |
 | `lib/features/access_protection/**` | 08 |
 | `lib/core/storage/**`, native `engine/{ConfigStore,ContentCounterStore}.kt` | 09 |

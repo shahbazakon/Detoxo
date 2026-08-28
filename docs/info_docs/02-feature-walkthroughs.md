@@ -67,6 +67,12 @@ progress bar showing how many required ones are granted.
 The bottom button stays disabled and reads **Grant required permissions** until
 both required ones are on; then it becomes **Continue** and takes you home.
 
+> **A brief "Checking…" is normal.** Right after launch, a card (and the
+> dashboard's Protection Status card) can show a neutral **"Checking…"** for a
+> moment while Detoxo reads the real status from Android. That's not a denial
+> and not "protection off" — it settles on its own, usually within a second, and
+> never un-grants anything you've already set up.
+
 **Recommended (optional) permissions** — worth enabling, but not required:
 
 | Permission | What it adds |
@@ -120,7 +126,7 @@ The five modes fall into two groups:
 | **One Reel** | *Temporary.* Watch a single reel, then it returns to your base mode. Tap it again to watch one more. See below. |
 | **Unblock** | *Temporary.* Choose how many reels to unlock (a **2–20 dial**); watch that many, then it returns to your base mode. See below. |
 | **Conscious** | A **base** mode — you *earn* watch-time by staying off reels first. See below. |
-| **Pause** | *Temporary.* A short, timed break where every app is allowed; then it returns to your base mode. |
+| **Pause** | *Temporary.* A short, timed break from reel and website blocking; then it returns to your base mode. (Apps you've fully locked stay locked.) |
 
 ### Block All
 
@@ -182,20 +188,28 @@ on fresh, you start with an empty bank — you always have to earn the first min
 > **kept** — when the detour ends and Conscious returns, you pick up where you left
 > off, not from zero. (Only *choosing Conscious fresh* starts an empty bank.)
 
+> **…but not overnight.** The bank resets at the start of each day, so
+> yesterday's discipline doesn't buy this morning's scroll — every day you earn
+> your watch-time fresh.
+
 ### Pause — a timed break
 
-**Pause** temporarily suspends *all* blocking so you can scroll freely for a set
-number of minutes — handy when you genuinely want a breather without turning
-protection off for good.
+**Pause** temporarily suspends reel and website blocking so you can scroll
+freely for a set number of minutes — handy when you genuinely want a breather
+without turning protection off for good.
 
 1. Tap **Pause** on the Command Center.
 2. Drag the slider to choose a length — **2 to 10 minutes** (in 2-minute steps;
    4 minutes by default).
-3. Confirm. The card shows a **live countdown** and a *Paused — all apps allowed*
-   banner.
+3. Confirm. The card shows a **live countdown** and a *Paused* banner.
 4. When the timer runs out, Detoxo **returns to your base mode automatically** —
    Block All or Conscious, whichever you were on before the break. You can also tap
    **Resume** to end the break early.
+
+> **App locks hold through a Pause.** Apps you've fully locked on the **Block
+> apps** screen stay locked during the break — a Pause is for reels and
+> websites, not a back door into an app you deliberately locked. To open a
+> locked app, flip its switch off on the Block apps screen.
 
 The countdown is enforced by the device itself, so the break ends on time even if
 you close Detoxo in the meantime.
@@ -204,7 +218,7 @@ you close Detoxo in the meantime.
 
 ## 4. Building your app blocklist ("Block apps")
 
-Open **App Blocker** from the home screen (or the menu). On the home screen the
+Open **App Blocker** from the home screen tile. On the home screen the
 two blocker tiles show what you've actually set up — "3 apps blocked" once you
 have a list, or "Not set up" until then, with the status dot lit only when
 something really is being blocked. The counts refresh as soon as you come back
@@ -240,18 +254,21 @@ it can't be right, and just installed the app? Tap the **refresh** button next
 to the search box. Your added apps show their real icons and can be toggled or
 deleted any time; this section only appears once you've added something.
 
-> **Good to know:** adding your *own* custom app records your intent, but
-> full whole-app locking for arbitrary apps is a planned follow-up in this build.
-> The catalog toggles above (and the website blocker below) are the parts that
-> actively enforce today.
+> **Good to know:** apps you add here are **really blocked**. Open one and
+> Detoxo bounces you straight back to your home screen with a short
+> "*App* is blocked by Detoxo" message (and a little vibration, if you have
+> block vibration on). It works even if you were already inside the app when
+> you added it, and each bounce counts toward your "Blocked today" number.
+> Flip the row's switch off (or delete it) whenever you want the app back.
+> Detoxo will never block your home screen, itself, or a protected app (§13).
 
 ---
 
 ## 5. Setting up the website blocker
 
 Reels have a habit of following you into the browser, so Detoxo can block
-distracting **websites** too. Open **Web Blocker** (home screen or menu) to reach
-the **Website blocker** screen.
+distracting **websites** too. Open the **Web Blocker** tile on the home screen
+to reach the **Website blocker** screen.
 
 This works by reading the address bar in your browser, so it needs the same
 **Accessibility** permission as the reel blocker (which you granted in §2).
@@ -267,18 +284,28 @@ whole category at once; the pill shows how many are on:
 - **Block websites of blocked apps** — automatically blocks the websites that match
   the apps you've already blocked (e.g. blocking the Instagram app also blocks
   instagram.com).
-- **Block adult content (18+)** — blocks a bundled list of adult sites.
+- **Block adult content (18+)** — blocks every page of 200+ known adult sites
+  plus every `.xxx`, `.porn`, `.sex` or `.adult` address, in any browser. These
+  blocks count toward your stats but are never named: no adult site name ever
+  appears in the toast or the "Most blocked" line.
 
 **Adding sites:**
 
 1. **Popular sites** — two rows of chips (YouTube, Instagram, X, Reddit,
    Netflix, TikTok, and more) that scroll sideways together; tap one to block or
    unblock it, or scroll to the end and tap **Add website** for your own.
-2. **Your blocklist** — tap **Add** and type a domain (e.g. `youtube.com`).
-   Detoxo cleans up what you type (it accepts full URLs, `www.`, subdomains) and
-   warns you if it isn't a valid site or is already on the list.
-3. Each row has a switch to enable/disable it, an edit button (for sites you added
-   yourself), and a delete button. A search box appears once the list grows.
+2. **Your blocklist** — tap **Add website** and type a domain (e.g.
+   `youtube.com`). Detoxo cleans up what you type (it accepts full URLs,
+   `www.`, subdomains) and warns you if it isn't a valid site or is already on
+   the list.
+3. Each row has a switch to enable/disable it. Swipe the row left — or just tap
+   it — to reveal its actions: **Pause**, **Edit** (for sites you added
+   yourself) and **Delete**. A search box appears once the list grows.
+
+**Need a blocked site for a few minutes?** Tap the row, choose **Pause** and
+pick 5, 15, 30 or 60 minutes. The row shows "Paused until …", the site opens
+normally until then, and blocking switches itself back on when the time is up —
+even if you never reopen Detoxo. Tap **Resume** to end the pause early.
 
 When you're on a blocked site, Detoxo simply presses back to take you off it.
 
@@ -361,7 +388,9 @@ on, turn it off first in *Settings → Security → Device admin apps*.
 
 Too many wrong tries triggers a cooldown that gets longer the more you miss (from
 30 seconds up to 24 hours after many failures). The cooldown sticks even if you
-force-quit the app — so guessing isn't a shortcut.
+force-quit the app — and it's tied to the phone's internal uptime clock, so
+changing the date or time in Settings doesn't skip the wait either. Guessing
+isn't a shortcut.
 
 ---
 

@@ -300,5 +300,5 @@ conservative.
 | No telemetry consent/opt-out | GDPR/DSA exposure for EU users |
 | Privacy-policy page content unverified (lives outside this repo) | Data-safety form may contradict the published policy |
 | No store screenshots / feature graphic in repo | Listing cannot be completed |
-| App blocker + daily limit are UI-only (not enforced natively) | Do not claim them as working features in the listing |
+| Daily limit is UI-only (no native `UsageStats` quota gate) | Do not claim it as a working feature in the listing. The **app blocker IS enforced natively** (HOME-bounce via `pushAppBlocklist`) and may be listed |
 | 12 grandfathered feature-boundary violations (`tool/boundaries_baseline.txt`) | Engineering debt, not a Play blocker |

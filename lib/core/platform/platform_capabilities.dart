@@ -1,6 +1,6 @@
 import 'dart:io' show Platform;
 
-import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/foundation.dart' show kIsWeb, visibleForTesting;
 
 /// Single source of truth for what the current platform can actually do.
 ///
@@ -10,7 +10,13 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 /// affordances on iOS and show an honest "preview" state instead of dead
 /// controls or crashes on missing platform channels.
 abstract final class PlatformCapabilities {
-  static bool get _isAndroid => !kIsWeb && Platform.isAndroid;
+  /// Test-only override: forces Android capabilities on the host test runner
+  /// so channel-backed repositories can be exercised in unit tests.
+  @visibleForTesting
+  static bool? debugForceAndroid;
+
+  static bool get _isAndroid =>
+      debugForceAndroid ?? (!kIsWeb && Platform.isAndroid);
 
   /// The native AccessibilityService blocking engine is Android-only.
   static bool get supportsBlockingEngine => _isAndroid;

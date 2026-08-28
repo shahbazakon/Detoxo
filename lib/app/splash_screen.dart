@@ -1,18 +1,16 @@
 import 'dart:async';
 
+import 'package:detoxo/app/engine_sync.dart';
 import 'package:detoxo/core/design_system/design_system.dart';
 import 'package:detoxo/core/di/injector.dart';
 import 'package:detoxo/core/navigation/routes.dart';
 import 'package:detoxo/features/access_protection/presentation/pin_cubit.dart';
 import 'package:detoxo/features/blocking/blocklist/presentation/targets_cubit.dart';
 import 'package:detoxo/features/blocking/shared/domain/entities/enums.dart';
-import 'package:detoxo/features/blocking/shared/domain/repositories/blocking_repositories.dart';
 import 'package:detoxo/features/blocking/shared/presentation/settings_cubit.dart';
 import 'package:detoxo/features/content_counter/content_counter_core/domain/repositories/content_counter_repository.dart';
 import 'package:detoxo/features/content_counter/home_content_counter/domain/repositories/home_widget_repository.dart';
-import 'package:detoxo/features/limits/limits.dart';
 import 'package:detoxo/features/permissions/presentation/permissions_cubit.dart';
-import 'package:detoxo/features/protected_apps/protected_apps.dart';
 import 'package:detoxo/gen/assets.gen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -66,26 +64,10 @@ class _SplashScreenState extends State<SplashScreen> {
     // with the latest snapshot. Fire-and-forget so it never blocks routing.
     unawaited(_refreshReelCounterWidget());
 
-    // Protected apps: push the derived set (full catalog + manual additions)
-    // so the native engine matches Dart (repairs drift after "Reset app
-    // data"). Fire-and-forget so it never blocks routing.
-    unawaited(
-      syncProtectedAppsAtBoot(
-        sl<ProtectedAppsRepository>(),
-        sl<EngineRepository>(),
-      ),
-    );
-
-    // Web blocklist: same drift repair — native gets the merged list (incl.
-    // app-derived domains) without the Web Blocker screen ever being opened.
-    unawaited(
-      syncWebBlocklist(
-        sl<WebBlockRepository>(),
-        sl<SettingsRepository>(),
-        sl<AppBlockRepository>(),
-        sl<EngineRepository>(),
-      ),
-    );
+    // Blocklist drift repair: protected apps, web blocklist and whole-app
+    // blocks all pushed so the native engine matches Dart without any screen
+    // ever being opened. Fire-and-forget so it never blocks routing.
+    unawaited(syncEngineBlocklists());
 
     if (!mounted) return;
 

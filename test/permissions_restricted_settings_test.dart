@@ -16,6 +16,9 @@ class _FakeRepo implements PermissionRepository {
   Future<bool> installedOutsidePlay() async => outsidePlay;
 
   @override
+  Future<Set<AppPermission>> lastKnownGranted() async => const {};
+
+  @override
   Future<void> openAppSettings() async => openedAppSettings++;
 
   @override

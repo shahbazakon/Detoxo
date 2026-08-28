@@ -22,17 +22,41 @@ class EngineChannel {
   ///
   /// Off-Android there is no native engine, so the stream is empty (subscribing
   /// to the EventChannel would otherwise emit a logged error every launch).
+  ///
+  /// Self-healing: the underlying EventChannel stream can close (native engine
+  /// detach/recreation). Every cubit holds one process-lifetime subscription to
+  /// this stream, so a silent close would freeze live counters and status
+  /// forever — on done, the channel is re-subscribed after a short delay.
   Stream<Map<String, dynamic>> events() {
     if (!PlatformCapabilities.supportsBlockingEngine) {
       return const Stream<Map<String, dynamic>>.empty();
     }
-    return _eventStream ??= _events
-        .receiveBroadcastStream()
-        .map((dynamic e) => Map<String, dynamic>.from(e as Map))
-        .handleError((Object error) {
-          AppLogger.e('engine event stream error', error);
-        })
-        .asBroadcastStream();
+    if (_eventStream == null) {
+      final controller = StreamController<Map<String, dynamic>>.broadcast();
+      _eventStream = controller.stream;
+      _connectEvents(controller);
+    }
+    return _eventStream!;
+  }
+
+  void _connectEvents(StreamController<Map<String, dynamic>> controller) {
+    _events.receiveBroadcastStream().listen(
+      (dynamic e) {
+        // A malformed payload must log like a stream error, not escape the
+        // onData callback as an uncaught zone error.
+        try {
+          controller.add(Map<String, dynamic>.from(e as Map));
+        } on Object catch (error) {
+          AppLogger.e('engine event bad payload', error);
+        }
+      },
+      onError: (Object error) =>
+          AppLogger.e('engine event stream error', error),
+      onDone: () => Future<void>.delayed(
+        const Duration(seconds: 1),
+        () => _connectEvents(controller),
+      ),
+    );
   }
 
   Future<T?> _invoke<T>(String method, [Map<String, dynamic>? args]) async {
@@ -52,6 +76,11 @@ class EngineChannel {
 
   Future<bool> invokeBool(String method, [Map<String, dynamic>? args]) async =>
       (await _invoke<bool>(method, args)) ?? false;
+
+  /// Tri-state variant of [invokeBool]: null means "the call didn't answer"
+  /// (channel error / no native side), NOT "the OS said no". Permission checks
+  /// use this so one flaky read can't masquerade as a revoked grant.
+  Future<bool?> invokeBoolOrNull(String method) => _invoke<bool>(method);
 
   Future<void> invokeVoid(String method, [Map<String, dynamic>? args]) async =>
       _invoke<void>(method, args);
@@ -81,6 +110,11 @@ class EngineChannel {
   Future<void> pushProtectedApps(List<String> packages) =>
       invokeVoid(ChannelMethods.pushProtectedApps, {'packages': packages});
 
+  /// Pushes the enabled custom whole-app-block package names; native persists
+  /// them and bounces those apps HOME on open. No-op off-Android.
+  Future<void> pushAppBlocklist(List<String> packages) =>
+      invokeVoid(ChannelMethods.pushAppBlocklist, {'packages': packages});
+
   Future<bool> isAccessibilityEnabled() =>
       invokeBool(ChannelMethods.isAccessibilityEnabled);
 
@@ -96,17 +130,14 @@ class EngineChannel {
   Future<void> requestOverlay() =>
       invokeVoid(ChannelMethods.requestOverlayPermission);
 
-  Future<bool> hasUsageAccess() => invokeBool(ChannelMethods.hasUsageAccess);
+  // The boolean permission QUERIES have no wrappers here: the permission
+  // repository reads them tri-state via [invokeBoolOrNull] directly.
   Future<void> openUsageAccess() =>
       invokeVoid(ChannelMethods.openUsageAccessSettings);
 
-  Future<bool> isIgnoringBattery() =>
-      invokeBool(ChannelMethods.isIgnoringBatteryOptimizations);
   Future<void> requestIgnoreBattery() =>
       invokeVoid(ChannelMethods.requestIgnoreBatteryOptimizations);
 
-  Future<bool> isDeviceAdminActive() =>
-      invokeBool(ChannelMethods.isDeviceAdminActive);
   Future<void> requestDeviceAdmin() =>
       invokeVoid(ChannelMethods.requestDeviceAdmin);
   Future<void> removeDeviceAdmin() =>
@@ -121,6 +152,19 @@ class EngineChannel {
   /// / off-Android).
   Future<int> lastScreenOff() async =>
       (await _invoke<int>(ChannelMethods.lastScreenOff)) ?? 0;
+
+  /// Monotonic millis since boot (`SystemClock.elapsedRealtime()`) plus the
+  /// `BOOT_COUNT` they belong to, or null off-Android / on a channel error /
+  /// where the boot count is unreadable. Callers fall back to the wall clock.
+  Future<({int elapsedMs, int bootCount})?> monotonicNow() async {
+    final res = await _invoke<Map<dynamic, dynamic>>(
+      ChannelMethods.monotonicNow,
+    );
+    final elapsed = res?['elapsedMs'] as int?;
+    final boot = res?['bootCount'] as int?;
+    if (elapsed == null || boot == null || boot < 0) return null;
+    return (elapsedMs: elapsed, bootCount: boot);
+  }
 
   Future<void> performBack() => invokeVoid(ChannelMethods.performBack);
   Future<void> killApp(String pkg) =>

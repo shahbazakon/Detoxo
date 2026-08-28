@@ -5,6 +5,7 @@
 #   bash tool/qa.sh e2e                 # real-boot walk on a device + screenshots
 #   bash tool/qa.sh perf                # cold start + frame timeline + memory + apk size
 #   bash tool/qa.sh blocking            # accessibility-engine smoke (half manual — see SKILL.md)
+#   bash tool/qa.sh blockers            # App/Web Blocker walk + real block probes (needs YouTube + Chrome)
 #   bash tool/qa.sh all                 # functional -> e2e -> perf  (this order is load-bearing)
 #   bash tool/qa.sh devices             # list attached devices
 #   bash tool/qa.sh prep | restore      # grant / put back accessibility + overlay
@@ -256,7 +257,7 @@ t_functional() {
 # IntegrationTestWidgetsFlutterBinding.reportData, so binding.takeScreenshot
 # is not an option here — see SKILL.md.
 shots_pump() {
-  local i=0 line name
+  local i=0 line name dir="${SHOTS:-$OUT/shots}"
   while IFS= read -r line; do
     printf '%s\n' "$line"
     case "$line" in
@@ -264,7 +265,13 @@ shots_pump() {
         name=${line#*QA_SHOT:}
         name=${name%%[[:space:]]*}
         i=$((i + 1))
-        adb_ exec-out screencap -p > "$OUT/shots/$(printf '%02d' "$i")-$name.png"
+        adb_ exec-out screencap -p > "$dir/$(printf '%02d' "$i")-$name.png"
+        ;;
+      # The blocker walk hands the phone to a probe_<name> function below.
+      *QA_PROBE:*)
+        name=${line#*QA_PROBE:}
+        name=${name%%[[:space:]]*}
+        "probe_${name//-/_}"
         ;;
     esac
   done
@@ -296,6 +303,90 @@ t_e2e() {
   fi
   kill "$rg" 2>/dev/null || true
   printf 'screenshots: %s\n' "$OUT/shots"
+  return 0
+}
+
+# ── Layer 2c: blocker walk + engine probes ─────────────────────────────────
+# integration_test/blockers_e2e_test.dart drives the App Blocker and Web
+# Blocker screens like a user (add YouTube as a whole-app lock, add example.com,
+# pause it), printing `QA_PROBE:<name>` and sleeping ~40s at each hand-off.
+# shots_pump routes the marker to probe_<name>: launch the target, watch the
+# engine log for the block line, record the verdict, bring Detoxo back so the
+# walk's next pump gets a frame. Verdicts land in build/qa/blockers.status as
+# `<name> blocked|notblocked` (block expected) or `<name> allowed|leaked`
+# (pause expected to let it through). The walk's own pass/fail is
+# build/qa/blockers.walk.
+
+probe_run() {  # <name> <block|noblock> <logcat regex> <watch secs> <adb shell launch args…>
+  local name=$1 expect=$2 pattern=$3 secs=$4; shift 4
+  local log="$OUT/blockers.$name.logcat" deadline=$((SECONDS + secs)) hit=0 verdict
+  adb_ logcat -c 2>/dev/null || true
+  adb_ shell "$@" >/dev/null 2>&1 || true
+  while [ "$SECONDS" -lt "$deadline" ]; do
+    sleep 1
+    adb_ logcat -d -s DetoxoService:I > "$log" 2>/dev/null || true
+    if grep -qE "$pattern" "$log"; then hit=1; [ "$expect" = block ] && break; fi
+  done
+  if [ "$expect" = block ]; then
+    if [ "$hit" -eq 1 ]; then verdict=blocked; else verdict=notblocked; fi
+  else
+    if [ "$hit" -eq 1 ]; then verdict=leaked; else verdict=allowed; fi
+  fi
+  printf '%s %s\n' "$name" "$verdict" >> "$OUT/blockers.status"
+  printf '%sprobe %s: %s%s\n' "$BOLD" "$name" "$verdict" "$OFF"
+  # Bring Detoxo back so the walk's next pump gets a frame. Verified, not
+  # fire-and-forget: the engine's HOME bounce is still animating when the first
+  # `am start` lands, and the launcher can win that race — the walk then sleeps
+  # forever on a backgrounded app (cost a run to find).
+  local i
+  for i in 1 2 3 4 5; do
+    adb_ shell am start -n "$ACT" >/dev/null 2>&1 || true
+    sleep 2
+    sh_ dumpsys activity activities | grep -q "topResumedActivity=.*$PKG" && return 0
+  done
+  warn "could not bring $PKG back to the foreground after probe $name"
+}
+probe_app() {
+  probe_run app block 'blocked app_block in com.google.android.youtube via HOME' 20 \
+    am start -a android.intent.action.MAIN -c android.intent.category.LAUNCHER com.google.android.youtube
+}
+probe_web() {
+  probe_run web block 'web-blocked in com.android.chrome' 20 \
+    am start -a android.intent.action.VIEW -d https://example.com/ com.android.chrome
+}
+probe_web_paused() {
+  probe_run web-paused noblock 'web-blocked in com.android.chrome' 12 \
+    am start -a android.intent.action.VIEW -d https://example.com/ com.android.chrome
+}
+
+t_blockers() {
+  local shots="$OUT/shots-blockers" p
+  mkdir -p "$shots"
+  rm -f "$shots"/*.png "$OUT"/blockers.*
+  : > "$OUT/blockers.status"
+  # Preconditions, not verdicts: a probe against a missing target proves nothing.
+  for p in com.google.android.youtube com.android.chrome; do
+    sh_ pm list packages "$p" | grep -q "package:$p" \
+      || die "$p is not installed — the blocker probes need it"
+  done
+  if ! sh_ pm list packages "$PKG" | grep -q "package:$PKG"; then
+    run flutter install --debug -d "$SERIAL"
+  fi
+  t_prep
+  regrant_loop & local rg=$!
+  # shellcheck disable=SC2064
+  trap "kill $rg 2>/dev/null || true" RETURN
+
+  if flutter test -d "$SERIAL" --reporter expanded \
+       integration_test/blockers_e2e_test.dart 2>&1 \
+       | tee "$OUT/blockers.log" | SHOTS="$shots" shots_pump; then
+    printf 'pass\n' > "$OUT/blockers.walk"; ok 'blocker walk passed'
+  else
+    printf 'fail\n' > "$OUT/blockers.walk"; warn 'blocker walk FAILED'
+  fi
+  kill "$rg" 2>/dev/null || true
+  printf 'probes:\n'; cat "$OUT/blockers.status"
+  printf 'screenshots: %s\n' "$shots"
   return 0
 }
 
@@ -457,9 +548,9 @@ done
 
 CMD="${1:-}"
 case "$CMD" in
-  functional|e2e|perf|blocking|all|prep|restore|devices) ;;
+  functional|e2e|perf|blocking|blockers|all|prep|restore|devices) ;;
   *) die "usage: bash tool/qa.sh [-d <serial>] [--reset] [--baseline]
-       {functional|e2e|perf|blocking|all|prep|restore|devices}" ;;
+       {functional|e2e|perf|blocking|blockers|all|prep|restore|devices}" ;;
 esac
 
 need flutter 'https://docs.flutter.dev/get-started/install' || exit 1

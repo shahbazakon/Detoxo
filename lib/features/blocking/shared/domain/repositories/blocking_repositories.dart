@@ -57,6 +57,10 @@ abstract interface class EngineRepository {
   /// engine must completely ignore while they are foreground.
   Future<void> pushProtectedApps(List<String> packages);
 
+  /// Pushes the enabled custom whole-app-block package names — apps the native
+  /// engine bounces HOME whenever they come to the foreground.
+  Future<void> pushAppBlocklist(List<String> packages);
+
   Future<ServiceSnapshot> currentStatus();
 
   /// One-shot pull of the current Conscious bank (for initial UI render).

@@ -19,3 +19,9 @@ forever — the settled-decisions memory). IDs are monotonic and never reused.
 | EVO-011 | "Blocked by Detoxo" toast at the block moment | web_blocker (native) | 2 | done | S | 2026-08-17 | 2026-08-17 |
 | EVO-012 | Per-site pause, activating dormant pausedUntil | web_blocker + native | 2 | done | M | 2026-08-17 | 2026-08-17 |
 | EVO-013 | Honest protection status when OS kills the service | blocking/engine + native | 2 | done | S | 2026-08-17 | 2026-08-17 |
+| EVO-014 | Render permission/service `unknown` states truthfully | permissions, dashboard, design_system | 2 | done | S | 2026-08-27 | 2026-08-27 |
+| EVO-015 | Anchor the PIN lockout to the monotonic clock | access_protection + native | 2 | done | M | 2026-08-27 | 2026-08-27 |
+| EVO-016 | Narrow the accessibility event mask to the 3 used types | native res/xml | 2 | done | S | 2026-08-27 | 2026-08-27 |
+| EVO-017 | Compile the 18+ list from a JSON source (scrape folded in) + block adult TLDs | web_blocker + native asset + tool | 2 | done | S | 2026-08-28 | 2026-08-28 |
+| EVO-018 | Count adult-list blocks without naming the host | web_blocker (native) | 2 | done | S | 2026-08-28 | 2026-08-28 |
+| EVO-019 | Escalate to HOME when BACK can't leave a blocked page | web_blocker (native) | 2 | proposed | S | 2026-08-28 | — |

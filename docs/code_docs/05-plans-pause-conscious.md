@@ -88,7 +88,7 @@ startedAt ──pauseDuration──▶ pauseEnd ──cooldownDuration──▶ 
 
 ### Current live behaviour: no cooldown wind-down
 
-`SettingsCubit.startPause` constructs the session with **`cooldownDuration: Duration.zero`** and `planToResume: state.baseMode` (the sticky base — Block All *or* Conscious). So today a Pause is: *every app allowed for the chosen window, then blocking returns immediately as the base mode* — the cooldown phase and its emoji band are **modelled but not exercised** by the current picker. The cooldown machinery (`cooldownProgressPct`, `EMOJI_PAUSE_COUNTDOWN_COOLDOWN`, `allowInCooldown`) is retained for a future graduated wind-down and should be treated as **planned / follow-up**, not live.
+`SettingsCubit.startPause` constructs the session with **`cooldownDuration: Duration.zero`** and `planToResume: state.baseMode` (the sticky base — Block All *or* Conscious). So today a Pause is: *reel and website blocking suspended for the chosen window (whole-app locks stay enforced — [06] §2), then blocking returns immediately as the base mode* — the cooldown phase and its emoji band are **modelled but not exercised** by the current picker. The cooldown machinery (`cooldownProgressPct`, `EMOJI_PAUSE_COUNTDOWN_COOLDOWN`, `allowInCooldown`) is retained for a future graduated wind-down and should be treated as **planned / follow-up**, not live.
 
 ### How Pause reaches the engine (derived enforcement)
 
@@ -102,8 +102,10 @@ Native has no "pause plan" concept — Dart derives two values from the live ses
 Native gate (`DetoxoAccessibilityService.onAccessibilityEvent`):
 
 ```kotlin
-// A live Pause window suspends ALL blocking (every app allowed) until pauseUntil.
-if (System.currentTimeMillis() < store.pauseUntil) return
+// A live Pause window suspends reel/web blocking until pauseUntil. Whole-app
+// locks are checked ABOVE this gate — a Pause taken for reels never unlocks a
+// fully-locked app ([06] §2).
+if (System.currentTimeMillis() < pausedUntil) return  // cached mirror of store.pauseUntil
 ```
 
 This gate is **purely clock-based**, so it holds even if the Flutter UI is dead. Pickers/defaults come from `SessionDefaults` (`lib/features/blocking/plans/domain/entities/session_defaults.dart`): slider 2–10 min in 2-min steps (`snapPauseMinutes`), default 4, `maxPauseMinutes` 10.
@@ -144,16 +146,16 @@ A `Handler` on the main looper posts `consciousTick` every `CONSCIOUS_TICK_MS = 
 
 ```kotlin
 private fun syncConscious() {
-  val conscious = store.activePlan == PLAN_CONSCIOUS  // "CURIOUS"
+  val conscious = activePlan == PLAN_CONSCIOUS  // "CURIOUS" (cached mirror)
   when {
     conscious && !consciousRunning -> { // start
       consciousRunning = true
-      store.consciousAnchorMs = System.currentTimeMillis() // don't credit downtime
+      consciousAnchorMs = System.currentTimeMillis() // runtime-only; don't credit downtime
       lastReelAtMs = 0L
       consciousHandler.postDelayed(consciousTick, CONSCIOUS_TICK_MS)
       emitConsciousState()
     }
-    !conscious && consciousRunning -> { /* stop + removeCallbacks */ }
+    !conscious && consciousRunning -> { /* stop + removeCallbacks + force-flush the bank */ }
     conscious -> emitConsciousState() // already running; just refresh UI
   }
 }
@@ -163,7 +165,7 @@ private fun syncConscious() {
 
 ### 5.2 One accounting step
 
-`accountConscious()` runs each tick. It computes `elapsed = now − consciousAnchorMs`, advances the anchor first (even if it then freezes), and classifies the current moment:
+`accountConscious()` runs each tick. It first applies the **daily fresh start**: when `ConfigStore.consciousDate` differs from today's day key, it stamps the new day and zeroes the bank — the allowance is re-earned each day, so an overnight abstain can't stockpile a free 10-minute morning balance. It then computes `elapsed = now − consciousAnchorMs`, advances the anchor first (even if it then freezes), and classifies the current moment:
 
 - **`watching`** = a reel was detected within `WATCH_STALE_MS = 2500L` (`now − lastReelAtMs < 2500`).
 - **`inReelApp`** = the foreground package has reel surfaces but detection has gone quiet (paused video / non-feed overlay).
@@ -185,6 +187,7 @@ if (watching) {
 ```
 
 Key rules:
+- **Daily reset:** the first tick on a new day key (`conscious_date`) empties any carried bank — abstinence banked yesterday doesn't buy watch-time today.
 - **Drain-step cap** `CONSCIOUS_MAX_STEP_MS = 5000L`: a delayed/coalesced tick can drain at most 5 s at once, so a stalled handler can't dump the whole bank instantly.
 - **Paused-reel guard:** a reel that's on screen but not actively producing detections (`inReelApp && !watching`) neither refills the bank nor drains for free — it holds steady. Only genuine abstinence accrues.
 - **Master-off freeze:** with `masterEnabled == false` the bank neither drains nor accrues; the anchor is still advanced so re-enabling can't dump a huge credit.
@@ -194,7 +197,7 @@ Key rules:
 The Conscious decision is made inside the block loop of `onAccessibilityEvent`, right after a detector matches:
 
 ```kotlin
-if (store.activePlan == PLAN_CONSCIOUS && store.consciousBankMs > 0L) {
+if (activePlan == PLAN_CONSCIOUS && consciousBank > 0L) {   // cached mirrors — no prefs read
   lastReelAtMs = now   // mark "watching" so the accountant drains the bank
   return               // let the reel play
 }
@@ -208,7 +211,7 @@ So while the bank has allowance, a matched reel simply refreshes `lastReelAtMs` 
 A **genuine user entry** into Conscious starts a **fresh empty bank**; an **auto-revert back into** Conscious — after a One Reel / Unblock / Pause override that ran from a Conscious base — **keeps** the earned bank. So the reset is deliberately decoupled from the plan push:
 
 - `pushSettings` (`channels/CommandHandler.kt`) now stores the plan **verbatim** — the old auto-reset on a `*→CURIOUS` transition was **removed**, so an auto-revert into Conscious does not wipe the bank.
-- A separate **`resetConsciousBank`** command does the fresh-start reset (`store.resetConsciousBank(now)` → `bank=0, anchor=now` → `service.reload()`). It is fired **only** by `SettingsCubit.enterConscious()`, which `await`s `_engine.resetConsciousBank()` right after `setPlan(BlockingPlan.curious)`.
+- A separate **`resetConsciousBank`** command does the fresh-start reset: `store.resetConsciousBank()` (no-arg, zeroes only the bank — the anchor is a runtime-only service field now), then the service hook `onConsciousBankReset()` drops the cached bank + pending unflushed accrual and `reload()`s. It is fired **only** by `SettingsCubit.enterConscious()`, which `await`s `_engine.resetConsciousBank()` right after `setPlan(BlockingPlan.curious)`.
 
 So tapping Conscious in the UI empties the bank, but the round-trip *override → base = Conscious* leaves it intact. `pushSettings` still ships the tuning constants each time (`consciousEarnDivisor`, `consciousMaxBankMs` from `SessionDefaults`); `ConfigStore` defaults them defensively (`divisor` ≥ 1 default 10, `maxBank` default 600 000 ms) so a missing push never divides by zero or uncaps the bank. See the command contract in [18-platform-channel-contracts.md](18-platform-channel-contracts.md).
 
@@ -240,7 +243,7 @@ Dart side:
 | `CONSCIOUS_MAX_STEP_MS` | `5000L` | Max drain per tick (guards against a delayed tick emptying the bank). |
 | `BACK_RATE_LIMIT_MS` | `1100L` | Min gap between back presses (shared with the block path). |
 
-`ConfigStore` bank keys (file `detoxo_engine_prefs`): `conscious_bank_ms`, `conscious_anchor_ms`, `conscious_earn_divisor`, `conscious_max_bank_ms`.
+`ConfigStore` bank keys (file `detoxo_engine_prefs`): `conscious_bank_ms` (the durable copy — the live value is cached and write-batched in the service, at most ~5 s behind), `conscious_earn_divisor`, `conscious_max_bank_ms`. The tick anchor is runtime-only in the service; its old `conscious_anchor_ms` key was deleted.
 
 ---
 
@@ -466,9 +469,9 @@ The dashboard (`lib/features/dashboard/presentation/dashboard_tab.dart` + `widge
 
 ## 10. End-to-end flows (summary)
 
-**Start a Pause (4 min):** `SessionDialogs` picker → `SettingsCubit.startPause(4 min)` → `AppSettings` gets `activePlan = baseMode` + `PauseSession(cooldown=0, planToResume=baseMode)` → `_commit` persists + pushes `{activePlan: <base wire>, pauseUntil: pauseEnd}` → native gate `now < pauseUntil` suspends all blocking → at `pauseEnd`, native gate re-arms and the 1 Hz UI ticker settles the session back to the **base mode**.
+**Start a Pause (4 min):** `SessionDialogs` picker → `SettingsCubit.startPause(4 min)` → `AppSettings` gets `activePlan = baseMode` + `PauseSession(cooldown=0, planToResume=baseMode)` → `_commit` persists + pushes `{activePlan: <base wire>, pauseUntil: pauseEnd}` → native gate `now < pauseUntil` suspends reel/web blocking (whole-app locks stay enforced) → at `pauseEnd`, native gate re-arms and the 1 Hz UI ticker settles the session back to the **base mode**.
 
-**Turn on Conscious:** `SessionDialogs` → `SettingsCubit.enterConscious()` → `setPlan(curious)` (records `baseMode = curious`) → `_commit` pushes `{activePlan: CURIOUS, consciousEarnDivisor, consciousMaxBankMs}` (stored **verbatim**, no bank reset) → then `enterConscious` `await`s `resetConsciousBank` → `CommandHandler` empties the bank (anchored now) + `reload()` → `syncConscious()` starts the 1 Hz accountant → each tick accrues while abstaining / drains 1:1 while watching, booting reels on empty → `consciousState` events stream to `ConsciousCubit` for the hero/dialog. (An auto-revert *into* Conscious skips the reset, so the bank survives.)
+**Turn on Conscious:** `SessionDialogs` → `SettingsCubit.enterConscious()` → `setPlan(curious)` (records `baseMode = curious`) → `_commit` pushes `{activePlan: CURIOUS, consciousEarnDivisor, consciousMaxBankMs}` (stored **verbatim**, no bank reset) → then `enterConscious` `await`s `resetConsciousBank` → `CommandHandler` empties the bank (store + the service's cache, via `onConsciousBankReset()`) + `reload()` → `syncConscious()` starts the 1 Hz accountant → each tick accrues while abstaining / drains 1:1 while watching, booting reels on empty → `consciousState` events stream to `ConsciousCubit` for the hero/dialog. (An auto-revert *into* Conscious skips the reset, so the bank survives.)
 
 **Turn on One Reel / Unblock (allow 3):** `ModeSelector` (Unblock → `showUnblock` picker) → `SettingsCubit.setOneReel(count: 3)` → `_commit` pushes `{activePlan: ONE_REEL, reelAllowance: 3}` (persists the target, does *not* reset the count) → then the imperative `armReelSession(3)` → `CommandHandler` sets `reelAllowance=3`, `activePlan=ONE_REEL`, `resetReelSession()` (count→0), calls `service.armReelSession()` (zero runtime dwell state, reload, emit) → in the detector loop `allowReelOrBlock` counts a reel once it's watched ≥ 2s: reels 1–3 each increment `reelsConsumed`; a fresh 4th reel (allowance spent) is blocked and emits `reelSessionState {blocked:true}` → `SettingsCubit._onReelSession` flips `activePlan → baseMode` (**auto-revert**, §7.4); events also stream to `ReelSessionCubit`.
 

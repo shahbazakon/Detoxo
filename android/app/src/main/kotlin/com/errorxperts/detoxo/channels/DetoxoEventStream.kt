@@ -9,11 +9,20 @@ import io.flutter.plugin.common.EventChannel
  */
 class DetoxoEventStream : EventChannel.StreamHandler {
 
+    private var mySink: ServiceEventBus.Sink? = null
+
     override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
-        ServiceEventBus.sink = if (events == null) null else ServiceEventBus.Sink { events.success(it) }
+        mySink = if (events == null) null else ServiceEventBus.Sink { events.success(it) }
+        ServiceEventBus.sink = mySink
+        // Catch a late subscriber up: onServiceConnected's serviceStatus fires
+        // before Dart attaches on a cold start and would otherwise be dropped.
+        ServiceEventBus.replayLastStatus()
     }
 
     override fun onCancel(arguments: Any?) {
-        ServiceEventBus.sink = null
+        // Engine recreation can run the new engine's onListen before the old
+        // engine's onCancel — only clear the sink this instance installed.
+        if (ServiceEventBus.sink === mySink) ServiceEventBus.sink = null
+        mySink = null
     }
 }

@@ -73,6 +73,11 @@ class _PinLockScreenState extends State<PinLockScreen> {
     super.initState();
     if (_isForcedAppGate) PinLockScreen._appGateCount++;
     final config = context.read<PinCubit>().state;
+    // Anti-tamper: realign the wall-clock lockout stamp with the monotonic
+    // truth on every lock-screen entry, so a Settings clock change made
+    // between visits can neither hide an active lockout (keypad up, correct
+    // PIN "wrong") nor freeze the keypad past the real remaining time.
+    unawaited(context.read<PinCubit>().reconcileLockout());
     if (config.biometricEnabled) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _tryBiometric());
     }

@@ -29,6 +29,10 @@ class _FakePinRepo implements PinRepository {
   bool? secureScreenApplied;
   int screenOffMillis = 0;
 
+  /// Seedable monotonic clocks (null = channel unavailable, the host default).
+  int? elapsedMs;
+  int bootCount = 1;
+
   @override
   Future<PinConfig> load() async => stored;
 
@@ -41,6 +45,12 @@ class _FakePinRepo implements PinRepository {
 
   @override
   Future<int> lastScreenOffMillis() async => screenOffMillis;
+
+  @override
+  Future<({int elapsedMs, int bootCount})?> monotonicNow() async {
+    final e = elapsedMs;
+    return e == null ? null : (elapsedMs: e, bootCount: bootCount);
+  }
 }
 
 /// In-memory [LocalStore] (no Hive / secure storage) for repository tests.
@@ -353,6 +363,140 @@ void main() {
 
       // While locked out, even the correct PIN is refused.
       expect(await cubit.verify('1234'), isFalse);
+    });
+
+    test(
+      'a forward clock jump cannot clear a monotonic-anchored lockout',
+      () async {
+        // EVO-015: with the native monotonic clocks available, the lockout is
+        // anchored to them — enforcement ignores the (movable) wall clock.
+        final repo = _FakePinRepo()..elapsedMs = 100000;
+        final cubit = PinCubit(repo);
+        await cubit.setup(
+          type: PinType.custom,
+          secret: '1234',
+          scopes: {PinScope.app},
+        );
+        for (var i = 0; i < 6; i++) {
+          expect(await cubit.verify('0000'), isFalse);
+        }
+        expect(cubit.state.lockoutElapsedUntilMs, 100000 + 30 * 1000);
+        expect(cubit.state.lockoutBootCount, repo.bootCount);
+
+        // Simulate a Settings clock bump past lockedUntil (equivalently: the
+        // wall stamp now reads as past) while only 1ms of REAL time passed.
+        // load()'s reconcile realigns the wall stamp from the monotonic
+        // truth, so the UI shows the lockout — and verify still refuses.
+        repo.elapsedMs = 100001;
+        await repo.save(
+          cubit.state.copyWith(
+            lockedUntil: DateTime.now().subtract(const Duration(hours: 1)),
+          ),
+        );
+        final relaunched = PinCubit(repo);
+        await relaunched.load();
+        expect(
+          relaunched.state.isLockedOut,
+          isTrue,
+          reason: 'reconcile realigned the wall stamp for the display',
+        );
+        expect(await relaunched.verify('1234'), isFalse);
+
+        // Once the 30s genuinely elapse on the monotonic clock, it unlocks.
+        repo.elapsedMs = 100000 + 30 * 1000;
+        expect(await relaunched.verify('1234'), isTrue);
+      },
+    );
+
+    test(
+      'a backward clock jump cannot extend a lockout past its real length',
+      () {
+        // Clock set back (or a fast clock corrected) mid-lockout: wall says
+        // hours left, the monotonic clock says it is over — reconcile clears,
+        // so the keypad is not frozen for wall-time that never really passed.
+        final frozen = const PinConfig().copyWith(
+          lockedUntil: DateTime.now().add(const Duration(days: 300)),
+          lockoutElapsedUntilMs: 130000,
+          lockoutBootCount: 1,
+        );
+        final next = PinCubit.reconciled(
+          frozen,
+          DateTime.now(),
+          elapsedMs: 130000, // monotonic lockout fully elapsed
+          bootCount: 1,
+        );
+        expect(next.lockedUntil, isNull);
+        expect(next.isLockedOut, isFalse);
+      },
+    );
+
+    test('a stale monotonic window from an earlier boot can never re-arm', () {
+      // Boot-A lockout persisted (untilE 530000, bootCount 3); on boot B
+      // uptime passes into [0, untilE) again — without the boot count this
+      // read as "locked". The boot-count mismatch invalidates the leg and
+      // the wall clock (expired) governs; reconcile then prunes the state.
+      final staleFromBootA = const PinConfig().copyWith(
+        lockedUntil: DateTime.now().subtract(const Duration(hours: 1)),
+        lockoutElapsedUntilMs: 530000,
+        lockoutBootCount: 3,
+      );
+      expect(
+        staleFromBootA.isLockedOutAt(
+          DateTime.now(),
+          elapsedMs: 500000, // inside the old window
+          bootCount: 4, // but a different boot
+        ),
+        isFalse,
+      );
+      final pruned = PinCubit.reconciled(
+        staleFromBootA,
+        DateTime.now(),
+        elapsedMs: 500000,
+        bootCount: 4,
+      );
+      expect(pruned.lockedUntil, isNull);
+    });
+
+    test('after a reboot with wall time remaining, the wall clock governs', () {
+      final config = const PinConfig().copyWith(
+        lockedUntil: DateTime.now().add(const Duration(minutes: 5)),
+        lockoutElapsedUntilMs: 530000,
+        lockoutBootCount: 3,
+      );
+      expect(
+        config.isLockedOutAt(DateTime.now(), elapsedMs: 1000, bootCount: 4),
+        isTrue,
+        reason: 'cross-boot monotonic leg is ignored; wall still locked',
+      );
+    });
+
+    test('off-Android (null monotonic) falls back to the wall clock', () {
+      final locked = const PinConfig().copyWith(
+        lockedUntil: DateTime.now().add(const Duration(minutes: 5)),
+      );
+      expect(locked.isLockedOutAt(DateTime.now()), isTrue);
+      expect(
+        locked
+            .copyWith(
+              lockedUntil: DateTime.now().subtract(const Duration(minutes: 1)),
+            )
+            .isLockedOutAt(DateTime.now()),
+        isFalse,
+      );
+    });
+
+    test('legacy configs (no monotonic fields) survive a JSON round-trip', () {
+      final legacy = PinConfig.fromJson({
+        'type': 'CUSTOM',
+        'lockedUntil': DateTime(2026, 8, 27).millisecondsSinceEpoch,
+      });
+      expect(legacy.lockoutElapsedUntilMs, isNull);
+      expect(legacy.lockoutBootCount, isNull);
+      final roundTripped = PinConfig.fromJson(
+        legacy.copyWith(lockoutElapsedUntilMs: 9, lockoutBootCount: 2).toJson(),
+      );
+      expect(roundTripped.lockoutElapsedUntilMs, 9);
+      expect(roundTripped.lockoutBootCount, 2);
     });
   });
 

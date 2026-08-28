@@ -8,24 +8,26 @@ apps and distracting websites:
   toggles.
 - **Web Blocklist** (`limits/web_blocker`) — a searchable website blocklist
   (custom domains + one-tap popular sites), two category toggles (adult content,
-  "web versions of blocked apps"), a live stats dashboard, and the only path in
-  this pair that is **natively enforced** today.
+  "web versions of blocked apps"), and a live stats dashboard.
 
 Both follow the feature-first Clean Architecture used across Detoxo
 (`data` / `domain` / `presentation`, Cubits, `get_it` locator `sl`, persistence
 through `lib/core/storage/local_store.dart`). The `limits` public barrel
-(`lib/features/limits/limits.dart`) re-exports only the two domain entities and
-their repository contracts — other features never reach into `data/` or
+(`lib/features/limits/limits.dart`) re-exports only `domain/` symbols — the
+entities, repository contracts and the two sync helpers (`syncAppBlocklist`,
+`syncWebBlocklist`) — other features never reach into `data/` or
 `presentation/`.
 
-> **Enforcement at a glance.** The Web Blocklist is enforced by the native
-> `WebBlockEngine` (address-bar host read → back press). The App Blocker is
-> **UI + persistence only**: its package list is never enforced natively on its
-> own. The single way an App Blocker entry reaches the engine is indirectly —
-> the Web Blocklist can *derive* website rules from enabled App Blocker apps
-> (see [App→domain derivation](#appdomain-derivation)). The project README marks
-> "native enforcement of app/web/usage" as a follow-up; the web host-blocking
-> path described below is the live subset of that.
+> **Enforcement at a glance.** Both are natively enforced. The Web Blocklist is
+> enforced by the native `WebBlockEngine` (address-bar host read → back press).
+> The App Blocker's enabled packages are pushed to the engine via
+> **`pushAppBlocklist`** (`syncAppBlocklist`), and the accessibility service
+> bounces any blocked app **HOME** the moment it's foregrounded (see
+> [Native enforcement — custom whole-app blocks](#app-block-native)). The Web
+> Blocklist can additionally *derive* website rules from enabled App Blocker
+> apps (see [App→domain derivation](#appdomain-derivation)). Per-entry
+> `lockAction` / `dailyLimitMinutes` remain **unused natively** — every
+> whole-app block acts as HOME-bounce; per-entry actions are still future work.
 
 ---
 
@@ -42,14 +44,15 @@ An `Equatable` value object for one fully-blocked app.
 | `packageName` | `String` | Identity; unique within the list. |
 | `appName` | `String` | Friendly label (falls back to the package). |
 | `enabled` | `bool` | Default `true`. |
-| `lockAction` | `AppLockAction` | `OVERLAY` / `CLOSE_APP` (default) / `LOCK_SCREEN`. |
-| `dailyLimitMinutes` | `int` | Default `0`; modeled here, consumed by the sibling `daily_limit` feature. |
+| `lockAction` | `AppLockAction` | `OVERLAY` / `CLOSE_APP` (default) / `LOCK_SCREEN`. **Unused natively** — enforcement is always a HOME bounce today. |
+| `dailyLimitMinutes` | `int` | Default `0`. Persisted but **unused anywhere** (no producer, no consumer — the sibling `daily_limit` feature never reads it); dropping it is a schema touch. |
 
 `AppLockAction` is defined in the shared enums
 (`lib/features/blocking/shared/domain/entities/enums.dart`); each variant carries
 a wire token, and `fromWire` falls back to `closeApp`. JSON round-trips via
 `fromJson` / `toJson`; there is no separate `toWire` because the entry is not
-pushed to the channel directly.
+pushed to the channel directly — only the enabled `packageName`s cross the wire
+(see the sync below).
 
 ### Repository & persistence
 
@@ -64,17 +67,101 @@ pushed to the channel directly.
 `app_blocker/presentation/app_block_cubit.dart` — `Cubit<List<AppBlockEntry>>`.
 Straight CRUD over the repository:
 
-- `load()` — hydrate from storage.
-- `add(packageName, appName)` — trims, ignores empty or duplicate packages,
-  defaults `appName` to the package when blank.
+- `load()` — hydrate from storage. A corrupt blob is **logged, not thrown**
+  (the screen fires `..load()` unawaited; `syncAppBlocklist` aborts its own
+  push on the same failure, so native keeps its last-good set).
+- `add(packageName, appName)` — validates and returns an `AppBlockAddResult`
+  (`added` / `invalid` / `sensitive` / `duplicate` / `failed`); defaults
+  `appName` to the package when blank. See the screen's toast contract below.
 - `toggle(index, enabled:)` / `removeAt(index)`.
-- `_commit(entries)` — `emit` then `save` (optimistic UI, persist after), then
-  fires the optional `onChanged` callback fire-and-forget.
+- `_commit(entries)` — `emit` then `save` (optimistic UI, persist after). A
+  **failed save reverts** the emit and returns `false` (so `add` reports
+  `failed` and nothing is pushed) — the same contract as `WebBlockCubit`;
+  on success it fires the optional `onChanged` callback fire-and-forget.
 
 No engine push happens here directly — the cubit takes an optional
-`onChanged` callback, which the screen wires to `syncWebBlocklist` (see the
-web blocker below) so the app-derived web rules never go stale when the app
-list changes. A failed sync never blocks the app-blocker UI.
+`onChanged` callback, which the screen wires to **`syncAppBlocklist` +
+`syncWebBlocklist`** (fire-and-forget) so both the native whole-app blocklist
+and the app-derived web rules update the moment the list changes. A failed sync
+never blocks the app-blocker UI.
+
+### Sync to native — `syncAppBlocklist`
+
+`app_blocker/domain/app_block_sync.dart` (exported via the `limits.dart`
+barrel) is the single push path, the whole-app twin of
+[`syncWebBlocklist`](#pushall):
+
+1. `AppBlockRepository.load()` — persisted state, not cubit state.
+2. `EngineRepository.pushAppBlocklist([...])` with the `packageName` of every
+   **enabled** entry (disabled entries are simply omitted).
+
+Same fail-safe contract as `syncWebBlocklist`: the body is try/caught →
+`AppLogger.e`, and a **failed load aborts the push** — native keeps enforcing
+its last-good persisted set, and a corrupt Dart store can never push `[]` and
+wipe it. Its three callers:
+
+1. `AppBlockCubit.onChanged` (wired in `app_block_screen.dart`) — every
+   add/toggle/remove.
+2. The splash `_bootstrap()` (fire-and-forget) — repairs Dart→native drift at
+   every cold start.
+3. The resume re-sync heavy leg (`lib/app/app_resume_sync.dart`, throttled to
+   once per 15 min).
+
+**Wire + native side.** `EngineRepository.pushAppBlocklist` →
+`EngineChannel.pushAppBlocklist` → method `pushAppBlocklist`
+(`{packages: List<String>}`). `CommandHandler.kt` handles it exactly like
+`pushProtectedApps`: an absent/malformed arg is a **no-op, never a wipe**
+(clearing requires an explicit empty list), and an unchanged set skips both the
+prefs rewrite and the service refresh. The set persists in
+`ConfigStore.blockedAppPackages` (`app_blocklist_packages` StringSet in
+`detoxo_engine_prefs`) and is applied live via
+`DetoxoAccessibilityService.refreshAppBlocklist()`.
+
+<a id="app-block-native"></a>**Native enforcement**
+(`DetoxoAccessibilityService.kt`). The service caches the set in a `@Volatile
+blockedApps` field (refreshed by `reload()` and `refreshAppBlocklist()` — the
+hot path never touches SharedPreferences). In `onAccessibilityEvent`, after the
+privacy guard and the master-enable gate but **above the Pause gate** (and
+before the per-package throttle and reel detection):
+
+```kotlin
+if (pkg in blockedApps &&
+    (event.eventType == TYPE_WINDOW_STATE_CHANGED || pkg == foregroundPkg)
+) {
+    onAppBlocked(pkg)
+    return
+}
+```
+
+**Pause does not unlock whole-app locks.** The App Blocker UI presents locks as
+unconditional, so the check sits above the `pausedUntil` clock gate: a Pause
+taken for reels suspends reel/web blocking only — a fully-locked app stays
+bounced through the whole Pause window. (The master switch, above both, still
+disables everything.)
+
+The branch is **anchored to the foreground**: a backgrounded blocked app posts
+notifications carrying its own `packageName` (the event mask still delivers
+events stamped with it), and acting on those would HOME-bounce the user out of
+an unrelated app on every incoming message. Window-state events mark the app
+foregrounding; the `pkg == foregroundPkg` leg still bounces a user already
+inside the app when the block lands. `onAppBlocked(pkg)`:
+
+1. **Belt-and-braces skips** — a stale push must never bounce a
+   privacy-protected app, Detoxo itself, any HOME-capable launcher (`homePkgs`, re-resolved on every push and reload — the resolver alone would read as package "android" while no default is set;
+   resolved on `reload()`), or `com.android.systemui`.
+2. **Own 1200 ms debounce** (`lastAppBlockTime`, same `BLOCK_DEBOUNCE_MS`
+   constant but a separate timestamp — a whole-app bounce must not consume the
+   reel-block window or vice versa).
+3. Records to the **shared reel-block counter** (`store.recordBlock(dateKey)`)
+   and emits a `blocked` event with `platformId: "app_block"`, `mode: "HOME"`,
+   plus the fresh `today`/`total` — so app blocks appear in the same
+   blocks-today stat as reel blocks.
+4. Toast **"\<app label\> is blocked by Detoxo"** (label resolved via
+   PackageManager, falling back to the package; the copy is the shared
+   `strings.xml` `toast_blocked` — one string for both whole-app and web
+   blocks so they can never drift apart), block vibration, then
+   `performGlobalAction(GLOBAL_ACTION_HOME)` — HOME, not BACK, because BACK
+   would just navigate within the blocked app.
 
 ### Screen
 
@@ -101,8 +188,7 @@ is a *management* surface unifying two systems that **enforce differently**:
    garbage package ids never persist (`isValidPackageName`,
    `lib/core/utils/package_name.dart`), and sensitive catalog packages
    (`ProtectedAppCatalog.byPackage`) are refused regardless of entry path. The
-   toast tells the truth — **"Added X"** (not "Blocked": custom locks record
-   intent, enforcement is the follow-up below) counts only landed adds, and an
+   toast reads **"Added X"** and counts only landed adds, and an
    all-refused batch shows the refusal reason as a warning instead. Each saved
    row shows the app's real device icon (from the cached scan; letter-tile
    fallback), an enable toggle and a delete button; when the custom list is
@@ -123,10 +209,12 @@ Like the web blocker, the screen carries no intro paragraph: the app-bar
 `InfoButton` explains the feed-vs-whole-app split, and section labels use the
 shared `SectionHeader` / `InlineHint` from `core/widgets/common_widgets.dart`.
 
-The practical takeaway: adding a *custom app* records intent but has no native
-enforcer wired in this build; toggling a *curated feed* takes effect immediately
-through the existing reel/short detection engine (see
-[03-detection-engine.md](03-detection-engine.md) and the blocklist/settings docs).
+The practical takeaway: adding a *custom app* takes effect immediately — the
+list syncs to native and the service HOME-bounces the app on open; toggling a
+*curated feed* also takes effect immediately, through the reel/short detection
+engine (see [03-detection-engine.md](03-detection-engine.md) and the
+blocklist/settings docs). The two paths enforce differently: whole app vs
+just its feed surfaces.
 
 ---
 
@@ -141,7 +229,6 @@ through the existing reel/short detection engine (see
 | `pattern` | `String` | The host (`youtube.com`); also the entry's `id`. |
 | `matchType` | `WebMatchType` | `DOMAIN` (default) / `EXACT` / `WILDCARD`. |
 | `enabled` | `bool` | Default `true`. |
-| `blockMode` | `BlockingMode` | Persisted; default `PRESS_BACK`. **Not** sent to native — the web path always presses back (see below). |
 | `pausedUntil` | `DateTime?` | Optional per-entry pause window. |
 | `displayName` | `String?` | Friendly label; falls back to `pattern`. |
 | `source` | `WebBlockSource` | `CUSTOM` / `POPULAR` / `ADULT` / `APP_DERIVED`. |
@@ -204,9 +291,10 @@ more here would create entries native can never match): ASCII hostnames only
 
 - **Blocklist:** `web_block_repository_impl.dart` → `LocalStore` key
   `StoreKeys.webBlocklist` (`"web_blocklist"`), JSON list of full entries. A
-  corrupt blob loads as `[]` instead of throwing (fail-soft: the screen and the
-  boot-time sync keep working, the raw value is only overwritten by a user
-  edit, and native keeps enforcing its own persisted copy regardless).
+  corrupt blob **throws** (no silent `[]`): `syncWebBlocklist` must abort
+  rather than push an empty list, which native would honor as an intentional
+  clear. The screen surfaces the error via the cubit's `load()` catch, and a
+  user re-add overwrites the blob.
 - **Stats:** `web_block_stats_repository_impl.dart` → `LocalStore` key
   `StoreKeys.webBlockStats` (`"web_block_stats"`). This repo is the Dart mirror
   of website-block analytics:
@@ -214,7 +302,9 @@ more here would create entries native can never match): ASCII hostnames only
     `today` counter to `0` when the stored calendar date is stale.
   - `watch()` subscribes to the native EventChannel and reacts to
     `ChannelEvents.webBlocked` events: it bumps a **per-host tally** (so the
-    dashboard can show "most blocked"), then prefers the engine-supplied
+    dashboard can show "most blocked") when the event carries a `host` —
+    adult-list hits (`source: "ADULT"`) arrive without one and are therefore
+    counted but never named (EVO-018) — then prefers the engine-supplied
     `today`/`total` counters (falling back to a local increment if omitted),
     persists, and yields a fresh `WebBlockStats`.
   - `WebBlockStats` (`web_block_stats.dart`) carries `totalBlocked`,
@@ -244,9 +334,13 @@ Key operations:
   the site name, `POPULAR` source, and brand color.
 - `toggleEntry` / `removeEntry` / `editEntry` — CRUD; only custom entries are
   editable (re-validated + deduped).
-- `setBlockAdult(value:)` / `setBlockForApps(value:)` — persist to
-  `AppSettings` and **`_engine.pushSettings(next)`**; `setBlockForApps` also
-  re-runs `_pushAll()` because the derived app→domain rules changed.
+- `setBlockAdult(value:)` / `setBlockForApps(value:)` — optimistic emit, then
+  `_saveSettings` (load-modify-write of `AppSettings` + best-effort
+  **`_engine.pushSettings(next)`**). A failed save reverts the toggle and
+  surfaces "Couldn't save — try again" (same contract as `_commit`); a failed
+  push is only logged — the value is persisted and `SettingsCubit.resync()`
+  re-pushes a fresh load of the repository on the next resume. `setBlockForApps`
+  also re-runs `_pushAll()` because the derived app→domain rules changed.
 - `search` / `clearError`.
 - `_commit(entries)` — `emit` → `_repo.save` → `_pushAll()`.
 
@@ -264,7 +358,7 @@ blocklist blob, which `WebBlockRepositoryImpl.load()` deliberately rethrows —
 fail-safe direction). Pushing `"[]"` on corruption would be interpreted by
 native as an intentional clear and wipe it. The catch also keeps the
 fire-and-forget call sites from booking `fatal: true` pseudo-crashes via
-`PlatformDispatcher.onError`. Its three callers:
+`PlatformDispatcher.onError`. Its four callers:
 
 1. `WebBlockCubit._pushAll()` (a one-line delegate) — screen load and every
    list mutation.
@@ -274,6 +368,8 @@ fire-and-forget call sites from booking `fatal: true` pseudo-crashes via
 3. `AppBlockCubit.onChanged` (wired in `app_block_screen.dart`) — so
    adding/toggling/removing a blocked app immediately updates the derived
    web rules.
+4. The resume re-sync heavy leg (`lib/app/app_resume_sync.dart`, throttled to
+   once per 15 min).
 
 The algorithm:
 
@@ -354,9 +450,12 @@ paragraph.
 two batch toggles, split out of the main screen to keep it clean: "Block
 websites of blocked apps" (`setBlockForApps`) and "Block adult content (18+)"
 (`setBlockAdult`), each an `AppToggleTile` with a subtitle and `selected`
-highlight, under a one-line intro. It creates its **own `WebBlockCubit`**
-(same DI as the main screen) — safe because the toggles live in settings and
-both screens re-load on entry, so two instances never drift.
+highlight, under a one-line intro. The 18+ subtitle states the scope — "every
+page of 200+ known adult sites and every .xxx, .porn, .sex or .adult address"
+— and `test/adult_blocklist_test.dart` pins that "200+" to the shipped list.
+It creates its **own `WebBlockCubit`** (same DI as the main screen) — safe
+because the toggles live in settings and both screens re-load on entry, so two
+instances never drift.
 
 ---
 
@@ -384,7 +483,10 @@ command instead (`blockAdultWebsites`, `blockWebsitesForBlockedApps` fields).
   non-JSON-array `json` arg is a **no-op, never a wipe** (clearing requires an
   explicit `"[]"`); a valid payload is stored
   (`store.webBlocklistJson = json`) and applied via
-  `DetoxoAccessibilityService.instance?.reload()`.
+  `DetoxoAccessibilityService.instance?.refreshWebBlocklist()` — the rule set
+  only (`webEngine.setBlocklist`), not a full `reload()` (which re-parses the
+  31 KB platforms config). A payload identical to the stored one is skipped
+  entirely: every Web Blocker screen entry re-pushes.
 - `"pushSettings"` → among other fields, sets `store.blockAdultWebsites` /
   `store.blockWebsitesForBlockedApps`, then `reload()`.
 
@@ -419,9 +521,19 @@ an optional adult-domain `HashSet`.
   `adult_domains.txt.gz` (gzipped, `#`-comment-aware) into a `HashSet` only while
   the toggle is on, and frees it when off (so it costs no heap otherwise). A
   missing/unreadable asset degrades to an empty set (adult blocking no-ops).
+  The asset is **generated** (EVO-017): `tool/web_blocker/blocked_websites.json`
+  (`domains` — 226 registrable hosts, incl. the 34 folded in from the user's
+  scrape; `tlds` — the four ICANN adult TLDs `adult`/`porn`/`sex`/`xxx`;
+  `allow` — hosts the compiler refuses, e.g. `google.com`, `twitter.com`) is
+  compiled by `bash tool/dev.sh adultlist` (`tool/web_blocker/compile_adult_list.py`,
+  byte-stable output), and `test/adult_blocklist_test.dart` fails whenever
+  source and asset drift. Edit the JSON, never the `.gz`.
 - `hasAnyRules()` — cheap guard for the accessibility hot path (any rules, or
   adult enabled with a non-empty set).
-- `matchHost(host, fullUrl?)` — returns true when the host is blocked:
+- `matchHost(host, fullUrl?)` — returns which list blocks the host:
+  `Match.RULE` (the user's/derived blocklist), `Match.ADULT` (the bundled set)
+  or `null`. The caller uses the distinction to name RULE hits but never ADULT
+  ones (EVO-018). Rule matching:
 
 | `matchType` | Rule |
 |---|---|
@@ -435,8 +547,10 @@ no push needed. The `DOMAIN` subdomain check is allocation-free
 (`isSubdomainOf` — no `"." + pattern` concat per event).
 
 If adult blocking is on, the host is additionally walked up its parent labels
-(`foo.bar.example.com → bar.example.com → example.com`), returning true on any
-set hit.
+**down to the bare TLD** (`foo.bar.example.com → bar.example.com → example.com
+→ com`), returning `Match.ADULT` on any set hit — so a bare-TLD line in the
+asset (`porn`) blocks every `*.porn` address, and a TLD entry can only ever
+match as the *last* label (`sussex.ac.uk` never reaches `sex`).
 
 > All matching is **host-based**. Android accessibility can read the address bar
 > but cannot see network traffic, so there is no URL/path/network-level
@@ -470,8 +584,10 @@ stateless host extraction from a browser's accessibility tree.
   never be blocked — none of the mapped ones do.
 - **`normalizeHost(raw)`** — lowercases, rejects strings containing spaces
   (search queries / "Search or type URL" placeholders), strips
-  scheme/path/query/fragment/port and leading `www.`, and validates against a
-  registrable-host guard (min length 4, must contain a dot).
+  scheme/path/query/fragment/port, leading `www.` and a trailing dot (the FQDN
+  form `example.com.` resolves identically and used to fail the guard — a
+  one-keystroke bypass; Dart's `DomainValidator` strips it too), and validates
+  against a registrable-host guard (min length 4, must contain a dot).
 
 ### Flow in the accessibility service
 
@@ -490,18 +606,26 @@ if (BrowserUrlExtractor.isBrowser(pkg)) {
 
 `handleBrowser(pkg)`:
 
-1. `extractHost(root, pkg, MAX_NODES)`; bail if null.
-2. `webEngine.matchHost(host)`; if not blocked, remember it as `lastUrlByPkg` and
-   return.
+1. Bail unless the focused root's package **is** `pkg` — in split-screen
+   `rootInActiveWindow` is the focused pane, and the generic fallback would
+   otherwise harvest any url-ish `EditText` from the *other* app and BACK out
+   of it. Then `extractHost(root, pkg, MAX_NODES)`; bail if null.
+2. `webEngine.matchHost(host)` → `Match?`; if `null` (allowed), remember the
+   host as `lastUrlByPkg` and return.
 3. **Per-host debounce:** if the host equals the last one and it is within
    `BLOCK_DEBOUNCE_MS` (1200 ms), skip — so a content-change storm on the same
    blocked page yields at most one back press.
 4. `store.recordWebBlock(dateKey())`, read `(today, total)`, and post a
-   `webBlocked` event: `{host, mode:"PRESS_BACK", today, total}`.
-5. `pressBackWithRateLimit()` (global back action, rate-limited by
-   `BACK_RATE_LIMIT_MS` = 1100 ms), then a short **"$host blocked by Detoxo"
-   toast** (EVO-011) so the bounce is attributable rather than looking like a
-   browser glitch.
+   `webBlocked` event: `{source:"RULE"|"ADULT", mode:"PRESS_BACK", today,
+   total, host?}` — **`host` is present only for `RULE` hits.** Adult-list hits
+   are counted but never named (EVO-018): without a host, Dart's per-host tally
+   and the "Most blocked" line skip them.
+5. A short toast (EVO-011) so the bounce is attributable rather than looking
+   like a browser glitch — **"$host is blocked by Detoxo"** (`toast_blocked`,
+   shared with the whole-app block) for RULE hits, **"Adult site blocked by
+   Detoxo"** (`toast_blocked_adult`) for ADULT hits — then
+   `pressBackWithRateLimit()` (global back action, rate-limited by
+   `BACK_RATE_LIMIT_MS` = 1100 ms).
 
 The block **mode is always `PRESS_BACK`** here — only
 `{pattern, matchType[, pausedUntil]}` crosses the channel, so native has no
@@ -515,25 +639,24 @@ must not reach logcat); the `webBlocked` event is consumed by
 
 | Capability | Status |
 |---|---|
-| App Blocker — custom whole-app locks | UI + persistence only; **no native enforcer** (planned / follow-up). |
+| App Blocker — custom whole-app locks | **Live** — `pushAppBlocklist` + native HOME bounce (`onAppBlocked`). Per-entry `lockAction`/`dailyLimitMinutes` still unused (future work). |
 | App Blocker — curated feed toggles | Live, via existing reel/short detection (`SettingsCubit.togglePlatform`). |
 | Web Blocklist — custom + popular domains | **Live** — native `WebBlockEngine` + address-bar read → back press. |
 | Web Blocklist — "block sites for blocked apps" | Live; domains derived Dart-side from enabled App Blocker apps. |
-| Web Blocklist — adult category | Live when `adult_domains.txt.gz` is bundled; no-ops if the asset is missing. |
+| Web Blocklist — adult category | **Live** — 226 registrable domains + the 4 ICANN adult TLDs, compiled from `tool/web_blocker/blocked_websites.json` into `adult_domains.txt.gz` (EVO-017); hits are counted but never named (EVO-018). No-ops if the asset is missing. |
 | Web match types beyond `DOMAIN` (`WILDCARD`/`EXACT`) | Supported natively; not produced by the current UI. |
-
-The README summary table conservatively groups "native enforcement of
-app/web/usage" as a follow-up; the web host-blocking path above is the shipped
-subset of that work.
 
 ## Source files
 
 - `lib/features/limits/limits.dart`
 - `lib/features/limits/app_blocker/domain/entities/app_block_entry.dart`
 - `lib/features/limits/app_blocker/domain/repositories/app_block_repository.dart`
+- `lib/features/limits/app_blocker/domain/app_block_sync.dart` (`syncAppBlocklist` — the single push path)
 - `lib/features/limits/app_blocker/data/repositories/app_block_repository_impl.dart`
 - `lib/features/limits/app_blocker/presentation/app_block_cubit.dart`
 - `lib/features/limits/app_blocker/presentation/app_block_screen.dart`
+- `lib/app/app_resume_sync.dart` (resume-time blocklist re-sync)
+- `test/app_block_sync_test.dart`
 - `lib/core/widgets/app_picker_sheet.dart` (shared installed-app picker)
 - `lib/core/platform_channels/installed_app.dart`
 - `lib/core/utils/package_name.dart` (package-id validation)
@@ -553,11 +676,16 @@ subset of that work.
 - `lib/features/limits/web_blocker/presentation/web_block_screen.dart`
 - `lib/features/limits/web_blocker/presentation/web_protection_screen.dart`
 - `lib/features/blocking/shared/domain/entities/enums.dart` (`WebMatchType`, `AppLockAction`, `BlockingMode`)
-- `lib/core/constants/channel_constants.dart` (`pushWebBlocklist`, `webBlocked`)
-- `lib/core/platform_channels/engine_channel.dart` (`pushWebBlocklist`)
+- `lib/core/constants/channel_constants.dart` (`pushWebBlocklist`, `pushAppBlocklist`, `webBlocked`)
+- `lib/core/platform_channels/engine_channel.dart` (`pushWebBlocklist`, `pushAppBlocklist`)
 - `lib/core/storage/local_store.dart` (`appBlocklist`, `webBlocklist`, `webBlockStats` keys)
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/WebBlockEngine.kt`
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/BrowserUrlExtractor.kt`
-- `android/app/src/main/kotlin/com/errorxperts/detoxo/accessibility/DetoxoAccessibilityService.kt` (`handleBrowser`, web branch)
-- `android/app/src/main/kotlin/com/errorxperts/detoxo/channels/CommandHandler.kt` (`pushWebBlocklist`, `pushSettings`)
-- `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/ConfigStore.kt` (web-block persistence + counters)
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/accessibility/DetoxoAccessibilityService.kt` (`handleBrowser` web branch; `onAppBlocked` + `refreshAppBlocklist`)
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/channels/CommandHandler.kt` (`pushWebBlocklist`, `pushAppBlocklist`, `pushSettings`)
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/ConfigStore.kt` (web-block persistence + counters; `blockedAppPackages`)
+- `android/app/src/main/res/values/strings.xml` (`toast_blocked` — shared web/whole-app block toast; `toast_blocked_adult` — unnamed adult-list toast)
+- `android/app/src/main/assets/adult_domains.txt.gz` (GENERATED 18+ list — never hand-edited)
+- `tool/web_blocker/blocked_websites.json` (18+ list source: `domains`, `tlds`, `allow`)
+- `tool/web_blocker/compile_adult_list.py` (`bash tool/dev.sh adultlist` — compiles the source into the asset)
+- `test/adult_blocklist_test.dart` (source ↔ asset drift guard + suffix-walk semantics)

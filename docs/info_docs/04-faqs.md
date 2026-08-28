@@ -56,11 +56,11 @@ These are the five ways Detoxo can behave. You pick whichever fits your goal fro
 | **One Reel** | *Temporary.* Lets a single reel play, then returns to your base mode. Scrolling to the next reel is what ends the peek. Tap **One Reel** again whenever you want another single clip — each tap re-arms one reel. |
 | **Unblock** | *Temporary.* You decide how many reels to release: tap the **Unblock** card, turn its dial to a count (2–20), and confirm. You can watch that many, then it returns to your base mode — tap **Unblock** and confirm a new count to unlock more. |
 | **Conscious** | An "earn-as-you-abstain" **base** mode. You build up a small allowance of watch-time by *staying off* reels (about 1 minute banked for every 10 minutes away, up to 10 minutes saved). While you have allowance, reels play; when it runs out, blocking kicks back in until you've earned more. It keeps you honest without a hard wall. |
-| **Pause** | *Temporary.* A short, deliberate break. You choose a window (2–10 minutes); during it, everything is allowed. When the timer runs out, it returns to your base mode. |
+| **Pause** | *Temporary.* A short, deliberate break. You choose a window (2–10 minutes); during it, reels and blocked websites are allowed. When the timer runs out, it returns to your base mode. (Apps you've fully locked on the Block apps screen stay locked through a Pause.) |
 
 Two of these **stick** — **Block All** and **Conscious** are your *base* mode — and three are **temporary** overrides (**One Reel**, **Unblock**, **Pause**) that auto-return to whichever base mode you were on once they finish. (See "What happens after One Reel, Unblock, or Pause finishes?" below.)
 
-Tip: with **Conscious**, pausing a video doesn't secretly bank you extra time — the allowance only builds while you're genuinely off short-video feeds. And if you dip into a temporary mode (One Reel, Unblock, or Pause) while Conscious is your base, the time you've already banked is **kept** — it's waiting for you when Conscious returns, not reset to zero. (Choosing Conscious fresh does start from zero.)
+Tip: with **Conscious**, pausing a video doesn't secretly bank you extra time — the allowance only builds while you're genuinely off short-video feeds. And if you dip into a temporary mode (One Reel, Unblock, or Pause) while Conscious is your base, the time you've already banked is **kept** — it's waiting for you when Conscious returns, not reset to zero. (Choosing Conscious fresh does start from zero, and the bank also resets at the start of each day — yesterday's abstinence doesn't buy this morning's scroll.)
 
 ## How does Unblock mode work?
 
@@ -123,6 +123,14 @@ No, the impact is small. Detoxo is built to be light: it only reacts briefly whe
 
 You will see a permanent, silent notification ("Detoxo is active") in your tray. That notification is required by Android to keep the blocker alive in the background — it's a status marker, not an alert, and it makes no sound.
 
+## The dashboard (or a permission card) briefly says "Checking…" — is something wrong?
+
+No. Right after launch, Detoxo may not have heard back from Android yet about a permission or the protection service, so instead of guessing it shows a neutral **"Checking…"** — on the dashboard's Protection Status card and on the setup screen's permission cards. It settles within a moment, and it never means something was revoked or turned off. (Detoxo deliberately doesn't flash "Protection off" or "denied" during that moment — a false alarm you learn to ignore would hide the real one.)
+
+## I got a "Protection stopped" notification — what does it mean?
+
+Some phones silently kill Detoxo's protection service — most often after a force-stop or an aggressive battery "optimization" — and Android doesn't allow an app to restart it on its own. Detoxo checks in the background every few minutes; if protection has died while your master switch is still on, it posts a **"Protection stopped"** alert. Tap it and you land on the exact Accessibility settings screen where one toggle turns protection back on. (You'll see the alert at most once every few hours — it's a nudge, not a nag.) This is one reason the Notifications permission is worth granting.
+
 ## I tapped "Don't ask again" on notifications — how do I turn them back on?
 
 Once you permanently dismiss the notification pop-up, Android won't show it again. Open **Settings → Permissions** (or the setup funnel) and the Notifications card's button now reads **Open settings** — tap it to jump straight to Detoxo's system settings and switch notifications on.
@@ -133,7 +141,7 @@ No — Detoxo is **Android-only**, and this isn't a temporary gap. The whole pro
 
 ## How do I take a break or turn Detoxo off?
 
-- For a **quick break**, use **Pause** — pick 2–10 minutes and everything is allowed until the timer ends, then it returns to your base mode (Block All or Conscious) on its own. This is the recommended way to step away without forgetting to turn protection back on.
+- For a **quick break**, use **Pause** — pick 2–10 minutes and reels and blocked websites are allowed until the timer ends, then it returns to your base mode (Block All or Conscious) on its own. Apps you've fully locked on the Block apps screen stay locked through the break. This is the recommended way to step away without forgetting to turn protection back on.
 - To **turn blocking off entirely**, open **Settings** and switch off **Protection** (the master switch for all detection). If you've set a PIN, Detoxo will ask for it first — that's the intentional speed bump that stops an impulsive "just turn it off."
 
 The reel counter is controlled separately (in the reel counter screen), so you can keep counting even with blocking off.
@@ -159,6 +167,8 @@ If you're locked out for good, the way back is to **uninstall Detoxo and install
 
 Detoxo says this plainly on the PIN setup screen and behind **"Forgot PIN?"** on the lock screen, so it shouldn't be a surprise — pick something you'll remember.
 
+One more thing: too many wrong guesses starts a cooldown that grows with each miss (up to 24 hours). It survives force-quitting the app, and it's tied to the phone's internal uptime clock — so changing the date or time in Settings doesn't skip the wait.
+
 ## How do I uninstall Detoxo?
 
 Uninstall it like any app — **unless** you turned on the optional **Device Admin** protection.
@@ -167,11 +177,21 @@ Device Admin is an opt-in feature that stops Detoxo from being uninstalled on im
 
 ## Which apps and sites does Detoxo cover?
 
-Detoxo targets the short-video feeds inside popular apps (think Reels, Shorts, and similar infinite-scroll video), plus it can bounce you off blocked websites — including an optional built-in adult-site list — when you browse. It focuses on the *feed*, so the rest of an app (messages, search, posting) keeps working normally.
+Detoxo targets the short-video feeds inside popular apps (think Reels, Shorts, and similar infinite-scroll video), plus it can bounce you off blocked websites — including an optional built-in adult-site list — when you browse. It focuses on the *feed*, so the rest of an app (messages, search, posting) keeps working normally. And for apps you want gone entirely, you can add **any app on your phone** to the Block apps list — see the next question.
+
+## Can Detoxo block a whole app, not just its feed?
+
+Yes. On the **Block apps** screen, tap **Add app** and pick any app from your phone. From then on, opening that app bounces you straight back to your home screen with a short "*App* is blocked by Detoxo" message — even if you were already inside it when the block landed. Each bounce counts toward your "Blocked today" number, and you can pause a block anytime by flipping the row's switch off (or delete it). Detoxo never blocks your home screen, itself, or your protected private apps (banking, payments, and the like).
+
+## Can I let a blocked website through for a few minutes?
+
+Yes — without unblocking it. On the **Website blocker** screen, tap the site's row (or swipe it left), choose **Pause** and pick 5, 15, 30 or 60 minutes. The row shows "Paused until …" and the site opens normally until then; when the time is up, blocking switches itself back on — even if Detoxo never reopens. Tap **Resume** to end the pause early.
 
 ## Where are the "block adult content" and "block websites of blocked apps" switches?
 
 On the **Website blocker** screen, tap the tinted **Protection** pill at the start of the Popular sites row — it opens a small screen with both switches, and shows how many are on.
+
+**Block adult content (18+)** covers every page of 200+ known adult sites plus every `.xxx`, `.porn`, `.sex` or `.adult` address, in any browser, on top of your own blocklist. Those blocks are counted in your stats but never named — the toast just says "Adult site blocked by Detoxo", and no adult site can show up in the "Most blocked" line. If you need one of those sites, switch the 18+ protection off for a while; per-site pause applies to your own blocklist entries.
 
 ## How do I get help, report a bug, or suggest a feature?
 

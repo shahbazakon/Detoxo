@@ -69,15 +69,13 @@ class _BodyState extends State<_Body> {
     final ok = await _widget.pin();
     await _widget.refresh();
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          ok
-              ? 'Confirm the prompt to add the widget to your home screen.'
-              : 'Your launcher doesn’t support adding widgets this way — '
-                    'long-press your home screen and pick Detoxo from Widgets.',
-        ),
-      ),
+    GlassToast.show(
+      context,
+      ok
+          ? 'Confirm the prompt to add the widget to your home screen.'
+          : 'Your launcher doesn’t support adding widgets this way — '
+                'long-press your home screen and pick Detoxo from Widgets.',
+      tone: ok ? AppTone.neutral : AppTone.warning,
     );
   }
 

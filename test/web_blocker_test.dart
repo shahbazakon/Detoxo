@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:bloc_test/bloc_test.dart';
+import 'package:detoxo/core/constants/channel_constants.dart';
 import 'package:detoxo/core/platform_channels/engine_channel.dart';
 import 'package:detoxo/core/storage/local_store.dart';
 import 'package:detoxo/features/blocking/shared/domain/entities/app_settings.dart';
@@ -515,6 +516,52 @@ void main() {
         verifyNever(() => engine.pushWebBlocklist(any()));
       },
     );
+
+    blocTest<WebBlockCubit, WebBlockState>(
+      'setBlockAdult reverts the toggle and surfaces an error when the save '
+      'fails',
+      build: build,
+      setUp: () {
+        when(() => settingsRepo.save(any())).thenThrow(Exception('disk full'));
+      },
+      act: (c) => c.setBlockAdult(value: true),
+      verify: (c) {
+        expect(c.state.blockAdult, isFalse);
+        expect(c.state.error, contains("Couldn't save"));
+        verifyNever(() => engine.pushSettings(any()));
+      },
+    );
+
+    blocTest<WebBlockCubit, WebBlockState>(
+      'setBlockAdult keeps a saved toggle when only the native push fails',
+      build: build,
+      setUp: () {
+        when(
+          () => engine.pushSettings(any()),
+        ).thenThrow(Exception('channel down'));
+      },
+      act: (c) => c.setBlockAdult(value: true),
+      verify: (c) {
+        expect(c.state.blockAdult, isTrue);
+        expect(c.state.error, isNull);
+        verify(() => settingsRepo.save(any())).called(1);
+      },
+    );
+
+    blocTest<WebBlockCubit, WebBlockState>(
+      'setBlockForApps reverts and pushes nothing when the save fails',
+      build: build,
+      setUp: () {
+        when(() => settingsRepo.save(any())).thenThrow(Exception('disk full'));
+      },
+      act: (c) => c.setBlockForApps(value: true),
+      verify: (c) {
+        expect(c.state.blockForApps, isFalse);
+        expect(c.state.error, contains("Couldn't save"));
+        verifyNever(() => engine.pushSettings(any()));
+        verifyNever(() => engine.pushWebBlocklist(any()));
+      },
+    );
   });
 
   group('WebBlockRepositoryImpl', () {
@@ -567,5 +614,35 @@ void main() {
         expect(stats.mostBlockedHost, 'x.com');
       },
     );
+
+    test('an adult-list block counts but is never named (EVO-018)', () async {
+      final store = _MockStore();
+      String? blob;
+      when(() => store.read(StoreKeys.webBlockStats)).thenAnswer((_) => blob);
+      when(
+        () => store.write(StoreKeys.webBlockStats, any()),
+      ).thenAnswer((inv) async => blob = inv.positionalArguments[1] as String);
+      final channel = _MockChannel();
+      // Native omits `host` for ADULT hits — only RULE hits carry it.
+      when(channel.events).thenAnswer(
+        (_) => Stream.value(<String, dynamic>{
+          'type': ChannelEvents.webBlocked,
+          'source': 'ADULT',
+          'mode': 'PRESS_BACK',
+          'today': 1,
+          'total': 4,
+        }),
+      );
+
+      final stats = await WebBlockStatsRepositoryImpl(
+        channel,
+        store,
+      ).watch().first;
+
+      expect(stats.blockedToday, 1);
+      expect(stats.totalBlocked, 4);
+      expect(stats.mostBlockedHost, isNull);
+      expect((jsonDecode(blob!) as Map)['hosts'], isEmpty);
+    });
   });
 }

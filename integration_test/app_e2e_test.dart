@@ -46,15 +46,6 @@ Future<void> openDrawer(WidgetTester tester) async {
   await settle(tester, frames: 12);
 }
 
-/// Ends a step: asserts nothing threw, then holds the screen long enough for
-/// `tool/qa.sh` to grab a framebuffer when it sees the QA_SHOT marker.
-Future<void> step(WidgetTester tester, String name) async {
-  expect(tester.takeException(), isNull, reason: name);
-  debugPrint('QA_STEP:$name');
-  debugPrint('QA_SHOT:$name');
-  await settle(tester, frames: 12);
-}
-
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
@@ -65,85 +56,7 @@ void main() {
     await settle(tester, frames: 10);
     await step(tester, 'splash');
 
-    final onboarding = find.text(kOnboardingMarker);
-    final permissions = find.text(kPermissionsMarker);
-    final pinLock = find.text(kPinLockMarker);
-    final home = find.text(kHomeMarker);
-
-    // SplashScreen._bootstrap awaits settings/permissions/pin, then on first run
-    // targets.load() — a native config push plus a full installed-package scan.
-    // 90s is deliberate; a cold phone with hundreds of apps is slow.
-    final landed = await waitForAny(tester, [
-      onboarding,
-      permissions,
-      pinLock,
-      home,
-    ]);
-    expect(landed, isNot(-1), reason: 'splash never routed anywhere');
-
-    if (landed == 2) {
-      fail(
-        'this device has an app-scope PIN set and the walk cannot type it. '
-        'Clear app data first: bash tool/qa.sh -d <serial> --reset prep',
-      );
-    }
-
-    if (landed == 0) {
-      await step(tester, 'onboarding');
-      await tester.tap(find.text('Skip'));
-      // Two hops, not one: _finish persists `onboarded`, seeds the daily limit,
-      // then bounces through the SPLASH so SettingsCubit re-bootstraps from the
-      // flag it just wrote (see onboarding_screen.dart) — the splash gate is
-      // what finally lands on /permissions. A fixed settle races that.
-      expect(
-        await waitForAny(tester, [
-          permissions,
-          home,
-        ], timeout: const Duration(seconds: 45)),
-        isNot(-1),
-        reason: 'Skip did not leave onboarding',
-      );
-    }
-
-    // Required permissions are accessibility + overlay, and there is NO skip:
-    // the CTA is `onPressed: allRequired ? … : null`. tool/qa.sh pre-granted
-    // both over adb, so the label must have flipped to 'Continue'.
-    if (await waitFor(
-      tester,
-      permissions,
-      timeout: const Duration(seconds: 20),
-    )) {
-      await step(tester, 'permissions');
-      final cont = find.text('Continue');
-      expect(
-        await waitFor(tester, cont, timeout: const Duration(seconds: 20)),
-        isTrue,
-        reason:
-            'still showing "Grant required permissions" — accessibility and/or '
-            'overlay did not stick. Run: bash tool/qa.sh -d <serial> prep',
-      );
-      await tester.tap(cont);
-      await settle(tester, frames: 10);
-    }
-
-    expect(
-      await waitFor(tester, home, timeout: const Duration(seconds: 45)),
-      isTrue,
-      reason: 'never reached the dashboard',
-    );
-    await step(tester, 'home');
-
-    // The 7-step tour auto-starts on the first /home when hasSeenFeatureShowcase
-    // is false, with disableBarrierInteraction + disableDefaultTargetGestures —
-    // it swallows every dashboard tap until Skip. Absent on an already-toured
-    // device, hence conditional.
-    final skip = find.text('Skip');
-    if (await waitFor(tester, skip, timeout: const Duration(seconds: 10))) {
-      await step(tester, 'showcase');
-      await tester.tap(skip);
-      await settle(tester, frames: 14);
-      expect(skip, findsNothing, reason: 'showcase tour was not dismissed');
-    }
+    final home = await reachHome(tester, step: (n) => step(tester, n));
 
     // Real state assertions — the walk persisted to Hive, it did not merely
     // paint the right pixels.

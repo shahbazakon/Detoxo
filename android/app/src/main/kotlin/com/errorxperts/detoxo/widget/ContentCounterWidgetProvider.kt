@@ -10,8 +10,7 @@ import android.os.Bundle
 import android.widget.RemoteViews
 import com.errorxperts.detoxo.R
 import com.errorxperts.detoxo.engine.ContentCounterStore
-import java.text.SimpleDateFormat
-import java.util.Locale
+import com.errorxperts.detoxo.engine.DateKeys
 import kotlin.math.roundToInt
 
 /**
@@ -108,7 +107,6 @@ class ContentCounterWidgetProvider : AppWidgetProvider() {
             )
         }
 
-        private fun dateKey(): String =
-            SimpleDateFormat("dd-MM-yyyy", Locale.US).format(System.currentTimeMillis())
+        private fun dateKey(): String = DateKeys.today()
     }
 }

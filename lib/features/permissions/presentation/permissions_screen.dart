@@ -1,5 +1,6 @@
 import 'package:detoxo/core/design_system/design_system.dart';
 import 'package:detoxo/core/navigation/routes.dart';
+import 'package:detoxo/features/blocking/shared/domain/entities/enums.dart';
 import 'package:detoxo/features/permissions/domain/entities/permission_status.dart';
 import 'package:detoxo/features/permissions/presentation/permission_actions.dart';
 import 'package:detoxo/features/permissions/presentation/permissions_cubit.dart';
@@ -57,7 +58,10 @@ class _PermissionsScreenState extends State<PermissionsScreen>
           final allRequired = cubit.allRequiredGranted;
           final required = statuses.where((s) => s.kind.required).toList();
           final optional = statuses.where((s) => !s.kind.required).toList();
-          final grantedReq = required.where((s) => s.granted).length;
+          // Same predicate as the gate — the "N of M" row, the cards and the
+          // Continue button must never contradict each other under a flaky
+          // (unknown) read.
+          final grantedReq = required.where(cubit.effectivelyGranted).length;
           final progress = required.isEmpty
               ? 1.0
               : grantedReq / required.length;
@@ -128,13 +132,18 @@ class _PermissionsScreenState extends State<PermissionsScreen>
   }
 
   Widget _card(BuildContext context, PermissionStatus status) {
+    final cubit = context.read<PermissionsCubit>();
+    final effective = cubit.effectivelyGranted(status);
     return Padding(
       padding: const EdgeInsets.only(bottom: AppSpacing.sm),
       child: PermissionCard(
         icon: _iconFor(status.kind),
         title: status.kind.label,
         why: status.kind.why,
-        granted: status.granted,
+        granted: effective,
+        // Genuinely unknown (no granted history): neutral "Checking…", not a
+        // red denied row.
+        unknown: status.state == PermissionState.unknown,
         isRequired: status.kind.required,
         permanentlyDenied: status.permanentlyDenied,
         actionLabel: status.blockedByRestrictedSettings ? 'Fix this' : null,

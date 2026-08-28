@@ -83,11 +83,13 @@ object BrowserUrlExtractor {
 
     fun isBrowser(pkg: String): Boolean = KNOWN_BROWSERS.contains(pkg)
 
-    /** Best-effort current host for [pkg], or null. */
+    /** Best-effort current host for [pkg], or null. Recycles every node it
+     * obtains (the passed-in root is the caller's to manage). */
     fun extractHost(root: AccessibilityNodeInfo, pkg: String, maxNodes: Int): String? {
         // 1) Mapped fast path: the address bar by resource id.
         URL_BAR_IDS[pkg]?.let { ids ->
             var sawMappedBar = false
+            var mappedHost: String? = null
             for (id in ids) {
                 val hits = root.findAccessibilityNodeInfosByViewId(id)
                 if (!hits.isNullOrEmpty()) {
@@ -98,10 +100,12 @@ object BrowserUrlExtractor {
                         // commit re-run this on the then-unfocused bar). Ceiling:
                         // a browser that keeps its bar focused after load would
                         // never be blocked; none of the mapped ones do.
-                        if (n?.isFocused == true) continue
-                        val host = normalizeHost(n?.text?.toString())
-                        if (host != null) return host
+                        if (mappedHost == null && n?.isFocused != true) {
+                            mappedHost = normalizeHost(n?.text?.toString())
+                        }
+                        n.recycleSafe()
                     }
+                    if (mappedHost != null) return mappedHost
                 }
             }
             // The mapped bar existed but yielded nothing (focused, or showing
@@ -113,7 +117,8 @@ object BrowserUrlExtractor {
         val deque = ArrayDeque<AccessibilityNodeInfo>()
         deque.addLast(root)
         var i = 0
-        while (deque.isNotEmpty() && i < maxNodes) {
+        var found: String? = null
+        while (deque.isNotEmpty() && i < maxNodes && found == null) {
             val node = deque.removeLast()
             i++
             val isEdit = node.className?.toString()?.contains("EditText") == true
@@ -122,14 +127,20 @@ object BrowserUrlExtractor {
             if (!node.isFocused &&
                 (isEdit || (resName != null && resName.contains("url", ignoreCase = true)))
             ) {
-                val host = extractFromText(node.text?.toString())
-                if (host != null) return host
+                found = extractFromText(node.text?.toString())
             }
-            for (c in node.childCount - 1 downTo 0) {
-                node.getChild(c)?.let { deque.addLast(it) }
+            if (found == null) {
+                for (c in node.childCount - 1 downTo 0) {
+                    node.getChild(c)?.let { deque.addLast(it) }
+                }
             }
+            if (node !== root) node.recycleSafe()
         }
-        return null
+        while (deque.isNotEmpty()) {
+            val node = deque.removeLast()
+            if (node !== root) node.recycleSafe()
+        }
+        return found
     }
 
     /** Pull a host out of free text (a toolbar label that may carry scheme/path). */
@@ -148,6 +159,10 @@ object BrowserUrlExtractor {
         s = s.substringBefore('/').substringBefore('?').substringBefore('#')
         s = s.substringBefore(':') // port
         if (s.startsWith("www.")) s = s.substring(4)
+        // FQDN form (`example.com.`) resolves identically and would otherwise
+        // fail HOST_GUARD — a one-keystroke bypass. Dart's DomainValidator
+        // strips it too.
+        s = s.trimEnd('.')
         if (s.length < 4 || !s.contains('.')) return null
         return if (HOST_GUARD.matches(s)) s else null
     }

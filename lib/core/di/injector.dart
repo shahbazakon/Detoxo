@@ -65,7 +65,7 @@ Future<void> configureDependencies() async {
     )
     ..registerLazySingleton<EngineRepository>(() => EngineRepositoryImpl(sl()))
     ..registerLazySingleton<PermissionRepository>(
-      () => PermissionRepositoryImpl(sl()),
+      () => PermissionRepositoryImpl(sl(), sl()),
     )
     ..registerLazySingleton<PinRepository>(() => PinRepositoryImpl(sl(), sl()))
     ..registerLazySingleton<WebBlockRepository>(

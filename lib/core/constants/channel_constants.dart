@@ -27,6 +27,11 @@ abstract final class ChannelMethods {
   /// one is foreground). Payload `{packages: List<String>}`.
   static const String pushProtectedApps = 'pushProtectedApps';
 
+  /// Custom whole-app blocks push: a flat list of package names the native
+  /// engine bounces HOME whenever they come to the foreground. Payload
+  /// `{packages: List<String>}`; fail-safe like [pushProtectedApps].
+  static const String pushAppBlocklist = 'pushAppBlocklist';
+
   // Permission + service status queries.
   static const String isAccessibilityEnabled = 'isAccessibilityEnabled';
   static const String serviceAlive = 'serviceAlive';
@@ -52,15 +57,18 @@ abstract final class ChannelMethods {
   /// (0 = never). Drives the "when screen turns off" auto-lock option.
   static const String lastScreenOff = 'lastScreenOff';
 
-  // Block actions / overlay (used for testing the engine and PIN/one-reel UI).
+  /// The monotonic clocks: `{elapsedMs: SystemClock.elapsedRealtime(),
+  /// bootCount: Settings.Global.BOOT_COUNT (-1 if unreadable)}`. Immune to
+  /// Settings clock changes; the boot count makes cross-boot readings
+  /// detectable. Anchors the PIN lockout.
+  static const String monotonicNow = 'monotonicNow';
+
+  // Block actions (used for testing the engine and PIN/one-reel UI).
   static const String performBack = 'performBack';
   static const String killApp = 'killApp';
   static const String lockScreen = 'lockScreen';
-  static const String showOverlay = 'showOverlay';
-  static const String hideOverlay = 'hideOverlay';
 
-  // Device / foreground info.
-  static const String foregroundPackage = 'foregroundPackage';
+  // Device info / stats.
   static const String deviceInfo = 'deviceInfo';
   static const String blockStats = 'blockStats';
 
@@ -103,13 +111,13 @@ abstract final class ChannelMethods {
 /// Event `type` values streamed over [Channels.events].
 abstract final class ChannelEvents {
   static const String serviceStatus = 'serviceStatus';
-  static const String detection = 'detection';
   static const String blocked = 'blocked';
 
   /// A blocked website was detected in a browser and backed out of.
-  /// Payload: `{host, mode, today, total}`.
+  /// Payload: `{source: "RULE" | "ADULT", mode, today, total, host?}` — `host`
+  /// is present only for `RULE` hits (the user's own blocklist); adult-list
+  /// blocks are counted but never named (EVO-018).
   static const String webBlocked = 'webBlocked';
-  static const String foregroundChanged = 'foregroundChanged';
 
   /// Live Conscious bank update (bankMs / maxBankMs / watching / blocked).
   static const String consciousState = 'consciousState';
@@ -119,6 +127,6 @@ abstract final class ChannelEvents {
   static const String reelSessionState = 'reelSessionState';
 
   /// A short video was counted. Payload: `{package, today, total, perAppToday,
-  /// perAppTotal}`.
+  /// perAppTotal, timeTodayMs, enabled, bubbleEnabled}`.
   static const String contentCounted = 'contentCounted';
 }

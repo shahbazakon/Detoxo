@@ -206,7 +206,7 @@ class _ProtectedAppsViewState extends State<_ProtectedAppsView> {
       subtitle: app.packageName,
       trailing: IconButton(
         icon: const Icon(Icons.delete_outline),
-        tooltip: 'Remove',
+        tooltip: 'Remove ${app.appName}',
         onPressed: () =>
             context.read<ProtectedAppsCubit>().remove(app.packageName),
       ),

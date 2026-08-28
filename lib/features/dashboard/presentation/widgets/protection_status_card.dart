@@ -56,8 +56,49 @@ class ProtectionStatusCard extends StatelessWidget {
       );
     }
 
-    final running =
-        context.watch<ServiceCubit>().state.status == ServiceStatus.running;
+    final status = context.watch<ServiceCubit>().state.status;
+
+    // `unknown` means the status read hasn't answered (cold start, flaky
+    // channel) — NOT that protection is off. A scare card that cries wolf on
+    // every hiccup teaches the user to ignore the real one, so this renders
+    // neutral and the next refresh (resume/stream) settles it.
+    if (status == ServiceStatus.unknown) {
+      return GlassCard(
+        child: Row(
+          children: [
+            AppAnimatedIcon(
+              icon: AppIcon.shieldCheck,
+              size: 30,
+              color: scheme.onSurfaceVariant,
+              playOnAppear: true,
+            ),
+            const SizedBox(width: AppSpacing.md),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Protection Status',
+                    style: text.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w700,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    'Checking…',
+                    style: text.bodyMedium?.copyWith(
+                      color: scheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    final running = status == ServiceStatus.running;
 
     if (!running) {
       // Android's restricted-settings gate can swallow the grant silently; when

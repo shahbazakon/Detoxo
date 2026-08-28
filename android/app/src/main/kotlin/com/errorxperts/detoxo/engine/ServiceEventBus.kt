@@ -22,9 +22,26 @@ object ServiceEventBus {
     @Volatile
     var sink: Sink? = null
 
+    /**
+     * Sticky last serviceStatus payload, recorded even with no listener. A cold
+     * start races the service rebind: onServiceConnected's `running=true` fires
+     * before Dart attaches the EventChannel and would otherwise be lost, leaving
+     * the dashboard on "Protection off" for the whole session.
+     */
+    @Volatile
+    private var lastServiceStatus: Map<String, Any?>? = null
+
     fun post(type: String, data: Map<String, Any?> = emptyMap()) {
-        val sink = this.sink ?: return
         val payload = HashMap<String, Any?>(data).apply { put("type", type) }
+        if (type == "serviceStatus") lastServiceStatus = payload
+        val sink = this.sink ?: return
+        mainHandler.post { sink.emit(payload) }
+    }
+
+    /** Replays the sticky serviceStatus to the current sink (no-op without one). */
+    fun replayLastStatus() {
+        val payload = lastServiceStatus ?: return
+        val sink = this.sink ?: return
         mainHandler.post { sink.emit(payload) }
     }
 }

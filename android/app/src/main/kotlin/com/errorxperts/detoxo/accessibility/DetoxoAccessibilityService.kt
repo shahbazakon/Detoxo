@@ -9,6 +9,7 @@ import android.app.admin.DevicePolicyManager
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Handler
@@ -26,14 +27,15 @@ import com.errorxperts.detoxo.admin.DetoxoDeviceAdminReceiver
 import com.errorxperts.detoxo.engine.BrowserUrlExtractor
 import com.errorxperts.detoxo.engine.ConfigStore
 import com.errorxperts.detoxo.engine.ContentCounter
+import com.errorxperts.detoxo.engine.DateKeys
 import com.errorxperts.detoxo.engine.DetectionConfig
 import com.errorxperts.detoxo.engine.DetectorRule
 import com.errorxperts.detoxo.engine.PlatformRule
 import com.errorxperts.detoxo.engine.ServiceEventBus
 import com.errorxperts.detoxo.engine.WebBlockEngine
-import java.text.SimpleDateFormat
+import com.errorxperts.detoxo.engine.recycleSafe
+import com.errorxperts.detoxo.receivers.WatchdogJobService
 import java.util.ArrayDeque
-import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -80,6 +82,63 @@ class DetoxoAccessibilityService : AccessibilityService() {
     private val lastEventByPackage = ConcurrentHashMap<String, Long>()
     @Volatile private var lastBlockTime = 0L
     @Volatile private var lastBackTime = 0L
+
+    // ── Custom whole-app blocks ───────────────────────────────────────────────
+    // Packages the user locked entirely (pushed via pushAppBlocklist). Cached
+    // so the hot path never touches SharedPreferences; refreshed by reload()
+    // and refreshAppBlocklist(). Own debounce — a whole-app bounce must not
+    // consume the reel-block window (or vice versa).
+    @Volatile private var blockedApps: Set<String> = emptySet()
+    @Volatile private var lastAppBlockTime = 0L
+
+    /**
+     * Every HOME-capable package, not just the current default: a stale
+     * blocklist must never bounce a launcher, and `resolveActivity` hands back
+     * the resolver (package "android") while no default is chosen.
+     */
+    @Volatile private var homePkgs: Set<String> = emptySet()
+
+    /**
+     * Cheap refresh for pushAppBlocklist (mirrors [refreshProtectedPackages]).
+     * Re-resolves the launcher guard too — the user may have switched
+     * launchers since the last full [reload].
+     */
+    fun refreshAppBlocklist() {
+        blockedApps = store.blockedAppPackages
+        homePkgs = homePackages()
+    }
+
+    /** Cheap refresh for pushWebBlocklist: the rule set only, no config re-parse. */
+    fun refreshWebBlocklist() {
+        webEngine.setBlocklist(store.webBlocklistJson)
+    }
+
+    // ── Hot-path settings cache ──────────────────────────────────────────────
+    // Mirrors of the per-event settings flags, same pattern as [protectedPkgs]:
+    // the event path touches no SharedPreferences. Safe because every write
+    // goes through CommandHandler, which always follows with reload().
+    @Volatile private var masterOn = true
+    @Volatile private var pausedUntil = 0L
+    @Volatile private var activePlan = ""
+    @Volatile private var enabledPlatformIds: Set<String> = emptySet()
+
+    // ── Conscious bank cache + write batching ────────────────────────────────
+    // The 1 Hz accountant used to do two prefs .apply() per tick (anchor +
+    // bank ≈ 172k writes/day in Conscious). The bank now lives here and
+    // flushes at most every CONSCIOUS_FLUSH_MS (forced when it empties, on
+    // plan stop, on reload and on unbind/destroy). The anchor is runtime-only:
+    // a service restart re-anchors to now anyway (see [syncConscious]).
+    // ponytail: <=5s of earned bank lost on a hard process kill.
+    @Volatile private var consciousBank = 0L
+    private var consciousDirty = false
+    private var lastConsciousFlushMs = 0L
+    private var consciousAnchorMs = 0L
+
+    // Per-event detector-match memo: the counting pass and the block pass test
+    // the same detectors against the same window — the second pass becomes map
+    // lookups instead of a second full tree walk. Cleared per event; events are
+    // delivered serially on the main thread, so no locking.
+    private val matchMemo = HashMap<DetectorRule, Boolean>()
 
     // ── Short-video awareness counter ─────────────────────────────────────────
     // Counts reels/shorts across supported apps independent of blocking. Public
@@ -131,8 +190,15 @@ class DetoxoAccessibilityService : AccessibilityService() {
         super.onServiceConnected()
         instance = this
         store = ConfigStore(this)
+        store.serviceEverConnected = true
         reload()
         startAsForeground()
+        // Arm the protection watchdog (idempotent): once the user had a live
+        // service, a later silent death gets detected and surfaced. Connecting
+        // IS the recovery — clear any standing "Protection stopped" alert now
+        // rather than waiting for the next 15-min check.
+        WatchdogJobService.schedule(this)
+        WatchdogJobService.clearAlert(this, store)
         ServiceEventBus.post("serviceStatus", mapOf("running" to true))
         Log.i(TAG, "service connected")
     }
@@ -141,10 +207,30 @@ class DetoxoAccessibilityService : AccessibilityService() {
     fun reload() {
         config = DetectionConfig.parse(store.platformsConfigJson)
         protectedPkgs = store.protectedPackages
+        blockedApps = store.blockedAppPackages
+        homePkgs = homePackages()
+        masterOn = store.masterEnabled
+        pausedUntil = store.pauseUntil
+        activePlan = store.activePlan
+        enabledPlatformIds = store.enabledPlatforms
+        // Settle any accrued-but-unwritten bank before re-reading, so a config
+        // push mid-tick can't roll the cache back to a stale stored value.
+        flushConsciousBank(force = true)
+        consciousBank = store.consciousBankMs
         webEngine.setBlocklist(store.webBlocklistJson)
         webEngine.setAdultEnabled(store.blockAdultWebsites)
         syncConscious()
         syncReelBubble()
+    }
+
+    private fun homePackages(): Set<String> = try {
+        @Suppress("DEPRECATION")
+        packageManager.queryIntentActivities(
+            Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME),
+            PackageManager.MATCH_DEFAULT_ONLY,
+        ).mapNotNull { it.activityInfo?.packageName }.toSet()
+    } catch (_: Throwable) {
+        emptySet()
     }
 
     /**
@@ -154,7 +240,7 @@ class DetoxoAccessibilityService : AccessibilityService() {
      */
     private fun syncReelBubble() {
         contentCounter.setReelSessionRemaining(
-            if (store.activePlan == PLAN_ONE_REEL) {
+            if (activePlan == PLAN_ONE_REEL) {
                 (store.reelAllowance - store.reelsConsumed).coerceAtLeast(0)
             } else {
                 null
@@ -166,6 +252,7 @@ class DetoxoAccessibilityService : AccessibilityService() {
         if (event == null) return
         val pkg = event.packageName?.toString() ?: return
 
+        matchMemo.clear()
         val pkgProtected = isProtected(pkg)
 
         // Track the foreground app for the Conscious accountant (every package,
@@ -205,17 +292,34 @@ class DetoxoAccessibilityService : AccessibilityService() {
         // the block path below — it never returns and never mutates block state. ──
         if (contentCounter.isEnabled) countContent(event, pkg)
 
-        if (!store.masterEnabled) return
+        if (!masterOn) return
 
-        // Plan gate: a live Pause window suspends ALL blocking (every app is
-        // allowed) until pauseUntil, after which the active plan resumes. Gated
-        // purely on the clock so it works regardless of the pushed plan name.
-        if (System.currentTimeMillis() < store.pauseUntil) return
+        // Custom whole-app block — checked ABOVE the pause gate: the App
+        // Blocker UI presents locks as unconditional, so a Pause taken for
+        // reels must not quietly unlock a fully-locked app. Anchored to
+        // the FOREGROUND — a blocked app's non-foreground windows (PiP, its own
+        // overlays) still emit content-changed events under its packageName,
+        // and acting on those would HOME-bounce the user out of unrelated
+        // apps. The foregroundPkg leg still bounces someone already inside
+        // the app when the block lands; the debounce caps the rate.
+        if (pkg in blockedApps &&
+            (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+                pkg == foregroundPkg)
+        ) {
+            onAppBlocked(pkg)
+            return
+        }
+
+        // Plan gate: a live Pause window suspends reel/web blocking (whole-app
+        // locks above stay enforced) until pauseUntil, after which the active
+        // plan resumes. Gated purely on the clock so it works regardless of the
+        // pushed plan name.
+        if (System.currentTimeMillis() < pausedUntil) return
 
         // One Reel / Unblock: capture reel-advance scrolls BEFORE the throttle
         // below. A scroll swallowed by the 150 ms throttle would leave the next
         // reel looking like the same one and leak it past the allowance.
-        if (store.activePlan == PLAN_ONE_REEL &&
+        if (activePlan == PLAN_ONE_REEL &&
             event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED &&
             config.platformsFor(pkg).isNotEmpty()
         ) {
@@ -245,42 +349,61 @@ class DetoxoAccessibilityService : AccessibilityService() {
         val platforms = config.platformsFor(pkg)
         if (platforms.isEmpty()) return
 
-        val enabled = store.enabledPlatforms
+        val enabled = enabledPlatformIds
+        // Obtained roots are ours to recycle (a real leak below API 33).
         val root = rootInActiveWindow ?: return
-        if (activeWindowProtected(root)) return
+        try {
+            if (activeWindowProtected(root)) return
 
-        for (platform in platforms) {
-            if (platform.detectionType != "LEGACY" && platform.detectionType != "OVERLAY") continue
-            // Respect user enable/disable; fall back to defaultStatus if unset.
-            val isOn = if (enabled.isEmpty()) platform.defaultStatus
-            else enabled.contains(platform.platformId)
-            if (!isOn) continue
+            for (platform in platforms) {
+                if (platform.detectionType != "LEGACY" && platform.detectionType != "OVERLAY") continue
+                // Respect user enable/disable; fall back to defaultStatus if unset.
+                val isOn = if (enabled.isEmpty()) platform.defaultStatus
+                else enabled.contains(platform.platformId)
+                if (!isOn) continue
 
-            for (detector in platform.detectors) {
-                if (detector.viewDetector != "FINDBYID" && detector.viewDetector != "VIEWID_RES_NAME") continue
-                if (matches(root, event, detector, pkg)) {
-                    // Conscious mode: a reel is on screen. While there's allowance,
-                    // mark "watching" (so the accountant drains the bank) and let
-                    // it play. With an empty bank we leave "watching" untouched and
-                    // fall through to block — so a bounced reel counts as
-                    // abstaining and the bank starts refilling.
-                    if (store.activePlan == PLAN_CONSCIOUS && store.consciousBankMs > 0L) {
-                        lastReelAtMs = now
-                        return
+                for (detector in platform.detectors) {
+                    if (detector.viewDetector != "FINDBYID" && detector.viewDetector != "VIEWID_RES_NAME") continue
+                    if (matchesMemo(root, event, detector, pkg)) {
+                        // Conscious mode: a reel is on screen. While there's allowance,
+                        // mark "watching" (so the accountant drains the bank) and let
+                        // it play. With an empty bank we leave "watching" untouched and
+                        // fall through to block — so a bounced reel counts as
+                        // abstaining and the bank starts refilling.
+                        if (activePlan == PLAN_CONSCIOUS && consciousBank > 0L) {
+                            lastReelAtMs = now
+                            return
+                        }
+                        // One Reel / Unblock: allow while within the allowance, else
+                        // fall through to block.
+                        if (activePlan == PLAN_ONE_REEL && allowReelOrBlock(now)) {
+                            return
+                        }
+                        onDetected(pkg, platform.platformId, detector)
+                        if (detector.haltOnDetect) return
                     }
-                    // One Reel / Unblock: allow while within the allowance, else
-                    // fall through to block.
-                    if (store.activePlan == PLAN_ONE_REEL && allowReelOrBlock(now)) {
-                        return
-                    }
-                    onDetected(pkg, platform.platformId, detector)
-                    if (detector.haltOnDetect) return
                 }
             }
+        } finally {
+            root.recycleSafe()
         }
     }
 
     // ---- Detection (3-stage view-id search) --------------------------------
+
+    /**
+     * Per-event memoized [matches]: the counter and block passes share results.
+     * ponytail: the memo is keyed by detector only, while each pass obtains its
+     * own [rootInActiveWindow] — the block pass can reuse a result computed
+     * against the counting pass's snapshot, microseconds stale. Accepted
+     * ceiling; upgrade path = thread one root through both passes.
+     */
+    private fun matchesMemo(
+        root: AccessibilityNodeInfo,
+        event: AccessibilityEvent,
+        detector: DetectorRule,
+        pkg: String,
+    ): Boolean = matchMemo.getOrPut(detector) { matches(root, event, detector, pkg) }
 
     private fun matches(
         root: AccessibilityNodeInfo,
@@ -288,46 +411,68 @@ class DetoxoAccessibilityService : AccessibilityService() {
         detector: DetectorRule,
         pkg: String,
     ): Boolean {
-        val byResName = detector.viewDetector == "VIEWID_RES_NAME"
+        // Fully-qualified target ids, built ONCE per call — stage 3 visits up
+        // to MAX_NODES nodes, and a per-node "$pkg$id" concat was measurable
+        // allocation churn on the hottest path.
+        val targets = if (detector.viewDetector == "VIEWID_RES_NAME") {
+            detector.identifiers
+        } else {
+            detector.identifiers.map { "$pkg$it" }
+        }
 
-        // Stage 1: the event source itself.
+        // Stage 1: the event source itself. (Every obtained node is recycled
+        // before returning — matches() only ever answers a boolean.)
         val source = event.source
-        val sourceId = source?.viewIdResourceName
-        if (sourceId != null) {
-            for (id in detector.identifiers) {
-                val target = if (byResName) id else "$pkg$id"
-                if (sourceId == target && source.isVisibleToUser) return true
+        if (source != null) {
+            try {
+                val sourceId = source.viewIdResourceName
+                if (sourceId != null && sourceId in targets && source.isVisibleToUser) {
+                    return true
+                }
+            } finally {
+                source.recycleSafe()
             }
         }
 
         // Stage 2: direct resource-id lookup.
-        for (id in detector.identifiers) {
-            val target = if (byResName) id else "$pkg$id"
+        for (target in targets) {
             val hits = root.findAccessibilityNodeInfosByViewId(target)
             if (!hits.isNullOrEmpty()) {
-                for (n in hits) if (n != null && n.isVisibleToUser) return true
+                var found = false
+                for (n in hits) {
+                    if (n == null) continue
+                    if (!found && n.isVisibleToUser) found = true
+                    n.recycleSafe()
+                }
+                if (found) return true
             }
         }
 
-        // Stage 3: bounded DFS over the tree.
+        // Stage 3: bounded DFS over the tree. The passed-in root is the caller's
+        // to manage; every child obtained here is recycled exactly once.
         val deque = ArrayDeque<AccessibilityNodeInfo>()
         deque.addLast(root)
         var i = 0
-        while (deque.isNotEmpty() && i < MAX_NODES) {
+        var found = false
+        while (deque.isNotEmpty() && i < MAX_NODES && !found) {
             val node = deque.removeLast()
             i++
             val resName = node.viewIdResourceName
-            if (resName != null) {
-                for (id in detector.identifiers) {
-                    val target = if (byResName) id else "$pkg$id"
-                    if (resName == target && node.isVisibleToUser) return true
+            if (resName != null && resName in targets && node.isVisibleToUser) {
+                found = true
+            }
+            if (!found) {
+                for (c in node.childCount - 1 downTo 0) {
+                    node.getChild(c)?.let { deque.addLast(it) }
                 }
             }
-            for (c in node.childCount - 1 downTo 0) {
-                node.getChild(c)?.let { deque.addLast(it) }
-            }
+            if (node !== root) node.recycleSafe()
         }
-        return false
+        while (deque.isNotEmpty()) {
+            val node = deque.removeLast()
+            if (node !== root) node.recycleSafe()
+        }
+        return found
     }
 
     // ---- Awareness counting (independent of blocking) ----------------------
@@ -360,25 +505,30 @@ class DetoxoAccessibilityService : AccessibilityService() {
         lastCountEventByPackage[pkg] = now
 
         val root = rootInActiveWindow ?: return
-        if (activeWindowProtected(root)) return
-        for (platform in platforms) {
-            if (!isReelPlatform(platform)) continue
-            for (detector in platform.detectors) {
-                if (detector.viewDetector != "FINDBYID" &&
-                    detector.viewDetector != "VIEWID_RES_NAME"
-                ) {
-                    continue
-                }
-                if (matches(root, event, detector, pkg)) {
-                    contentCounter.onReelSurfaceSeen(pkg)
-                    return
+        try {
+            if (activeWindowProtected(root)) return
+            for (platform in platforms) {
+                if (!isReelPlatform(platform)) continue
+                for (detector in platform.detectors) {
+                    if (detector.viewDetector != "FINDBYID" &&
+                        detector.viewDetector != "VIEWID_RES_NAME"
+                    ) {
+                        continue
+                    }
+                    if (matchesMemo(root, event, detector, pkg)) {
+                        contentCounter.onReelSurfaceSeen(pkg)
+                        return
+                    }
                 }
             }
+            // We actively checked a reel app's window and found NO reel surface —
+            // the user is on a non-reel screen (e.g. the feed). Distinct from "no
+            // event" (passive watching), which never reaches here and keeps the
+            // bubble up.
+            contentCounter.onNoReelSurface(pkg)
+        } finally {
+            root.recycleSafe()
         }
-        // We actively checked a reel app's window and found NO reel surface — the
-        // user is on a non-reel screen (e.g. the feed). Distinct from "no event"
-        // (passive watching), which never reaches here and keeps the bubble up.
-        contentCounter.onNoReelSurface(pkg)
     }
 
     /** A detectable reel/short surface (excludes feed / stories / status surfaces). */
@@ -399,9 +549,20 @@ class DetoxoAccessibilityService : AccessibilityService() {
      */
     private fun handleBrowser(pkg: String) {
         val root = rootInActiveWindow ?: return
-        if (activeWindowProtected(root)) return
-        val host = BrowserUrlExtractor.extractHost(root, pkg, MAX_NODES) ?: return
-        if (!webEngine.matchHost(host)) {
+        val host: String
+        try {
+            if (activeWindowProtected(root)) return
+            // Split-screen: rootInActiveWindow is the FOCUSED pane. An event from
+            // an unfocused browser must not walk the other app's tree — the
+            // generic fallback would harvest any url-ish EditText there and
+            // BACK out of an unrelated app.
+            if (root.packageName?.toString() != pkg) return
+            host = BrowserUrlExtractor.extractHost(root, pkg, MAX_NODES) ?: return
+        } finally {
+            root.recycleSafe()
+        }
+        val match = webEngine.matchHost(host)
+        if (match == null) {
             lastUrlByPkg[pkg] = host
             return
         }
@@ -412,17 +573,28 @@ class DetoxoAccessibilityService : AccessibilityService() {
         lastWebBlockTime = now
 
         store.recordWebBlock(dateKey())
-        val (today, total) = store.webBlockStats()
-        ServiceEventBus.post(
-            "webBlocked",
-            mapOf("host" to host, "mode" to "PRESS_BACK", "today" to today, "total" to total),
-        )
+        val (today, total) = store.webBlockStats(dateKey())
+        // EVO-018: adult-list hits are counted but never named — the host is
+        // left out of the event (Dart's per-host tally / "Most blocked" skip it)
+        // and out of the toast. User-rule hits stay attributable.
+        val adult = match == WebBlockEngine.Match.ADULT
+        val payload = HashMap<String, Any?>(6)
+        payload["source"] = if (adult) "ADULT" else "RULE"
+        payload["mode"] = "PRESS_BACK"
+        payload["today"] = today
+        payload["total"] = total
+        if (!adult) payload["host"] = host
+        ServiceEventBus.post("webBlocked", payload)
         // Never log the host: it's accessibility-derived browsing data and
         // release logcat is readable by adb / OEM log collectors.
         Log.i(TAG, "web-blocked in $pkg")
         // EVO-011: make the intervention legible — attribute the bounce.
         // ponytail: plain text toast; upgrade path is an overlay block chip.
-        Toast.makeText(this, "$host blocked by Detoxo", Toast.LENGTH_SHORT).show()
+        Toast.makeText(
+            this,
+            if (adult) getString(R.string.toast_blocked_adult) else getString(R.string.toast_blocked, host),
+            Toast.LENGTH_SHORT,
+        ).show()
         pressBackWithRateLimit()
     }
 
@@ -435,7 +607,7 @@ class DetoxoAccessibilityService : AccessibilityService() {
 
         val mode = resolveBlockMode(detector)
         store.recordBlock(dateKey())
-        val (today, total, _) = store.blockStats()
+        val (today, total, _) = store.blockStats(dateKey())
         ServiceEventBus.post(
             "blocked",
             mapOf("package" to pkg, "platformId" to platformId, "mode" to mode,
@@ -467,13 +639,23 @@ class DetoxoAccessibilityService : AccessibilityService() {
         blockVibrate()
     }
 
+    /** [activeWindowProtected] on a freshly-obtained root, recycled before returning. */
+    private fun activeWindowProtectedNow(): Boolean {
+        val root = rootInActiveWindow ?: return false
+        try {
+            return activeWindowProtected(root)
+        } finally {
+            root.recycleSafe()
+        }
+    }
+
     private fun performBackInternal() {
         // Fail-closed: never BACK into a protected app (covers Dart-invoked
         // backs and any timer that fires after a switch into one). The active
         // window is the second anchor: foregroundPkg alone can be stale or
         // clobbered by an IME window during e.g. UPI PIN entry.
         if (isProtected(foregroundPkg)) return
-        if (activeWindowProtected(rootInActiveWindow)) return
+        if (activeWindowProtectedNow()) return
         performGlobalAction(GLOBAL_ACTION_BACK)
     }
 
@@ -492,7 +674,7 @@ class DetoxoAccessibilityService : AccessibilityService() {
     fun lockScreen() {
         // Never lock mid-payment; window anchor covers a clobbered foregroundPkg.
         if (isProtected(foregroundPkg)) return
-        if (activeWindowProtected(rootInActiveWindow)) return
+        if (activeWindowProtectedNow()) return
         try {
             val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
             val admin = ComponentName(this, DetoxoDeviceAdminReceiver::class.java)
@@ -522,20 +704,56 @@ class DetoxoAccessibilityService : AccessibilityService() {
         }
     }
 
-    private fun dateKey(): String =
-        SimpleDateFormat("dd-MM-yyyy", Locale.US).format(System.currentTimeMillis())
+    private fun dateKey(): String = DateKeys.today()
+
+    // ---- Custom whole-app blocks -------------------------------------------
+
+    /** Bounce a custom-blocked app HOME (BACK would just navigate within it). */
+    private fun onAppBlocked(pkg: String) {
+        // Belt-and-braces: Dart filters these, but a stale push must never
+        // bounce the launcher, system UI, Detoxo itself, or a protected app.
+        if (isProtected(pkg) || pkg == packageName || pkg in homePkgs ||
+            pkg == "com.android.systemui"
+        ) {
+            return
+        }
+        val now = System.currentTimeMillis()
+        if (now - lastAppBlockTime <= BLOCK_DEBOUNCE_MS) return
+        lastAppBlockTime = now
+
+        store.recordBlock(dateKey())
+        val (today, total, _) = store.blockStats(dateKey())
+        ServiceEventBus.post(
+            "blocked",
+            mapOf(
+                "package" to pkg, "platformId" to "app_block", "mode" to "HOME",
+                "today" to today, "total" to total,
+            ),
+        )
+        Log.i(TAG, "blocked app_block in $pkg via HOME")
+        val label = try {
+            packageManager.getApplicationLabel(
+                packageManager.getApplicationInfo(pkg, 0),
+            ).toString()
+        } catch (_: Throwable) {
+            pkg
+        }
+        Toast.makeText(this, getString(R.string.toast_blocked, label), Toast.LENGTH_SHORT).show()
+        blockVibrate()
+        performGlobalAction(GLOBAL_ACTION_HOME)
+    }
 
     // ---- Conscious accountant ----------------------------------------------
 
     /** Start/stop the 1 Hz Conscious accountant to match the active plan. */
     private fun syncConscious() {
-        val conscious = store.activePlan == PLAN_CONSCIOUS
+        val conscious = activePlan == PLAN_CONSCIOUS
         when {
             conscious && !consciousRunning -> {
                 consciousRunning = true
                 // Anchor to now so we don't retroactively credit service downtime
                 // (the persisted bank carries over; the elapsed clock restarts).
-                store.consciousAnchorMs = System.currentTimeMillis()
+                consciousAnchorMs = System.currentTimeMillis()
                 lastReelAtMs = 0L
                 consciousHandler.removeCallbacks(consciousTick)
                 consciousHandler.postDelayed(consciousTick, CONSCIOUS_TICK_MS)
@@ -544,30 +762,67 @@ class DetoxoAccessibilityService : AccessibilityService() {
             !conscious && consciousRunning -> {
                 consciousRunning = false
                 consciousHandler.removeCallbacks(consciousTick)
+                flushConsciousBank(force = true) // leaving the plan settles the bank
             }
             conscious -> emitConsciousState() // already running; refresh the UI
         }
     }
 
+    /**
+     * Explicit fresh-start reset (CommandHandler already zeroed the store):
+     * drop the cache and any pending unflushed accrual, then reload.
+     */
+    fun onConsciousBankReset() {
+        consciousBank = 0L
+        consciousDirty = false
+        reload()
+    }
+
+    /** Writes the cached bank through to prefs — at most once per flush window. */
+    private fun flushConsciousBank(force: Boolean = false) {
+        if (!consciousDirty) return
+        val now = System.currentTimeMillis()
+        if (!force && now - lastConsciousFlushMs < CONSCIOUS_FLUSH_MS) return
+        store.consciousBankMs = consciousBank
+        consciousDirty = false
+        lastConsciousFlushMs = now
+    }
+
     /** One accounting step: drain while watching, accrue while abstaining. */
     private fun accountConscious() {
-        if (store.activePlan != PLAN_CONSCIOUS) return
+        if (activePlan != PLAN_CONSCIOUS) return
+        // Daily fresh start: the bank is re-earned each day — an overnight
+        // abstain must not stockpile a free morning allowance.
+        val today = dateKey()
+        if (store.consciousDate != today) {
+            store.consciousDate = today
+            if (consciousBank > 0L) {
+                consciousBank = 0L
+                consciousDirty = true
+                // Forced: consciousDate was just written durably, and a hard
+                // kill before a throttled flush would leave date=today with
+                // yesterday's bank — resurrecting a full day-stale allowance.
+                flushConsciousBank(force = true)
+            }
+        }
         val now = System.currentTimeMillis()
-        val anchor = store.consciousAnchorMs.let { if (it <= 0L) now else it }
+        val anchor = consciousAnchorMs.let { if (it <= 0L) now else it }
         val elapsed = (now - anchor).coerceAtLeast(0L)
-        store.consciousAnchorMs = now // advance first, even when we freeze below
+        consciousAnchorMs = now // advance first, even when we freeze below
 
         // Master protection off → freeze the bank: neither drain nor accrue. The
         // anchor is already advanced so re-enabling doesn't dump a huge credit.
-        if (!store.masterEnabled) {
+        if (!masterOn) {
+            flushConsciousBank()
             emitConsciousState()
             return
         }
 
         // Inside a Pause window (Conscious is the base mode being paused): every
-        // app is allowed and the reel gate is off, so freeze the bank rather than
-        // silently accrue free allowance while the user scrolls unblocked.
-        if (now < store.pauseUntil) {
+        // reel is allowed and the reel gate is off, so freeze the bank rather
+        // than silently accrue free allowance while the user scrolls unblocked.
+        if (now < pausedUntil) {
+            flushConsciousBank()
             emitConsciousState()
             return
         }
@@ -577,6 +832,7 @@ class DetoxoAccessibilityService : AccessibilityService() {
         // WATCH_STALE_MS window would otherwise survive a reel→bank switch).
         if (isProtected(foregroundPkg)) {
             lastReelAtMs = 0L
+            flushConsciousBank()
             emitConsciousState()
             return
         }
@@ -587,7 +843,7 @@ class DetoxoAccessibilityService : AccessibilityService() {
         // so a paused reel can never refill the bank (and never drains for free).
         val watching = (now - lastReelAtMs) < WATCH_STALE_MS
         val inReelApp = foregroundPkg?.let { config.platformsFor(it).isNotEmpty() } ?: false
-        var bank = store.consciousBankMs
+        var bank = consciousBank
         if (watching) {
             bank -= elapsed.coerceAtMost(CONSCIOUS_MAX_STEP_MS)
             if (bank <= 0L) {
@@ -601,12 +857,18 @@ class DetoxoAccessibilityService : AccessibilityService() {
         }
         // else: lingering on a reel app with no fresh detection → hold steady.
         if (bank < 0L) bank = 0L
-        store.consciousBankMs = bank
+        if (bank != consciousBank) {
+            consciousBank = bank
+            consciousDirty = true
+        }
+        // The empty-bank boundary is durability-critical (it is what keeps a
+        // service restart blocked), so it flushes immediately.
+        flushConsciousBank(force = bank == 0L)
         emitConsciousState(bank = bank, watching = watching)
     }
 
     private fun emitConsciousState(
-        bank: Long = store.consciousBankMs,
+        bank: Long = consciousBank,
         watching: Boolean = (System.currentTimeMillis() - lastReelAtMs) < WATCH_STALE_MS,
     ) {
         ServiceEventBus.post("consciousState", consciousSnapshot(bank, watching))
@@ -614,10 +876,10 @@ class DetoxoAccessibilityService : AccessibilityService() {
 
     /** Current Conscious bank state (also used for the pull query). */
     fun consciousSnapshot(
-        bank: Long = store.consciousBankMs,
+        bank: Long = consciousBank,
         watching: Boolean = (System.currentTimeMillis() - lastReelAtMs) < WATCH_STALE_MS,
     ): Map<String, Any?> {
-        val active = store.activePlan == PLAN_CONSCIOUS
+        val active = activePlan == PLAN_CONSCIOUS
         return mapOf(
             "bankMs" to bank,
             "maxBankMs" to store.consciousMaxBankMs,
@@ -712,10 +974,10 @@ class DetoxoAccessibilityService : AccessibilityService() {
      * "allowance fully consumed" as a reasonable at-rest approximation.
      */
     fun reelSessionSnapshot(
-        blocked: Boolean = store.activePlan == PLAN_ONE_REEL &&
+        blocked: Boolean = activePlan == PLAN_ONE_REEL &&
             store.reelsConsumed >= store.reelAllowance,
     ): Map<String, Any?> {
-        val active = store.activePlan == PLAN_ONE_REEL
+        val active = activePlan == PLAN_ONE_REEL
         return mapOf(
             "consumed" to store.reelsConsumed,
             "allowance" to store.reelAllowance,
@@ -730,16 +992,18 @@ class DetoxoAccessibilityService : AccessibilityService() {
         val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             val channel = NotificationChannel(
-                CHANNEL_ID, "Detoxo Service Status", NotificationManager.IMPORTANCE_LOW,
+                CHANNEL_ID,
+                getString(R.string.fgs_channel_name),
+                NotificationManager.IMPORTANCE_LOW,
             ).apply {
                 setShowBadge(false)
-                description = "Focus protection active"
+                description = getString(R.string.fgs_channel_description)
             }
             nm.createNotificationChannel(channel)
         }
         val notification: Notification = NotificationCompat.Builder(this, CHANNEL_ID)
-            .setContentTitle("Detoxo is active")
-            .setContentText("Monitoring and blocking short-form video.")
+            .setContentTitle(getString(R.string.fgs_title))
+            .setContentText(getString(R.string.fgs_text))
             .setSmallIcon(R.mipmap.ic_launcher)
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_MIN)
@@ -763,6 +1027,7 @@ class DetoxoAccessibilityService : AccessibilityService() {
         instance = null
         consciousRunning = false
         consciousHandler.removeCallbacks(consciousTick)
+        flushConsciousBank(force = true)
         runCatching { contentCounter.dispose() }
         ServiceEventBus.post("serviceStatus", mapOf("running" to false))
         return super.onUnbind(intent)
@@ -781,6 +1046,7 @@ class DetoxoAccessibilityService : AccessibilityService() {
         instance = null
         consciousRunning = false
         consciousHandler.removeCallbacks(consciousTick)
+        flushConsciousBank(force = true)
         runCatching { contentCounter.dispose() }
         super.onDestroy()
     }
@@ -812,6 +1078,9 @@ class DetoxoAccessibilityService : AccessibilityService() {
 
         /** Conscious accountant cadence. */
         private const val CONSCIOUS_TICK_MS = 1000L
+
+        /** Batch Conscious-bank prefs writes to at most one per this interval. */
+        private const val CONSCIOUS_FLUSH_MS = 5000L
 
         /** A reel detected within this window counts as "still watching". */
         private const val WATCH_STALE_MS = 2500L

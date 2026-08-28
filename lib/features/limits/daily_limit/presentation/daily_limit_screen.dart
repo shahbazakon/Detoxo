@@ -91,8 +91,10 @@ class _DailyLimitViewState extends State<_DailyLimitView> {
                             Duration(minutes: minutes.round()),
                           );
                           setState(() => _draftMinutes = null);
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('Daily limit saved.')),
+                          GlassToast.show(
+                            context,
+                            'Daily limit saved.',
+                            tone: AppTone.success,
                           );
                         },
                       ),

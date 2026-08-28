@@ -6,12 +6,20 @@ import 'package:flutter_test/flutter_test.dart';
 
 class _FakeRepo implements AppBlockRepository {
   List<AppBlockEntry>? saved;
+  bool failLoad = false;
+  bool failSave = false;
 
   @override
-  Future<List<AppBlockEntry>> load() async => saved ?? const [];
+  Future<List<AppBlockEntry>> load() async {
+    if (failLoad) throw const FormatException('corrupt blob');
+    return saved ?? const [];
+  }
 
   @override
-  Future<void> save(List<AppBlockEntry> entries) async => saved = entries;
+  Future<void> save(List<AppBlockEntry> entries) async {
+    if (failSave) throw Exception('disk full');
+    saved = entries;
+  }
 }
 
 void main() {
@@ -63,5 +71,27 @@ void main() {
     // Refused adds never commit, so they never fire it.
     await cubit.add('not a package', 'X');
     expect(calls, 3);
+  });
+
+  test('a corrupt blob loads as empty instead of throwing', () async {
+    final repo = _FakeRepo()..failLoad = true;
+    final cubit = AppBlockCubit(repo);
+    await cubit.load(); // must not throw: the screen fires this unawaited
+    expect(cubit.state, isEmpty);
+  });
+
+  test('a failed save reverts the list, reports failed, never syncs', () async {
+    final repo = _FakeRepo();
+    var calls = 0;
+    final cubit = AppBlockCubit(repo, onChanged: () async => calls++);
+    await cubit.add('com.ok.app', 'Ok');
+    repo.failSave = true;
+
+    expect(await cubit.add('com.other.app', 'Other'), AppBlockAddResult.failed);
+    expect(cubit.state.map((e) => e.packageName), ['com.ok.app']);
+    await cubit.toggle(0, enabled: false);
+    expect(cubit.state.single.enabled, isTrue, reason: 'toggle not reverted');
+    expect(repo.saved!.single.packageName, 'com.ok.app');
+    expect(calls, 1, reason: 'onChanged must not fire for a failed save');
   });
 }

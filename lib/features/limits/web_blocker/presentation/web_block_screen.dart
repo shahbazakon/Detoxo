@@ -51,8 +51,8 @@ class _WebBlockView extends StatelessWidget {
         actions: [
           InfoButton(
             'Blocks distracting sites in any browser — Detoxo reads the '
-            'address bar and closes the tab. Tap a popular site, add your '
-            'own, or open Protection to block whole categories.',
+            'address bar and backs you out of the page. Tap a popular site, '
+            'add your own, or open Protection to block whole categories.',
           ),
         ],
       ),

@@ -1,6 +1,7 @@
 // limits feature — public domain (entities + repository contracts).
 // Other features may import ONLY this barrel; never reach into data/ or presentation/ internals.
 
+export 'package:detoxo/features/limits/app_blocker/domain/app_block_sync.dart';
 export 'package:detoxo/features/limits/app_blocker/domain/entities/app_block_entry.dart';
 export 'package:detoxo/features/limits/app_blocker/domain/repositories/app_block_repository.dart';
 export 'package:detoxo/features/limits/daily_limit/domain/entities/daily_limit.dart';

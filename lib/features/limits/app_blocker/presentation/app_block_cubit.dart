@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:detoxo/core/utils/app_logger.dart';
 import 'package:detoxo/core/utils/package_name.dart';
 import 'package:detoxo/features/limits/app_blocker/domain/entities/app_block_entry.dart';
 import 'package:detoxo/features/limits/app_blocker/domain/repositories/app_block_repository.dart';
@@ -17,7 +18,17 @@ class AppBlockCubit extends Cubit<List<AppBlockEntry>> {
   /// failure there must never block the app-blocker UI.
   final Future<void> Function()? onChanged;
 
-  Future<void> load() async => emit(await _repo.load());
+  /// Hydrates from storage. A corrupt blob is logged, not thrown: the screen
+  /// fires this as `..load()`, so a throw would surface as an uncaught-zone
+  /// error, and `syncAppBlocklist` already aborts its push on the same
+  /// failure (native keeps its last-good set). The next add overwrites it.
+  Future<void> load() async {
+    try {
+      emit(await _repo.load());
+    } on Object catch (e, s) {
+      AppLogger.e('app blocklist unreadable', e, s);
+    }
+  }
 
   /// Adds a whole-app lock, or says why it can't — the caller's toast must
   /// tell the truth, so a refusal is never silent.
@@ -40,8 +51,9 @@ class AppBlockCubit extends Cubit<List<AppBlockEntry>> {
         appName: appName.trim().isEmpty ? pkg : appName.trim(),
       ),
     ];
-    await _commit(next);
-    return AppBlockAddResult.added;
+    return await _commit(next)
+        ? AppBlockAddResult.added
+        : AppBlockAddResult.failed;
   }
 
   Future<void> toggle(int index, {required bool enabled}) async {
@@ -55,9 +67,20 @@ class AppBlockCubit extends Cubit<List<AppBlockEntry>> {
     await _commit(next);
   }
 
-  Future<void> _commit(List<AppBlockEntry> entries) async {
+  /// Persists + fires [onChanged]. A failed save reverts the optimistic emit
+  /// and returns false (the web sibling's contract): a green "Added X" over a
+  /// lock that never persisted — and was never pushed — is worse than an error.
+  Future<bool> _commit(List<AppBlockEntry> entries) async {
+    final previous = state;
     emit(entries);
-    await _repo.save(entries);
+    try {
+      await _repo.save(entries);
+    } on Object catch (e, s) {
+      AppLogger.e('app blocklist save failed', e, s);
+      emit(previous);
+      return false;
+    }
     if (onChanged != null) unawaited(onChanged!());
+    return true;
   }
 }

@@ -9,10 +9,11 @@ import java.util.zip.GZIPInputStream
  * enabled, a bundled set of adult domains.
  *
  * The user/derived blocklist is a tiny JSON list pushed from Dart and held in
- * memory. The adult set is a large bundled asset (`adult_domains.txt.gz`) loaded
- * lazily only while the toggle is on, and freed when it is turned off so it costs
- * no heap otherwise. All matching is host-based — Android accessibility can read
- * the address bar but cannot see network traffic.
+ * memory. The adult set is a bundled asset (`adult_domains.txt.gz`, GENERATED
+ * from tool/web_blocker/blocked_websites.json by `bash tool/dev.sh adultlist`)
+ * loaded lazily only while the toggle is on, and freed when it is turned off so
+ * it costs no heap otherwise. All matching is host-based — Android accessibility
+ * can read the address bar but cannot see network traffic.
  */
 class WebBlockEngine(private val context: Context) {
 
@@ -46,9 +47,15 @@ class WebBlockEngine(private val context: Context) {
     fun hasAnyRules(): Boolean =
         rules.isNotEmpty() || (adultEnabled && (adultSet?.isNotEmpty() == true))
 
-    /** True if [host] (already normalized) is blocked. */
-    fun matchHost(host: String, fullUrl: String? = null): Boolean {
-        if (host.isEmpty()) return false
+    /**
+     * Which list matched. RULE hits (the user's own blocklist) may be named in
+     * the toast/event; ADULT hits are counted but never named (EVO-018).
+     */
+    enum class Match { RULE, ADULT }
+
+    /** Which list blocks [host] (already normalized), or null when it is allowed. */
+    fun matchHost(host: String, fullUrl: String? = null): Match? {
+        if (host.isEmpty()) return null
         val now = System.currentTimeMillis()
         for (r in rules) {
             if (now < r.pausedUntil) continue // per-site pause window
@@ -57,20 +64,22 @@ class WebBlockEngine(private val context: Context) {
                 "WILDCARD" -> r.regex?.matches(host) == true
                 else -> host == r.pattern || isSubdomainOf(host, r.pattern)
             }
-            if (hit) return true
+            if (hit) return Match.RULE
         }
         val set = adultSet
         if (adultEnabled && set != null) {
-            // Walk the host up its parent labels: foo.bar.example.com → example.com.
+            // Walk the host up its parent labels, ending at the bare TLD:
+            // foo.bar.example.com → bar.example.com → example.com → com. A bare
+            // TLD line in the asset (`porn`) therefore blocks every *.porn host.
             var h = host
             while (true) {
-                if (set.contains(h)) return true
+                if (set.contains(h)) return Match.ADULT
                 val dot = h.indexOf('.')
                 if (dot < 0) break
                 h = h.substring(dot + 1)
             }
         }
-        return false
+        return null
     }
 
     private fun parse(json: String?): List<Rule> {

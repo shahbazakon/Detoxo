@@ -47,7 +47,13 @@ namespace — never instantiated) exposing boolean getters.
 
 ```dart
 abstract final class PlatformCapabilities {
-  static bool get _isAndroid => !kIsWeb && Platform.isAndroid;
+  /// Test-only override: forces Android capabilities on the host test runner
+  /// so channel-backed repositories can be exercised in unit tests.
+  @visibleForTesting
+  static bool? debugForceAndroid;
+
+  static bool get _isAndroid =>
+      debugForceAndroid ?? (!kIsWeb && Platform.isAndroid);
 
   /// The native AccessibilityService blocking engine is Android-only.
   static bool get supportsBlockingEngine => _isAndroid;
@@ -61,6 +67,10 @@ abstract final class PlatformCapabilities {
 }
 ```
 
+`debugForceAndroid` is a `@visibleForTesting` escape hatch (null in production):
+tests set it to `true` to exercise the channel-backed repositories on the host
+runner, and reset it in `tearDown`.
+
 | Getter | True when | Meaning |
 | --- | --- | --- |
 | `supportsBlockingEngine` | Android only | Native detection/blocking/counting engine is available; safe to call platform channels. |
@@ -70,10 +80,11 @@ abstract final class PlatformCapabilities {
 ### The `_isAndroid` predicate
 
 ```dart
-static bool get _isAndroid => !kIsWeb && Platform.isAndroid;
+static bool get _isAndroid =>
+    debugForceAndroid ?? (!kIsWeb && Platform.isAndroid);
 ```
 
-Two guards, in order:
+The test override wins when set; otherwise two guards, in order:
 
 1. **`!kIsWeb` first.** On Flutter web, `dart:io`'s `Platform` throws — so the `kIsWeb`
    check short-circuits *before* `Platform.isAndroid` is ever evaluated. This is why the

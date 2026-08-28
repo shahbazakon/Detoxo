@@ -1,4 +1,5 @@
 import 'package:detoxo/features/limits/streak/domain/entities/streak.dart';
+import 'package:detoxo/features/limits/streak/domain/repositories/streak_repository.dart';
 import 'package:detoxo/features/limits/streak/presentation/streak_cubit.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -128,4 +129,42 @@ void main() {
       expect(s.count, 1, reason: 'the failed day breaks the chain');
     });
   });
+
+  group('StreakCubit.observe day arithmetic', () {
+    test(
+      'carries the streak across midnight on the DST spring-forward day',
+      () async {
+        // 2026-03-08 02:00 is the US spring-forward: March 9th minus 24h of
+        // absolute time lands on March 7th 23:00 — two calendar days back —
+        // which used to break `lastDay == yesterday` and reset the streak.
+        // The cubit must derive "yesterday" by calendar arithmetic.
+        final repo = _MemStreakRepo(
+          const Streak(base: 3, lastDay: '08-03-2026', todayFailed: false),
+        );
+        final cubit = StreakCubit(repo);
+        await cubit.load();
+
+        await cubit.observe(now: DateTime(2026, 3, 9, 0, 30), underLimit: true);
+
+        expect(cubit.state.lastDay, '09-03-2026');
+        expect(
+          cubit.state.count,
+          5,
+          reason: 'yesterday (08-03) committed 4; today adds the optimistic +1',
+        );
+        await cubit.close();
+      },
+    );
+  });
+}
+
+class _MemStreakRepo implements StreakRepository {
+  _MemStreakRepo(this._stored);
+  Streak _stored;
+
+  @override
+  Future<Streak> load() async => _stored;
+
+  @override
+  Future<void> save(Streak streak) async => _stored = streak;
 }

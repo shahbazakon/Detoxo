@@ -22,11 +22,11 @@ is itself the foreground service — see [04-native-android-layer.md](04-native-
 
 | Hook | Behaviour |
 |------|-----------|
-| `onServiceConnected()` | Sets the `instance` singleton, constructs `ConfigStore`, calls `reload()`, calls `showStatusNotification()`, posts `serviceStatus {running:true}`. |
-| `reload()` | Re-parses `DetectionConfig.parse(store.platformsConfigJson)`, refreshes the web blocklist + adult flag, calls `syncConscious()` **and `syncReelBubble()`** (pushes the One Reel / Unblock "reels left" count to the counter bubble — §5.3). Invoked whenever Dart pushes new config/settings. |
+| `onServiceConnected()` | Sets the `instance` singleton, constructs `ConfigStore`, marks `serviceEverConnected`, calls `reload()`, calls `startAsForeground()`, schedules the protection watchdog job, posts `serviceStatus {running:true}`. |
+| `reload()` | Re-parses `DetectionConfig.parse(store.platformsConfigJson)`, refreshes the protected + blocked-app package caches, the default-launcher package **and the hot-path settings mirrors** (`masterOn`, `pausedUntil`, `activePlan`, `enabledPlatformIds` — see §2.2), force-flushes any accrued-but-unwritten Conscious bank then re-reads it into the cache (§5.2), refreshes the web blocklist + adult flag, calls `syncConscious()` **and `syncReelBubble()`** (pushes the One Reel / Unblock "reels left" count to the counter bubble — §5.3). Invoked whenever Dart pushes new config/settings. |
 | `onInterrupt()` | Posts `serviceStatus {running:false}`. |
-| `onUnbind()` / `onDestroy()` | Clears `instance`, stops the Conscious accountant, disposes the content counter, posts `serviceStatus {running:false}`. |
-| `onTaskRemoved()` | Re-posts the status notification if swiping the app away cleared it. The service itself is bound by the system, so it survives regardless. |
+| `onUnbind()` / `onDestroy()` | Clears `instance`, stops the Conscious accountant, force-flushes the cached Conscious bank (§5.2), disposes the content counter (flushing pending usage time), posts `serviceStatus {running:false}`. |
+| `onTaskRemoved()` | Re-arms the foreground service if the user swipes the app away. The service itself is bound by the system, so it survives regardless. |
 
 `instance` is a `@Volatile` companion singleton; `isRunning()` returns
 `instance != null`. The `CommandHandler` reaches the live service (e.g. for
@@ -36,9 +36,10 @@ Config is held as a `@Volatile var config: DetectionConfig` so the hot event pat
 reads a consistent snapshot while Dart can swap it via `reload()`.
 
 Status notification: channel id `detoxo_protection_channel`, name
-`"Detoxo Service Status"`, `IMPORTANCE_LOW`, `NOTIF_ID = 1125`, posted with
-`NotificationManager.notify()`. The service is **not** a foreground service —
-see [04-native-android-layer.md](04-native-android-layer.md) §2.
+`"Detoxo Service Status"`, `IMPORTANCE_LOW`, `NOTIF_ID = 1125`. The service **is
+a foreground service** — `startAsForeground()` calls `startForeground(...)`
+(`FOREGROUND_SERVICE_TYPE_SPECIAL_USE` on API 34+) with that notification — see
+[04-native-android-layer.md](04-native-android-layer.md) §2.
 
 ---
 
@@ -51,6 +52,7 @@ never depends on blocking being active.
 ```
 onAccessibilityEvent(event):
   pkg = event.packageName            ; return if null
+  matchMemo.clear()                  ; per-event detector-match memo (see §4)
   pkgProtected = isProtected(pkg)    ; privacy-protected app? (cached set)
   if WINDOW_STATE_CHANGED:           ; track foreground for Conscious + counter
       foregroundPkg = pkg
@@ -59,13 +61,15 @@ onAccessibilityEvent(event):
   if pkgProtected or isProtected(foregroundPkg): return  ; PRIVACY GUARD (see 24)
   if pkg == our own package: return
   if contentCounter.isEnabled: countContent(event, pkg)   ; side-effect-free
-  if !store.masterEnabled: return                          ; master kill-switch
-  if now < store.pauseUntil: return                        ; Pause window
+  if !masterOn: return                                     ; master kill-switch (cached)
+  if pkg in blockedApps and (windowState or pkg==foregroundPkg):
+      onAppBlocked(pkg); return                            ; whole-app block — ABOVE Pause (see 06)
+  if now < pausedUntil: return                             ; Pause window (cached)
   if plan==ONE_REEL and event==VIEW_SCROLLED and pkg has platforms:
       lastScrollAtMs = now                                 ; capture reel advance BEFORE throttle
   ── per-package throttle (THROTTLE_MS = 150) ──
   if BrowserUrlExtractor.isBrowser(pkg):                   ; web blocking branch
-      handleBrowser(pkg) on window/content change; return
+      handleBrowser(pkg) on window/content change; return    ; bails unless the FOCUSED root's package == pkg (split-screen)
   platforms = config.platformsFor(pkg)   ; return if empty
   for each platform (LEGACY/OVERLAY, enabled):
       for each detector (FINDBYID / VIEWID_RES_NAME):
@@ -96,21 +100,50 @@ onAccessibilityEvent(event):
 4. **Self-package** (`pkg == packageName`) → return (never act on Detoxo's own UI).
 5. **Content counting** — `if (contentCounter.isEnabled) countContent(event, pkg)`.
    Runs even when blocking is off/paused/disabled (see §6).
-6. **Master switch** — `if (!store.masterEnabled) return`. Default `true`.
-7. **Pause gate** — `if (System.currentTimeMillis() < store.pauseUntil) return`.
-   Clock-based; suspends *all* blocking regardless of the pushed plan name (see §5).
-8. **Per-package throttle** — see §3. Immediately *before* this throttle, under the
+6. **Master switch** — `if (!masterOn) return` (the cached mirror of
+   `store.masterEnabled`, see §2.2). Default `true`.
+7. **Custom whole-app block** — `if (pkg in blockedApps && (windowState || pkg == foregroundPkg)) { onAppBlocked(pkg); return }`.
+   The user locked this entire app (`pushAppBlocklist`): HOME bounce with its own
+   1200 ms debounce, before the throttle. **Checked ABOVE the Pause gate** (still
+   below the master switch): the App Blocker UI presents locks as unconditional,
+   so a Pause taken for reels must not quietly unlock a fully-locked app.
+   Anchored to the foreground — a backgrounded blocked app's notification events
+   carry its packageName and must never bounce the user out of an unrelated app;
+   the `foregroundPkg` leg still bounces someone already inside the app when the
+   block lands. Full semantics in
+   [06-app-and-web-blocker.md](06-app-and-web-blocker.md).
+8. **Pause gate** — `if (System.currentTimeMillis() < pausedUntil) return`
+   (cached mirror of `store.pauseUntil`). Clock-based; suspends reel/web
+   blocking (whole-app locks above stay enforced) regardless of the pushed plan
+   name (see §5).
+9. **Per-package throttle** — see §3. Immediately *before* this throttle, under the
    `ONE_REEL` plan a `TYPE_VIEW_SCROLLED` from a monitored app stamps
    `lastScrollAtMs` — a throttled scroll would hide a reel advance and leak the next
    reel past the allowance (see §5.3).
-9. **Browser branch** — if the package is a known browser, run web blocking
-   (only on `WINDOW_STATE_CHANGED` / `WINDOW_CONTENT_CHANGED`, and only if the
-   blocklist has rules) and `return`. Browsers carry no reel surfaces, so the
-   reel path is skipped either way. Detailed in
-   [06-app-and-web-blocker.md](06-app-and-web-blocker.md).
-10. **Reel detection** — iterate the package's platforms/detectors (§4), apply the
+10. **Browser branch** — if the package is a known browser, run web blocking
+    (only on `WINDOW_STATE_CHANGED` / `WINDOW_CONTENT_CHANGED`, and only if the
+    blocklist has rules) and `return`. Browsers carry no reel surfaces, so the
+    reel path is skipped either way. Detailed in
+    [06-app-and-web-blocker.md](06-app-and-web-blocker.md).
+11. **Reel detection** — iterate the package's platforms/detectors (§4), apply the
     Conscious allowance check (§5.2) **or the One Reel / Unblock gate (§5.3)**, then
     execute the block (§4.4).
+
+### 2.2 Hot-path settings cache
+
+The per-event settings flags are `@Volatile` mirrors on the service — the event
+path touches **no SharedPreferences** (same pattern as the `protectedPkgs` /
+`blockedApps` caches):
+
+| Field | Mirrors | Read at |
+|-------|---------|---------|
+| `masterOn` | `store.masterEnabled` | Guard 6 |
+| `pausedUntil` | `store.pauseUntil` | Guard 8, Conscious accountant |
+| `activePlan` | `store.activePlan` | Plan gates (§5), accountant, `syncReelBubble` |
+| `enabledPlatformIds` | `store.enabledPlatforms` | Detector loop (§4.2) |
+
+All four are refreshed in `reload()`. Safe because every settings write goes
+through `CommandHandler`, which always follows with `reload()`.
 
 ---
 
@@ -136,16 +169,30 @@ keeps its **own** independent throttle map (`lastCountEventByPackage`, same
 ## 4. The 3-stage view-id detection (`matches`)
 
 `matches(root, event, detector, pkg)` is the verified detection primitive shared
-by both the block path and the counting path. A detector carries a list of
-`identifiers` (resource-id fragments). Two detector kinds are honoured:
+by both the block path and the counting path — and it is called through
+**`matchesMemo`**, a per-event memo (`matchMemo.getOrPut(detector) { matches(...) }`,
+cleared at the top of every event): the counting pass and the block pass test the
+same detectors against the same window, so the second pass becomes map lookups
+instead of a second full tree walk. Events are delivered serially on the main
+thread, so no locking.
+
+> `ponytail:` the memo is keyed by **detector only**, while each pass obtains its
+> own `rootInActiveWindow` — the block pass can reuse a result computed against
+> the counting pass's snapshot, microseconds stale. Accepted ceiling; the upgrade
+> path is threading one root through both passes.
+
+A detector carries a list of `identifiers` (resource-id fragments). Two detector
+kinds are honoured:
 
 - **`FINDBYID`** — the id is package-qualified: the target is `"$pkg$id"`
   (e.g. `com.instagram.androidid/clips_video_container`).
 - **`VIEWID_RES_NAME`** — the id is used **verbatim** as the target.
 
-`byResName = detector.viewDetector == "VIEWID_RES_NAME"` selects which form to
-build for `target`. Every positive match is gated on `isVisibleToUser` so an
-off-screen/recycled node never triggers a block.
+The fully-qualified `targets` list is built **once per `matches()` call** (a
+`detector.identifiers.map { "$pkg$it" }` for `FINDBYID`, the identifiers verbatim
+otherwise) — stage 3 visits up to 12000 nodes, and a per-node `"$pkg$id"` concat
+was measurable allocation churn on the hottest path. Every positive match is
+gated on `isVisibleToUser` so an off-screen/recycled node never triggers a block.
 
 The three stages run cheapest-first and short-circuit on the first visible hit:
 
@@ -165,21 +212,26 @@ cap:
 val deque = ArrayDeque<AccessibilityNodeInfo>()
 deque.addLast(root)
 var i = 0
-while (deque.isNotEmpty() && i < MAX_NODES) {
+var found = false
+while (deque.isNotEmpty() && i < MAX_NODES && !found) {
     val node = deque.removeLast()
     i++
     val resName = node.viewIdResourceName
-    if (resName != null) {
-        for (id in detector.identifiers) {
-            val target = if (byResName) id else "$pkg$id"
-            if (resName == target && node.isVisibleToUser) return true
+    if (resName != null && resName in targets && node.isVisibleToUser) {
+        found = true
+    }
+    if (!found) {
+        for (c in node.childCount - 1 downTo 0) {
+            node.getChild(c)?.let { deque.addLast(it) }
         }
     }
-    for (c in node.childCount - 1 downTo 0) {
-        node.getChild(c)?.let { deque.addLast(it) }
-    }
+    if (node !== root) node.recycleSafe()
 }
-return false
+while (deque.isNotEmpty()) {
+    val node = deque.removeLast()
+    if (node !== root) node.recycleSafe()
+}
+return found
 ```
 
 Children are pushed in reverse (`childCount-1 downTo 0`) so that popping from the
@@ -188,11 +240,26 @@ bounding worst-case latency on pathological trees. (`DetectorRule.childNodeLimit
 is parsed from config but is **not** currently consulted in `matches` — the fixed
 `MAX_NODES` governs.)
 
+**Node recycling.** Every node `matches()` obtains — the stage-1 `event.source`,
+stage-2 lookup hits, and every DFS child (never the caller-owned `root`) — is
+released via the `recycleSafe()` extension (`engine/NodeRecycling.kt`): a no-op
+on API 33+ (where `recycle()` itself became a no-op), an exception-swallowing
+`recycle()` below. Unrecycled nodes were a steady native-heap leak on the
+hottest path; `BrowserUrlExtractor` uses the same extension.
+
+The **obtained roots** are recycled too: all five `rootInActiveWindow` obtain
+sites — the event loop, `countContent`, `handleBrowser`, and the
+`performBackInternal` / `lockScreen` protected-window checks (both via the
+`activeWindowProtectedNow()` helper, which obtains a fresh root, checks it, and
+recycles it before returning) — release the root via `recycleSafe()` in a
+`try/finally`.
+
 ### 4.2 Platform / detector selection
 
 For the reel path, only platforms whose `detectionType` is `LEGACY` or `OVERLAY`
 are acted on (`CALIBRATION`/`MANUAL`/`NONE` are skipped). Enable/disable is
-resolved against `store.enabledPlatforms`:
+resolved against `enabledPlatformIds` (the cached mirror of
+`store.enabledPlatforms`, §2.2):
 
 ```kotlin
 val isOn = if (enabled.isEmpty()) platform.defaultStatus
@@ -288,30 +355,49 @@ native constant is `PLAN_CONSCIOUS = "CURIOUS"`.
 Pause is **not** an `activePlan` branch in the hot loop; it is a pure clock gate:
 
 ```kotlin
-if (System.currentTimeMillis() < store.pauseUntil) return
+if (System.currentTimeMillis() < pausedUntil) return   // cached mirror of store.pauseUntil
 ```
 
-`pauseUntil` is epoch-millis (0 = not paused). While the window is open, *every*
-app is allowed and no blocking runs; when the clock passes `pauseUntil`, the
-underlying active plan resumes automatically. This is intentionally decoupled
-from the plan name so it works regardless of which plan is set.
+`pauseUntil` is epoch-millis (0 = not paused). While the window is open,
+**reel and web blocking are suspended** — but custom whole-app locks stay
+enforced, because their branch sits *above* this gate (§2.1 step 7): a Pause
+taken for reels must not quietly unlock a fully-locked app. When the clock
+passes `pauseUntil`, the underlying active plan resumes automatically. This is
+intentionally decoupled from the plan name so it works regardless of which plan
+is set.
 
 ### 5.2 Conscious — earn-as-you-abstain token bank
 
 Conscious lets reels play *while the user has banked allowance*, then boots them
-when the bank empties. State lives in `ConfigStore`:
+when the bank empties. Durable state lives in `ConfigStore`:
 
 | Field | Default | Meaning |
 |-------|---------|---------|
-| `consciousBankMs` | 0 | Currently banked allowance (0..max), millis. |
+| `consciousBankMs` | 0 | Durable copy of the banked allowance (0..max), millis — the **live** value is the service's cached `consciousBank` (write-batched, below), so this trails it by at most ~5 s while the accountant runs. |
 | `consciousMaxBankMs` | 600 000 (10 min) | Bank ceiling. |
 | `consciousEarnDivisor` | 10 (≥1) | Refill rate: `bank += elapsed / divisor` while abstaining. |
-| `consciousAnchorMs` | — | Wall-clock anchor of the last accounting tick. |
+
+The tick anchor (`consciousAnchorMs`) is a **runtime-only field on the service**
+— it is *not* persisted (ConfigStore's former anchor property and prefs key were
+deleted); a service restart simply re-anchors to now in `syncConscious()`.
+
+**Bank write batching.** The 1 Hz accountant used to do two prefs `.apply()` per
+tick (anchor + bank ≈ 172k writes/day in Conscious). The bank now lives in a
+`@Volatile consciousBank` cache on the service; `flushConsciousBank()` writes it
+through to `store.consciousBankMs` at most once per `CONSCIOUS_FLUSH_MS`
+(**5000 ms**), and is **forced** when the bank empties (the block boundary is
+durability-critical — it's what keeps a service restart blocked), on plan stop
+(`syncConscious`), inside `reload()` (settle before re-reading, so a config push
+mid-tick can't roll the cache back to a stale stored value), and in
+`onUnbind`/`onDestroy`.
+
+> `ponytail:` ≤ 5 s of earned bank can be lost on a hard process kill. Accepted
+> ceiling for dropping ~172k daily prefs writes.
 
 **In the detection loop**, when a reel matches under Conscious:
 
 ```kotlin
-if (store.activePlan == PLAN_CONSCIOUS && store.consciousBankMs > 0L) {
+if (activePlan == PLAN_CONSCIOUS && consciousBank > 0L) {   // both cached — no prefs read
     lastReelAtMs = now   // mark "watching" so the accountant drains the bank
     return               // let the reel play — do NOT block
 }
@@ -326,17 +412,27 @@ the bank start refilling.
 `Handler` whenever the plan is Conscious, so the bank keeps ticking even when the
 Flutter UI is dead. `syncConscious()` starts/stops it to match the plan and
 anchors `consciousAnchorMs = now` on start (so service downtime isn't
-retroactively credited; the persisted bank carries over).
+retroactively credited; the persisted bank carries over); stopping (leaving the
+plan) force-flushes the cached bank.
+
+The explicit fresh-start reset arrives via the service hook
+**`onConsciousBankReset()`** (called by `CommandHandler`'s `resetConsciousBank`
+arm after it zeroes the store): it drops the cached bank *and* the pending
+unflushed dirt — so a pending accrual can't resurrect the zeroed value — then
+`reload()`s.
 
 `accountConscious()` — one step:
 
 ```
-if plan != CURIOUS: return
-elapsed = clamp(now - anchor, >=0); anchor = now      // advance first, always
-if !masterEnabled: emit; return                        // freeze (no drain/accrue)
-if now < pauseUntil: emit; return                      // freeze during a live Pause (Conscious base)
+if plan != CURIOUS: return                             // cached activePlan
+if consciousDate != today: consciousDate = today; bank = 0; flush(force)  // daily fresh start —
+                                                       // forced: date was just written durably, a
+                                                       // hard kill must not pair it with yesterday's bank
+elapsed = clamp(now - anchor, >=0); anchor = now      // advance first, always (runtime anchor)
+if !masterOn: flush(); emit; return                    // freeze (no drain/accrue)
+if now < pausedUntil: flush(); emit; return            // freeze during a live Pause (Conscious base)
 if isProtected(foregroundPkg):                         // privacy: freeze + drop stale watching
-    lastReelAtMs = 0; emit; return                     // never BACK-press into a protected app
+    lastReelAtMs = 0; flush(); emit; return            // never BACK-press into a protected app
 watching = (now - lastReelAtMs) < WATCH_STALE_MS (2500 ms)
 inReelApp = foregroundPkg has any configured platform
 if watching:
@@ -345,17 +441,21 @@ if watching:
 else if !inReelApp:
     bank = min(bank + elapsed / earnDivisor, maxBank)  // accrue only truly off-reels
 // else lingering on a reel app, detection quiet → hold steady
-store.consciousBankMs = max(bank, 0)
-emit consciousState
+consciousBank = max(bank, 0) (mark dirty if changed)   // cache, NOT a prefs write
+flushConsciousBank(force = bank == 0)                  // write-through ≤ once per 5 s;
+emit consciousState                                    // the empty-bank boundary flushes NOW
 ```
 
 Key nuances:
+- **Daily reset** — the bank is re-earned each day: the first tick on a new day
+  key (`ConfigStore.consciousDate`) zeroes any carried balance, so an overnight
+  abstain can't stockpile a free 10-minute morning allowance.
 - **Drain 1:1** while watching; **accrue at `1/divisor`** only when the foreground
   app has no configured reel platforms at all.
 - A **paused reel** (reel app foreground, detection gone quiet) neither drains nor
   refills — it holds steady, so pausing a video can't farm allowance.
 - A **live Pause** window (`now < pauseUntil`) **freezes** the bank, mirroring the
-  master-off freeze: when Conscious is the base mode being paused, every app is
+  master-off freeze: when Conscious is the base mode being paused, every reel is
   allowed and the reel gate is off, so the bank must not silently accrue free
   allowance while the user scrolls unblocked. The anchor is already advanced, so
   re-blocking after the pause can't dump a huge credit.
@@ -404,7 +504,7 @@ would hide the advance.
 In the detector loop, when a reel matches under `ONE_REEL`:
 
 ```kotlin
-if (store.activePlan == PLAN_ONE_REEL && allowReelOrBlock(now)) return  // allow
+if (activePlan == PLAN_ONE_REEL && allowReelOrBlock(now)) return  // allow (cached plan)
 onDetected(...)                                                          // spent → block
 ```
 
@@ -472,7 +572,9 @@ reads/writes block state. It:
 2. On `TYPE_VIEW_SCROLLED`, forwards `contentCounter.onScroll(pkg)` (cheap proxy
    for "advanced to next reel"; the counter debounces internally).
 3. Applies its **own** 150 ms per-package throttle (`lastCountEventByPackage`).
-4. Reuses the read-only `matches()` walk against **reel** platforms only
+4. Reuses the read-only `matches()` walk — through the shared per-event
+   `matchesMemo`, so the block pass that follows never re-walks a detector this
+   pass already tested — against **reel** platforms only
    (`isReelPlatform`, which excludes `NON_REEL_PLATFORM_IDS`: `ig_feed`,
    `ig_stories`, `insta_pro_stories`, `insta_pro2_stories`, `snap_stories`,
    `wa_status`, `wab_status`). A hit → `onReelSurfaceSeen(pkg)`; actively
@@ -486,8 +588,10 @@ which sums the gap between consecutive events from the **same** monitored app bu
 only when that gap is under `USAGE_ACTIVE_GAP_MS = 12000ms`. A longer silence
 (screen off / user away → no events) starts a fresh window and isn't counted, so
 this measures active foreground time and (a documented `ponytail:` ceiling)
-undercounts truly passive, event-quiet playback. Each delta is persisted via
-`ContentCounterStore.recordUsage` into `cc_time_today` / `cc_time_total`. This
+undercounts truly passive, event-quiet playback. Deltas are **batched in memory**
+(`pendingUsageMs`) and flushed via `ContentCounterStore.recordUsage` into
+`cc_time_today` / `cc_time_total` at ≥ 5 s / app switch / protected-foreground /
+snapshot / dispose — not one prefs write per event. This
 reuses the existing AccessibilityService — **no extra Android permission** — and
 feeds the dashboard's screen-time ring and the bubble's tap-to-reveal-time. Full
 detail in [17-content-counter.md](17-content-counter.md) §2.6.
@@ -555,6 +659,7 @@ for UI affordances and Dart-side policy — the hot path itself runs in Kotlin.
 | `CONSCIOUS_TICK_MS` | 1000 ms | — | Conscious accountant cadence. |
 | `WATCH_STALE_MS` | 2500 ms | — | "Still watching" window. |
 | `CONSCIOUS_MAX_STEP_MS` | 5000 ms | — | Cap on a single bank-drain step. |
+| `CONSCIOUS_FLUSH_MS` | 5000 ms | — | Batch Conscious-bank prefs writes to ≤ 1 per interval (§5.2). |
 | `BLOCK_VIBRATION_MS` | 60 ms | — | Block haptic one-shot. |
 | — | — | `oneReelOverlayGrace / oneReelOverlayPoll = 500 ms` | One-reel overlay grace/poll (overlay module, not this file). |
 | — | — | `hardBlockGrace = 10 s` | Hard-block grace after a kill/lock. Dart-side constant only; **no** counterpart exists in `DetoxoAccessibilityService.kt` — treat the native enforcement as a follow-up/swap-in. |
@@ -575,16 +680,20 @@ Types this file emits:
 
 | Type | Payload | When |
 |------|---------|------|
-| `serviceStatus` | `{running}` | Connect / interrupt / unbind / destroy. |
-| `blocked` | `{package, platformId, mode, today, total}` | A reel block fired in `onDetected`. |
-| `webBlocked` | `{host, mode:"PRESS_BACK", today, total}` | A blocked host bounced (browser branch). |
+| `serviceStatus` | `{running}` | Connect / interrupt / unbind / destroy. The last payload is **sticky** — replayed to a late Dart subscriber ([04](04-native-android-layer.md) §4). |
+| `blocked` | `{package, platformId, mode, today, total}` | A reel block fired in `onDetected`, or a custom whole-app block in `onAppBlocked` (`platformId:"app_block"`, `mode:"HOME"` — [06](06-app-and-web-blocker.md)). |
+| `webBlocked` | `{source:"RULE"\|"ADULT", mode:"PRESS_BACK", today, total, host?}` | A blocked host bounced (browser branch). `host` only for RULE hits — adult-list blocks are never named (EVO-018). |
 | `consciousState` | `{bankMs, maxBankMs, watching, blocked, active}` | Each Conscious tick / sync. |
 | `reelSessionState` | `{consumed, allowance, blocked, active}` | Each One Reel / Unblock allow, block, or arm (§5.3). |
-| `detection`, `foregroundChanged`, `contentCounted` | — | Emitted by sibling modules (counter / foreground tracking), not shown here. |
+| `contentCounted` | — | Emitted by the sibling `ContentCounter` module, not shown here. |
 
-Block/web counters are date-keyed `dd-MM-yyyy` in `ConfigStore`
-(`recordBlock` + `blockStats`, `recordWebBlock` + `webBlockStats`) and persisted
-to SharedPreferences file `detoxo_engine_prefs`.
+Block/web counters are date-keyed `dd-MM-yyyy` (via the shared
+`DateKeys.today()` formatter) in `ConfigStore` (`recordBlock` +
+`blockStats(dateKey)`, `recordWebBlock` + `webBlockStats(dateKey)`, both with
+read-time day rollover — [09](09-persistence-data-model.md) §2.1) and persisted
+to SharedPreferences file `detoxo_engine_prefs`. The pushed platforms config
+itself lives in the separate `detoxo_platforms_config` file so hot-path counter
+writes don't re-serialise it.
 
 ---
 
@@ -593,4 +702,7 @@ to SharedPreferences file `detoxo_engine_prefs`.
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/accessibility/DetoxoAccessibilityService.kt`
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/DetectionConfig.kt`
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/ConfigStore.kt`
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/DateKeys.kt`
+- `android/app/src/main/res/values/strings.xml` — block toast (`toast_blocked`) + FGS notification strings
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/NodeRecycling.kt`
 - `lib/core/constants/app_constants.dart`

@@ -31,11 +31,33 @@ class SettingsCubit extends Cubit<AppSettings> {
   Timer? _ticker;
   StreamSubscription<ReelSessionState>? _reelSub;
 
+  /// True once real persisted settings are in [state] — [resync] must never
+  /// push the constructor's `const AppSettings()` defaults to native.
+  bool _loaded = false;
+
   Future<void> bootstrap() async {
     final loaded = await _settings.load();
     emit(loaded);
+    _loaded = true;
     await _engine.pushSettings(loaded);
     _syncTicker(loaded);
+  }
+
+  /// Re-pushes the persisted settings to native without mutating anything.
+  /// Called on app resume — cheap drift repair for a native side that lost or
+  /// never received the last push (process death, failed cold-start sync).
+  /// No-op before [bootstrap] lands: a resume that races the splash must not
+  /// clobber native with default settings.
+  ///
+  /// Pushes a FRESH load, never `state`: the Web Blocker's protection toggles
+  /// write the repository directly (see [_commit]), so pushing the in-memory
+  /// copy reverted them natively on every resume while their screen still
+  /// showed them on.
+  Future<void> resync() async {
+    if (!_loaded) return;
+    final fresh = await _settings.load();
+    emit(fresh);
+    await _engine.pushSettings(fresh);
   }
 
   /// Load-modify-write: the transform is applied to a FRESH load, not to the
@@ -118,8 +140,10 @@ class SettingsCubit extends Cubit<AppSettings> {
 
   // ── Pause ──────────────────────────────────────────────────────────────────
 
-  /// Start a pause: every app is allowed for the [pause] window, after which
-  /// blocking resumes as the sticky base mode (Block All or Conscious). The plan
+  /// Start a pause: reel/web blocking is suspended for the [pause] window
+  /// (whole-app locks stay enforced — the native gate order guarantees it),
+  /// after which blocking resumes as the sticky base mode (Block All or
+  /// Conscious). The plan
   /// is set to the base up front so when the window lapses (even while the app is
   /// dead) the state is already correct; the live pause is tracked purely by the
   /// pause session.

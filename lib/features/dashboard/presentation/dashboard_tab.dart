@@ -209,12 +209,25 @@ class _HeroState extends State<_Hero> {
             ? 0.0
             : (remaining.inMilliseconds / total).clamp(0.0, 1.0),
         remaining: remaining,
-        caption: 'apps allowed',
+        caption: 'reels allowed',
         tone: AppTone.warning,
         icon: AppIcon.pause,
       );
     } else if (settings.activePlan == BlockingPlan.curious) {
-      final c = context.watch<ConsciousCubit>().state;
+      // select over watch: depend only on the four displayed fields, so a
+      // Conscious emission that doesn't change what's shown no longer
+      // rebuilds the hero.
+      // ponytail: the 1 Hz display tick still rebuilds this build method —
+      // the countdown is data in CommandCenterCard's API, not a widget slot.
+      // Give it a slot if profiling ever shows the hero rebuild hurting.
+      final c = context.select(
+        (ConsciousCubit cubit) => (
+          progress: cubit.state.progress,
+          banked: cubit.state.banked,
+          watching: cubit.state.watching,
+          hasAllowance: cubit.state.hasAllowance,
+        ),
+      );
       countdown = SessionCountdown(
         progress: c.progress,
         remaining: c.banked,
@@ -360,34 +373,17 @@ class _SessionBannersState extends State<_SessionBanners> {
           icon: AppIcon.pause,
           iconColor: AppColors.warning,
           title: 'Paused',
-          subtitle: 'All apps allowed • ${formatCountdown(remaining)} left',
+          // "Reels" not "all apps": whole-app locks hold through a Pause.
+          subtitle: 'Reels allowed • ${formatCountdown(remaining)} left',
           onTap: () => unawaited(SessionDialogs.showPause(context)),
         ),
       );
     }
 
     if (settings.activePlan == BlockingPlan.curious) {
-      final c = context.watch<ConsciousCubit>().state;
-      final String title;
-      final String subtitle;
-      if (c.watching) {
-        title = 'Conscious — spending';
-        subtitle = 'Watching • ${formatCountdown(c.banked)} left';
-      } else if (c.hasAllowance) {
-        title = 'Conscious — ready';
-        subtitle = '${formatCountdown(c.banked)} banked • open reels to spend';
-      } else {
-        title = 'Conscious — earning';
-        subtitle = 'Reels blocked • earn ${SessionDefaults.consciousEarnLabel}';
-      }
-      banners.add(
-        _AnimatedActionTile(
-          icon: AppIcon.shieldCheck,
-          title: title,
-          subtitle: subtitle,
-          onTap: () => unawaited(SessionDialogs.showConscious(context)),
-        ),
-      );
+      // Own widget so the 1 Hz Conscious tick rebuilds ONLY this tile, not
+      // the whole banners section.
+      banners.add(const _ConsciousBanner());
     }
 
     if (banners.isEmpty) return const SizedBox.shrink();
@@ -401,6 +397,35 @@ class _SessionBannersState extends State<_SessionBanners> {
           ],
         ],
       ),
+    );
+  }
+}
+
+/// The Conscious session banner. Its own widget so the 1 Hz bank tick from
+/// [ConsciousCubit] rebuilds only this tile, not the whole banners section.
+class _ConsciousBanner extends StatelessWidget {
+  const _ConsciousBanner();
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.watch<ConsciousCubit>().state;
+    final String title;
+    final String subtitle;
+    if (c.watching) {
+      title = 'Conscious — spending';
+      subtitle = 'Watching • ${formatCountdown(c.banked)} left';
+    } else if (c.hasAllowance) {
+      title = 'Conscious — ready';
+      subtitle = '${formatCountdown(c.banked)} banked • open reels to spend';
+    } else {
+      title = 'Conscious — earning';
+      subtitle = 'Reels blocked • earn ${SessionDefaults.consciousEarnLabel}';
+    }
+    return _AnimatedActionTile(
+      icon: AppIcon.shieldCheck,
+      title: title,
+      subtitle: subtitle,
+      onTap: () => unawaited(SessionDialogs.showConscious(context)),
     );
   }
 }

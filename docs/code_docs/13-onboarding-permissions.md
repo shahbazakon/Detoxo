@@ -10,13 +10,15 @@ The whole flow is driven **imperatively from the splash screen** after app state
 
 `lib/app/splash_screen.dart` boots the app and routes. On the first post-frame callback it runs `_bootstrap()`:
 
-1. **Load state in parallel** (`Future.wait`):
+1. **Load state in parallel** (`Future.wait`) — only what the routing decision reads:
    - `SettingsCubit.bootstrap()` — app settings (incl. the `onboarded` flag)
-   - `TargetsCubit.load()` — installed blockable apps/surfaces
    - `PermissionsCubit.refresh()` — current permission statuses
    - `PinCubit.load()` — PIN configuration
-2. **First-run seeding of the enabled set.** If `settings.state.enabledPlatformIds` is empty, it seeds it from every target that is both `defaultEnabled` and `isInstalled` (via `settings.setEnabledPlatforms(...)`). Apps the user doesn't have are never pre-enabled.
+
+   `TargetsCubit.load()` is the slow leg (native config push + installed-package scan) and stays **off the critical path**: it is awaited only on a first run (for the seeding below) and fired `unawaited` otherwise.
+2. **First-run seeding of the enabled set.** If `settings.state.enabledPlatformIds` is empty, it awaits `targets.load()` and seeds from every target that is both `defaultEnabled` and `isInstalled` (via `settings.setEnabledPlatforms(...)`). Apps the user doesn't have are never pre-enabled.
 3. **Content-counter widget refresh** (fire-and-forget, never blocks routing): `_refreshReelCounterWidget()` reads `ContentCounterRepository.current()` and pushes it to the home-screen widget via `HomeWidgetRepository.pushSnapshot(...)`. The reel counter runs natively and is on by default, independent of blocking.
+4. **Blocklist drift repair** (fire-and-forget): `syncEngineBlocklists()` (`lib/app/engine_sync.dart`) pushes the protected apps, the merged web blocklist and the whole-app blocks to the native engine so it matches Dart without any screen ever being opened. The same shared helper is the resume path's heavy leg ([12](12-analytics-notifications-resilience.md) §3.2) — the splash no longer carries its own copy of the trio.
 
 Then the gate, **in this exact order**:
 
@@ -137,6 +139,10 @@ abstract interface class PermissionRepository {
   Future<PermissionStatus> status(AppPermission permission);
   Future<void> request(AppPermission permission);
 
+  /// Permissions that read as granted on the last successful check — the
+  /// gate's fallback when a live read comes back `unknown` (§3.2).
+  Future<Set<AppPermission>> lastKnownGranted();
+
   /// Play Store install? Drives the restricted-settings inference (§3.5).
   Future<bool> installedOutsidePlay();
 
@@ -150,24 +156,26 @@ abstract interface class PermissionRepository {
 
 ### 3.2 Data layer — how status/request map to the platform
 
-`data/repositories/permission_repository_impl.dart` (`PermissionRepositoryImpl`, wraps `EngineChannel`).
+`data/repositories/permission_repository_impl.dart` (`PermissionRepositoryImpl`, wraps `EngineChannel` + `LocalStore`).
 
 Everything is gated on `PlatformCapabilities.usesAndroidPermissionFunnel` (Android-only, from `lib/core/platform/platform_capabilities.dart`):
 
 - **Off Android:** `statuses()` returns `const []`. This is deliberate — an empty list makes `PermissionsCubit.allRequiredGranted` **vacuously true**, so the splash gate skips the permissions stage and routes straight to `/home` (the iOS "preview" build has no engine to permission). `status()` returns `denied`; `request()` is a no-op.
 
-- **On Android**, `status(permission)` reads live state per kind:
+- **On Android**, `status(permission)` reads live state per kind — and the channel-backed reads are **tri-state** (`EngineChannel.invokeBoolOrNull`: `true`/`false` from the OS, `null` = "the call didn't answer"):
 
   | Permission | Status check (`EngineChannel`) |
   |------------|-------------------------------|
-  | `accessibility` | `isAccessibilityEnabled()` |
-  | `overlay` | `canDrawOverlays()` |
-  | `usageAccess` | `hasUsageAccess()` |
-  | `batteryOptimization` | `isIgnoringBattery()` |
-  | `deviceAdmin` | `isDeviceAdminActive()` |
-  | `notifications` | `permission_handler` `Permission.notification.status` → `granted`, else `permanentlyDenied` when `isPermanentlyDenied` (don't-ask-again), else `denied` |
+  | `accessibility` | `isAccessibilityEnabled` |
+  | `overlay` | `canDrawOverlays` |
+  | `usageAccess` | `hasUsageAccess` |
+  | `batteryOptimization` | `isIgnoringBatteryOptimizations` |
+  | `deviceAdmin` | `isDeviceAdminActive` |
+  | `notifications` | `permission_handler` `Permission.notification.status` → `granted`, else `permanentlyDenied` when `isPermanentlyDenied` (don't-ask-again), else `denied`; **a plugin throw is caught and reads as `unknown`** — an uncaught rejection here used to fail the splash's `Future.wait` and hang the app on the splash |
 
-  `statuses()` iterates `AppPermission.values` in order and collects each `status(...)`.
+  A `null` channel read is retried **once after 150 ms**; still `null` → the status is `PermissionState.unknown`, **never `denied`**. (Previously `null` was coerced to `false` → denied, so one flaky cold-start read re-opened the full permission setup wall for an already-set-up user.)
+
+  `statuses()` iterates `AppPermission.values` in order and collects each `status(...)`, then **persists the granted set** (fire-and-forget) to Hive under `StoreKeys.grantedPermissions` — a JSON list of `AppPermission.name`s: every `granted` status is added, every definitive `denied`/`permanentlyDenied` is removed, and `unknown` leaves the stored entry untouched. `lastKnownGranted()` reads that set back (a corrupt blob reads as empty); it is the gate's memory in §3.3.
 
 - `request(permission)` triggers the grant path per kind:
 
@@ -190,18 +198,20 @@ The channel methods themselves are thin wrappers over the `com.errorxperts.detox
 
 **`PermissionsCubit`** (`presentation/permissions_cubit.dart`) — `Cubit<List<PermissionStatus>>`, initial state `[]`:
 
-- `refresh()` → `emit(await _repo.statuses())`.
+- `refresh()` → loads `_repo.statuses()` **and** `_repo.lastKnownGranted()`, then emits (with the restricted-settings rewrite of §3.5 applied).
 - `request(permission)` → calls `_repo.request(...)`, waits **400 ms** (system dialogs/settings are async), then `refresh()`s to reflect the new state.
-- `allRequiredGranted` → `state.where((s) => s.kind.required).every((s) => s.granted)` — the getter the splash gate reads. On an empty state (iOS) `.every` on an empty list is `true`.
+- **`effectivelyGranted(status)`** — the gate's per-permission truth, public so the UI shares it: `granted`, **or** a live `unknown` reading that is in `lastKnownGranted`. A definitive `denied` is `false`, regardless of history. Shared with the screen so the cards, the "N of M" progress row and the Continue button can never contradict each other (EVO-014).
+- `allRequiredGranted` — the getter the splash gate reads; it simply runs `effectivelyGranted` over every required permission — one flaky channel call at cold start must not send a set-up user back to the setup wall. On an empty state (iOS) `.every` on an empty list is `true`.
+- `needsRestrictedFix` (§3.5) explicitly **never fires for an `unknown` reading** — a channel hiccup is not a refusal and must not be relabelled `permanentlyDenied`.
 
 DI: registered as a global `BlocProvider` in `lib/main.dart` (`PermissionsCubit(sl<PermissionRepository>())`); `PermissionRepository` → `PermissionRepositoryImpl` is a lazy singleton in `lib/core/di/injector.dart`.
 
 **`PermissionsScreen`** (`presentation/permissions_screen.dart`) — the guided funnel UI, title **"Set up protection"**:
 
-- A `WidgetsBindingObserver` that calls `PermissionsCubit.refresh()` on `initState` **and** on every `AppLifecycleState.resumed`. This is the key UX move: the user leaves to a system settings screen, flips a toggle, and returns — the list updates live to reflect what they just granted.
+- A `WidgetsBindingObserver` that calls `PermissionsCubit.refresh()` on `initState` **and** on every `AppLifecycleState.resumed`. This is the key UX move: the user leaves to a system settings screen, flips a toggle, and returns — the list updates live to reflect what they just granted. (Independently of this screen, `AppResumeSync` in `lib/app/app_resume_sync.dart` also runs `PermissionsCubit.refresh()` on **every** app resume, so the persisted granted set stays fresh even when the user never revisits the funnel.)
 - Splits statuses into **"Required to block"** and **"Recommended"** sections (by `kind.required`), each an animated `EntranceList` of `PermissionCard`s.
-- A progress row: a `ProgressBar` plus "*grantedReq* of *totalRequired*" (fraction of required permissions granted).
-- Each card shows an icon, the permission `label`, its `why`, a granted/needed indicator, and an action wired to `requestPermission(context, status.kind)`. The action reads **Grant** normally, **Open settings** when `permanentlyDenied` (so a don't-ask-again notification permission points at system settings instead of a dead button), or **Fix this** when `blockedByRestrictedSettings` (`PermissionCard(actionLabel: ...)`).
+- A progress row: a `ProgressBar` plus "*grantedReq* of *totalRequired*" — counted with `cubit.effectivelyGranted`, the **same predicate as the gate**, so the row, the cards and the Continue button can never contradict each other under a flaky (unknown) read.
+- Each card shows an icon, the permission `label`, its `why`, a granted/needed indicator, and an action wired to `requestPermission(context, status.kind)`. `granted:` is the card's `effectivelyGranted` value; a **genuinely unknown** status (live `unknown` with no granted history) sets `PermissionCard(unknown: true)`, which renders a neutral **"Checking…"** row — no Grant button, no denied red (EVO-014; the next refresh settles it). Otherwise the action reads **Grant** normally, **Open settings** when `permanentlyDenied` (so a don't-ask-again notification permission points at system settings instead of a dead button), or **Fix this** when `blockedByRestrictedSettings` (`PermissionCard(actionLabel: ...)`). Covered by `test/permission_unknown_ui_test.dart`.
 - Bottom `PrimaryButton`: while `allRequiredGranted` is false it reads **"Grant required permissions"** and is **disabled**; once both required permissions are granted it becomes **"Continue"** and `context.go(Routes.home)`.
 
 Per-permission icons (`_iconFor`, presentation-only; the `why` copy is on the enum — see §3.1):
@@ -289,7 +299,7 @@ The same `PermissionsCubit` is reused in **Settings** (`lib/features/settings/pr
 
 ## 5. End-to-end sequence (first run, Android)
 
-1. Cold launch → `/` splash → `_bootstrap()` loads settings/targets/permissions/pin, seeds the enabled set from installed defaults, refreshes the counter widget.
+1. Cold launch → `/` splash → `_bootstrap()` loads settings/permissions/pin (targets off the critical path), seeds the enabled set from installed defaults, refreshes the counter widget, and fires the blocklist drift repair (`syncEngineBlocklists()`).
 2. `onboarded == false` → `/onboarding`. User swipes/skips the 5-page value-first intro (five problem→solution beats, incl. the reel count-up + daily-limit dial on page 3); finishing persists `onboarded: true`, seeds the daily limit (dialled value or 90 min default), and returns to the **splash** (`/`), which re-bootstraps `SettingsCubit` from the freshly written flag and re-runs the gate — landing on `/permissions`.
 3. `/permissions` funnel. User grants **Accessibility** and **Display over apps** (required) via system screens; returning each time re-checks on resume. Optional permissions (notifications, usage, battery, device-admin) offered but not blocking.
 4. Once both required are granted, **Continue** → `/home`.
@@ -310,7 +320,13 @@ The same `PermissionsCubit` is reused in **Settings** (`lib/features/settings/pr
 - `lib/features/permissions/permissions.dart`
 - `lib/features/permissions/presentation/permission_actions.dart` (`requestPermission` — the single grant entry point; prominent disclosure + restricted-settings routing)
 - `lib/features/permissions/presentation/widgets/restricted_settings_sheet.dart` (`RestrictedSettingsSheet`)
+- `lib/app/app_resume_sync.dart` (app-wide permission re-check on every resume)
+- `lib/app/engine_sync.dart` (`syncEngineBlocklists` — splash + resume blocklist drift repair)
+- `lib/core/design_system/components/permission_card.dart` (`PermissionCard` incl. the neutral `unknown` "Checking…" row)
+- `lib/core/storage/local_store.dart` (`StoreKeys.grantedPermissions` — the persisted granted set)
 - `test/permissions_restricted_settings_test.dart`
+- `test/permissions_persistence_test.dart` (tri-state reads, retry, persisted-set gate fallback)
+- `test/permission_unknown_ui_test.dart` (unknown renders "Checking…", not denied; row/card/button agreement)
 - `lib/features/permissions/domain/entities/permission_status.dart`
 - `lib/features/permissions/domain/repositories/permission_repository.dart`
 - `lib/features/permissions/data/repositories/permission_repository_impl.dart`

@@ -14,6 +14,9 @@ enum AppBlockAddResult {
 
   /// Already in the custom blocklist.
   duplicate,
+
+  /// The save failed; the list was reverted and nothing reached native.
+  failed,
 }
 
 /// A fully-blocked app (PIN-locked or daily-limited).

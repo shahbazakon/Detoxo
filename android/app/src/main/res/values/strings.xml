@@ -6,4 +6,18 @@
     <string name="device_admin_label">Detoxo Uninstall Protection</string>
     <string name="device_admin_description">Prevents the app from being removed while protection is active.</string>
     <string name="cc_widget_description">Reel counter</string>
+
+    <!-- Engine surfaces (toasts + notifications). One shared block toast so the
+         web and whole-app copy can never drift apart again. -->
+    <string name="toast_blocked">%1$s is blocked by Detoxo</string>
+    <!-- EVO-018: adult-list (18+) hits are never named on screen. -->
+    <string name="toast_blocked_adult">Adult site blocked by Detoxo</string>
+    <string name="fgs_channel_name">Detoxo Service Status</string>
+    <string name="fgs_channel_description">Focus protection active</string>
+    <string name="fgs_title">Detoxo is active</string>
+    <string name="fgs_text">Monitoring and blocking short-form video.</string>
+    <string name="watchdog_channel_name">Protection alerts</string>
+    <string name="watchdog_channel_description">Alerts when protection stops</string>
+    <string name="watchdog_title">Protection stopped</string>
+    <string name="watchdog_text">Detoxo is no longer blocking. Tap to re-enable it.</string>
 </resources>

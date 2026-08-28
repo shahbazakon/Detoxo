@@ -24,21 +24,28 @@ class PermissionsCubit extends Cubit<List<PermissionStatus>> {
   /// Cached for the session; the installer cannot change while we're running.
   bool? _outsidePlay;
 
+  /// Granted on the last successful check — the gate's memory when a live
+  /// read comes back [PermissionState.unknown] (flaky channel at cold start).
+  Set<AppPermission> _lastKnownGranted = const {};
+
   /// One failed attempt is noise — users back out, get distracted, or tap Grant
   /// just to look. Two round-trips with no change is a stuck user.
   static const int _attemptsBeforeHelp = 2;
 
   /// Whether [status] looks blocked by the restricted-settings gate rather than
-  /// simply not granted yet.
+  /// simply not granted yet. An `unknown` reading (channel hiccup, not a
+  /// refusal) must never be relabelled permanently denied.
   bool needsRestrictedFix(PermissionStatus status) =>
       (_outsidePlay ?? false) &&
       !status.granted &&
+      status.state != PermissionState.unknown &&
       status.kind.restrictedWhenSideloaded &&
       (_attempts[status.kind] ?? 0) >= _attemptsBeforeHelp;
 
   Future<void> refresh() async {
     _outsidePlay ??= await _repo.installedOutsidePlay();
     final statuses = await _repo.statuses();
+    _lastKnownGranted = await _repo.lastKnownGranted();
     for (final s in statuses) {
       // Self-heal: once it lands, forget the failed attempts.
       if (s.granted) _attempts.remove(s.kind);
@@ -67,6 +74,18 @@ class PermissionsCubit extends Cubit<List<PermissionStatus>> {
     await _repo.openAppSettings();
   }
 
+  /// The gate's per-permission truth, shared with the UI so the cards, the
+  /// progress row and the Continue button can never contradict each other:
+  /// granted, or a live `unknown` reading backed by the last successful check.
+  /// A definitive `denied` is false, regardless of history.
+  bool effectivelyGranted(PermissionStatus s) =>
+      s.granted ||
+      (s.state == PermissionState.unknown &&
+          _lastKnownGranted.contains(s.kind));
+
+  /// Required-permissions gate. A live `unknown` reading falls back to the
+  /// last successful check instead of reading as denied — one flaky channel
+  /// call at cold start must not send a set-up user back to the setup wall.
   bool get allRequiredGranted =>
-      state.where((s) => s.kind.required).every((s) => s.granted);
+      state.where((s) => s.kind.required).every(effectivelyGranted);
 }

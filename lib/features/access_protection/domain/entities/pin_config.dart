@@ -42,6 +42,8 @@ class PinConfig extends Equatable {
     this.scopes = const {},
     this.retryCount = 0,
     this.lockedUntil,
+    this.lockoutElapsedUntilMs,
+    this.lockoutBootCount,
     this.biometricEnabled = false,
     this.autoLock = AutoLockTimeout.m1,
     this.secureScreen = false,
@@ -59,6 +61,8 @@ class PinConfig extends Equatable {
     lockedUntil: json['lockedUntil'] == null
         ? null
         : DateTime.fromMillisecondsSinceEpoch(json['lockedUntil'] as int),
+    lockoutElapsedUntilMs: json['lockoutElapsedUntilMs'] as int?,
+    lockoutBootCount: json['lockoutBootCount'] as int?,
     biometricEnabled: json['biometricEnabled'] as bool? ?? false,
     autoLock: AutoLockTimeout.fromWire(json['autoLock'] as String?),
     secureScreen: json['secureScreen'] as bool? ?? false,
@@ -79,6 +83,15 @@ class PinConfig extends Equatable {
   final Set<PinScope> scopes;
   final int retryCount;
   final DateTime? lockedUntil;
+
+  /// Monotonic lockout leg: the `elapsedRealtime` expiry plus the
+  /// `Settings.Global.BOOT_COUNT` it was anchored in. The leg is trusted only
+  /// while the boot count still matches — a monotonic reading from any other
+  /// boot is meaningless, so after a reboot the wall clock governs. Null on
+  /// legacy configs and where the native clocks were unavailable.
+  final int? lockoutElapsedUntilMs;
+  final int? lockoutBootCount;
+
   final bool biometricEnabled;
 
   /// How quickly the app re-locks after being minimized (app scope only).
@@ -88,8 +101,47 @@ class PinConfig extends Equatable {
   final bool secureScreen;
 
   bool get isConfigured => type != PinType.none;
+
+  /// Wall-clock lockout check — the lock screen's DISPLAY approximation
+  /// (countdown text, dialogs). Enforcement goes through [isLockedOutAt]
+  /// with the native monotonic clock, which a Settings clock change can't
+  /// move; this getter alone would be defeated by one.
   bool get isLockedOut =>
       lockedUntil != null && lockedUntil!.isAfter(DateTime.now());
+
+  /// Clock-robust lockout remaining (EVO-015). The monotonic leg
+  /// ([elapsedMs] = `elapsedRealtime`, [bootCount] = `BOOT_COUNT`) is
+  /// authoritative in BOTH directions while its boot count matches the one
+  /// the lockout was anchored in — a Settings clock change can neither clear
+  /// nor extend it. Cross-boot or null readings fall back to the wall clock.
+  /// ponytail: reboot + clock-forward together still clear a lockout — the
+  /// wall leg is all that survives a reboot, accepted ceiling.
+  Duration lockoutRemainingAt(DateTime now, {int? elapsedMs, int? bootCount}) {
+    final until = lockedUntil;
+    if (until == null) return Duration.zero;
+    final untilE = lockoutElapsedUntilMs;
+    if (monotonicLegValid(elapsedMs: elapsedMs, bootCount: bootCount)) {
+      final leftMs = untilE! - elapsedMs!;
+      return leftMs <= 0 ? Duration.zero : Duration(milliseconds: leftMs);
+    }
+    final wall = until.difference(now);
+    return wall.isNegative ? Duration.zero : wall;
+  }
+
+  /// Whether the monotonic readings can be trusted against this lockout:
+  /// both present, the lockout carries a monotonic leg, and the reading comes
+  /// from the same boot the lockout was anchored in.
+  bool monotonicLegValid({int? elapsedMs, int? bootCount}) =>
+      elapsedMs != null &&
+      bootCount != null &&
+      lockoutBootCount != null &&
+      bootCount == lockoutBootCount &&
+      lockoutElapsedUntilMs != null;
+
+  /// Enforcement-grade lockout check — see [lockoutRemainingAt].
+  bool isLockedOutAt(DateTime now, {int? elapsedMs, int? bootCount}) =>
+      lockoutRemainingAt(now, elapsedMs: elapsedMs, bootCount: bootCount) >
+      Duration.zero;
 
   bool guards(PinScope scope) => scopes.contains(scope);
 
@@ -101,6 +153,8 @@ class PinConfig extends Equatable {
     Set<PinScope>? scopes,
     int? retryCount,
     DateTime? lockedUntil,
+    int? lockoutElapsedUntilMs,
+    int? lockoutBootCount,
     bool clearLockout = false,
     bool? biometricEnabled,
     AutoLockTimeout? autoLock,
@@ -113,6 +167,12 @@ class PinConfig extends Equatable {
     scopes: scopes ?? this.scopes,
     retryCount: retryCount ?? this.retryCount,
     lockedUntil: clearLockout ? null : (lockedUntil ?? this.lockedUntil),
+    lockoutElapsedUntilMs: clearLockout
+        ? null
+        : (lockoutElapsedUntilMs ?? this.lockoutElapsedUntilMs),
+    lockoutBootCount: clearLockout
+        ? null
+        : (lockoutBootCount ?? this.lockoutBootCount),
     biometricEnabled: biometricEnabled ?? this.biometricEnabled,
     autoLock: autoLock ?? this.autoLock,
     secureScreen: secureScreen ?? this.secureScreen,
@@ -126,6 +186,8 @@ class PinConfig extends Equatable {
     'scopes': scopes.map((e) => e.wire).toList(),
     'retryCount': retryCount,
     'lockedUntil': lockedUntil?.millisecondsSinceEpoch,
+    'lockoutElapsedUntilMs': lockoutElapsedUntilMs,
+    'lockoutBootCount': lockoutBootCount,
     'biometricEnabled': biometricEnabled,
     'autoLock': autoLock.wire,
     'secureScreen': secureScreen,
@@ -140,6 +202,8 @@ class PinConfig extends Equatable {
     scopes,
     retryCount,
     lockedUntil,
+    lockoutElapsedUntilMs,
+    lockoutBootCount,
     biometricEnabled,
     autoLock,
     secureScreen,

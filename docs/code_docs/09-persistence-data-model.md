@@ -9,7 +9,8 @@ boundary:
 |-------|-------|--------------|-----------------|
 | `LocalStore` (`detoxo` box) | Dart | Hive `Box<String>` | User-facing config: settings, blocklists, daily limit, analytics buffer |
 | `flutter_secure_storage` | Dart | Keystore / EncryptedSharedPreferences | Secrets only (the PIN config) |
-| `detoxo_engine_prefs` | Native (Kotlin) | `SharedPreferences` | The engine's own runtime state: pushed config, plan, counters, Conscious bank |
+| `detoxo_engine_prefs` | Native (Kotlin) | `SharedPreferences` | The engine's own runtime state: plan, counters, blocklists, Conscious bank, watchdog markers |
+| `detoxo_platforms_config` | Native (Kotlin) | `SharedPreferences` | Just the pushed ~31 KB `platforms_config_json` — split out so hot-path counter writes stop re-serialising it (§2.1) |
 | `home_widget` data + native store | Bridge | `home_widget` plugin + `detoxo_engine_prefs` | Home-screen widget face (`cc_today` / `cc_total`) |
 
 > **Not used (from the old blueprint):** Room, drift/SQLite, any
@@ -94,6 +95,7 @@ Each key maps to exactly one repository that owns its JSON shape:
 | `dailyLimit` | `daily_limit` | no | `DailyLimitRepositoryImpl` | `DailyLimit.toJson()` — one JSON object |
 | `streak` | `daily_limit_streak` | no | `StreakRepositoryImpl` | `Streak.toJson()` — `{base, lastDay, todayFailed}` |
 | `analyticsEvents` | `analytics_events` | no | `AnalyticsRepositoryImpl` | JSON list of block events (capped) |
+| `grantedPermissions` | `granted_permissions` | no | `PermissionRepositoryImpl` | JSON list of `AppPermission.name`s granted on the last successful check — the permission gate's memory when a live read comes back `unknown` ([13](13-onboarding-permissions.md) §3.2) |
 | `premiumDevUnlock` | `premium_dev_unlock` | no | *(reserved — no live consumer)* | — |
 | `dismissedNotices` | `dismissed_notices` | no | *(reserved — no live consumer)* | — |
 
@@ -131,7 +133,9 @@ Each key maps to exactly one repository that owns its JSON shape:
   engine as the source of truth** for `today`/`total` (they survive the UI being
   killed) — it copies the `today`/`total` off each `webBlocked` event and only
   falls back to a local increment if the event omitted them. The per-host
-  `hosts` map is Dart-only, so the dashboard can surface the most-blocked site.
+  `hosts` map is Dart-only, so the dashboard can surface the most-blocked site;
+  adult-list blocks never enter it — native omits `host` for `source: "ADULT"`
+  events (EVO-018), so no adult domain is persisted or displayed.
   `today` rolls over on a new calendar day (`_rollDate`).
 - **`app_blocklist`** — JSON list of `AppBlockEntry` (full-app blocks, distinct
   from reel-platform detection).
@@ -172,39 +176,50 @@ behind the "Reset app data" action; the app then re-bootstraps from defaults.
 
 ---
 
-## 2. Native: `detoxo_engine_prefs`
+## 2. Native: `detoxo_engine_prefs` (+ `detoxo_platforms_config`)
 
-A single private `SharedPreferences` file, **`detoxo_engine_prefs`**
+A private `SharedPreferences` file, **`detoxo_engine_prefs`**
 (`Context.MODE_PRIVATE`), shared by two owner classes so the
 `AccessibilityService`, the `CommandHandler`, the overlay bubble and the
 home-screen widget all read one source of truth:
 
 - `engine/ConfigStore.kt` — engine configuration, active plan, block counters,
-  website-blocking flags, and the Conscious token bucket.
+  website-blocking flags, blocklists, watchdog markers, and the Conscious
+  token bucket.
 - `engine/ContentCounterStore.kt` — the decoupled reel/short **counter** state
   (counts, per-app maps, bubble position, appearance).
 
 Both open the file by the same constant `PREFS = "detoxo_engine_prefs"`. Because
 the service runs in the **main process**, no multi-process mode is needed.
 
+**Config split:** the ~31 KB `platforms_config_json` lives in its **own** file,
+**`detoxo_platforms_config`** — every `.apply()` re-serialises the whole file,
+and the hot path writes counters into `detoxo_engine_prefs` constantly, so
+sharing a file meant multi-KB disk writes at scroll frequency. `ConfigStore`'s
+`init` runs a one-time idempotent migration of the key out of the hot file.
+
 ### 2.1 `ConfigStore` keys
 
 Written by Dart via `CommandHandler` (`pushConfig`, `pushSettings`,
-`pushWebBlocklist`, `pushProtectedApps`); read by `DetoxoAccessibilityService`.
+`pushWebBlocklist`, `pushProtectedApps`, `pushAppBlocklist`); read by
+`DetoxoAccessibilityService`.
 
 | Key string | Type | Default | Meaning |
 |---|---|---|---|
-| `platforms_config_json` | String? | null | The Dart-pushed `platforms_config.json` the detector parses |
+| `platforms_config_json` | String? | null | The Dart-pushed `platforms_config.json` the detector parses — stored in the separate **`detoxo_platforms_config`** file (migrated out of the hot file on first init) |
 | `active_plan` | String | `BLOCK_ALL` | Plan **wire token**: `BLOCK_ALL`, `CURIOUS` (= *Conscious* in the UI), `ONE_REEL`, `PAUSED` |
 | `default_block_mode` | String | `PRESS_BACK` | `PRESS_BACK` / `KILL_APP` / `LOCK_SCREEN` / `NONE` |
 | `enabled_platforms` | Set<String> | ∅ | Enabled `platformId`s (e.g. `ig_reel`, `yt_shorts`) |
 | `protected_packages` | Set<String> | ∅ | Privacy-protected package names the service ignores entirely (survives reboot with Flutter dead) |
+| `app_blocklist_packages` | Set<String> | ∅ | Custom whole-app blocks — packages the service HOME-bounces on foreground (pushed via `pushAppBlocklist`) |
 | `vibration_enabled` | Boolean | true | Vibrate on block |
 | `master_enabled` | Boolean | true | Global on/off for blocking |
 | `pause_until` | Long | 0 | Epoch millis until which blocking is paused (0 = not paused) |
 | `web_blocklist_json` | String? | null | Active website blocklist `[{pattern,matchType}]` |
 | `block_adult_websites` | Boolean | false | Enforce the bundled adult-domain set |
 | `block_websites_for_blocked_apps` | Boolean | false | Enforce websites of blocked apps |
+| `service_ever_connected` | Boolean | false | The accessibility service connected at least once on this install (watchdog gate) |
+| `last_watchdog_notified_ms` | Long | 0 | Last "Protection stopped" notification — the watchdog's 6 h re-notify debounce |
 
 > The stored `active_plan` is the **wire token**, not the UI label. The constant
 > `CommandHandler.PLAN_CONSCIOUS = "CURIOUS"` — i.e. the Conscious plan is
@@ -221,7 +236,11 @@ Written by Dart via `CommandHandler` (`pushConfig`, `pushSettings`,
 
 `recordBlock(dateKey)` compares the stored day to `dateKey`; on a mismatch it
 resets today's count to 0 **and writes** the new date in the same edit, then
-increments today + total. `blockStats()` returns `(today, total, date)`.
+increments today + total. `blockStats(dateKey)` returns `(today, total, date)`
+with **read-time rollover** (mirroring `ContentCounterStore.snapshot` and
+`webBlockStats(dateKey)`): a stale stored date reads `today` as 0 without
+writing — the next `recordBlock` does the durable reset. Whole-app blocks
+(`onAppBlocked`) record into these same counters.
 
 **Website block counters** (`recordWebBlock` / `webBlockStats`) — kept separate
 from the reel counter:
@@ -237,13 +256,15 @@ even when the Flutter UI is dead:
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `conscious_bank_ms` | Long | 0 | Banked allowance, millis (0..max) |
-| `conscious_anchor_ms` | Long | 0 | Wall-clock anchor for the last accounting tick |
+| `conscious_bank_ms` | Long | 0 | **Durable copy** of the banked allowance, millis (0..max). The live value is cached and write-batched inside the service (flushed at most every ~5 s, forced on bank-empty / plan stop / reload / unbind), so this trails it by ≤ ~5 s while the accountant runs. The tick anchor is a runtime-only service field — its old `conscious_anchor_ms` key was deleted. |
 | `conscious_earn_divisor` | Int | 10 (min 1) | Earn rate: `bank += elapsed / divisor` while abstaining |
 | `conscious_max_bank_ms` | Long | 600000 (10 min) | Cap on banked allowance |
+| `conscious_date` | String | "" | Day key of the last accounting tick — the bank **resets daily** (`accountConscious` zeroes it on day change, so an overnight abstain can't stockpile a free morning allowance) |
 
-`resetConsciousBank(now)` empties the bank and re-anchors to `now`. Switching
-_into_ the Conscious plan from `pushConfig` triggers a reset. The bank drains
+`resetConsciousBank()` (no-arg) zeroes only the bank — fired only by the
+explicit `resetConsciousBank` command (a genuine user entry into Conscious;
+auto-reverts keep the bank), whose service hook `onConsciousBankReset()` also
+drops the cached/unflushed bank so pending accrual can't resurrect it. The bank drains
 1:1 while a reel is on screen and refills at `1/divisor` while abstaining, capped
 at `conscious_max_bank_ms`. See [05-plans-pause-conscious.md](05-plans-pause-conscious.md).
 
@@ -290,7 +311,11 @@ the today total and `cc_per_app_today` to 0/`{}` **and zeroes `cc_time_today`**
 both per-app maps in a single `edit()`.
 
 **Usage time** (`recordUsage(deltaMs, dateKey)`): adds `deltaMs` of monitored-app
-foreground time to `cc_time_today` + `cc_time_total`. It shares the same `cc_date`
+foreground time to `cc_time_today` + `cc_time_total`. `ContentCounter` **batches**
+these writes in memory (`pendingUsageMs`) and flushes at ≥ 5 s / on app switch /
+protected-foreground / snapshot / dispose — previously one prefs write per
+accessibility event at scroll frequency (ceiling: ≤ 5 s lost on a hard process
+kill). It shares the same `cc_date`
 marker, so on a stored-date mismatch it symmetrically zeroes `cc_today` and
 `cc_per_app_today` before adding. **Shared-rollover invariant:** because one
 `cc_date` gates both features, whichever writer turns the day over must zero the
@@ -321,7 +346,7 @@ but they are not interchangeable:
 
 | Producer | Format | Example |
 |---|---|---|
-| Native `ConfigStore` / `ContentCounterStore` / widget / `CommandHandler.dateKey()` | `dd-MM-yyyy` | `03-07-2026` |
+| Native (all callers — `DateKeys.today()`, the single shared `dd-MM-yyyy` formatter in `engine/DateKeys.kt`; ThreadLocal, since the widget provider / job service can run off the main thread) | `dd-MM-yyyy` | `03-07-2026` |
 | Dart `WebBlockStatsRepositoryImpl._todayKey()` | `yyyy-MM-dd` | `2026-07-03` |
 | Dart analytics events | epoch millis (`ts`) | `1751500800000` |
 
@@ -383,8 +408,10 @@ counted reel (throttled) so the widget refreshes without any Dart round-trip.
 - `lib/features/analytics/data/repositories/analytics_repository_impl.dart`
 - `lib/features/settings/presentation/settings_screen.dart`
 - `lib/features/content_counter/home_content_counter/data/repositories/home_widget_repository_impl.dart`
+- `lib/features/permissions/data/repositories/permission_repository_impl.dart` (`granted_permissions`)
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/ConfigStore.kt`
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/ContentCounterStore.kt`
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/ContentCounter.kt`
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/DateKeys.kt`
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/channels/CommandHandler.kt`
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/widget/ContentCounterWidgetProvider.kt`

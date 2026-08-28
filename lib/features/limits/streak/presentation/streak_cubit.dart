@@ -1,8 +1,8 @@
+import 'package:detoxo/core/utils/day_signature.dart';
 import 'package:detoxo/features/limits/streak/domain/entities/streak.dart';
 import 'package:detoxo/features/limits/streak/domain/repositories/streak_repository.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
-import 'package:intl/intl.dart';
 
 /// Tracks the "days under your daily limit" streak with a device-local midnight
 /// rollover. [observe] is fed today's under-limit status by the dashboard hero
@@ -13,8 +13,7 @@ class StreakCubit extends Cubit<Streak> {
 
   final StreakRepository _repo;
 
-  static final DateFormat _fmt = DateFormat('dd-MM-yyyy');
-  static String _sig(DateTime d) => _fmt.format(d);
+  static String _sig(DateTime d) => daySignature(d);
 
   Future<void> load() async => emit(await _repo.load());
 
@@ -25,10 +24,14 @@ class StreakCubit extends Cubit<Streak> {
     required bool underLimit,
   }) async {
     final today = DateTime(now.year, now.month, now.day);
+    // Calendar arithmetic, NOT subtract(Duration(days: 1)): that subtracts 24h
+    // of absolute time, which on the day after a DST spring-forward (a 23h
+    // day) lands two calendar days back and silently resets the streak.
+    final yesterday = DateTime(now.year, now.month, now.day - 1);
     final next = advance(
       state,
       today: _sig(today),
-      yesterday: _sig(today.subtract(const Duration(days: 1))),
+      yesterday: _sig(yesterday),
       underLimit: underLimit,
     );
     if (next == state) return;

@@ -218,8 +218,11 @@ in the current Dart `OverlayParamsModel`. `ig_feed` is `defaultStatus: false` an
 Native parser: `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/DetectionConfig.kt`.
 Runtime consumer: `.../accessibility/DetoxoAccessibilityService.kt`.
 
-Dart pushes the JSON string over the `pushConfig` MethodChannel command; the service
-calls `DetectionConfig.parse(json)` once per push and holds the result. Lookups on the
+Dart pushes the JSON string over the `pushConfig` MethodChannel command (fail-safe:
+an absent or non-JSON-object payload is a no-op — never a config wipe); the service
+calls `DetectionConfig.parse(json)` once per push and holds the result. The pushed
+string persists in its own `detoxo_platforms_config` prefs file (see
+[09-persistence-data-model.md](09-persistence-data-model.md) §2). Lookups on the
 hot path are O(1) by package.
 
 ### 2.1 Parsing (`DetectionConfig.parse`)

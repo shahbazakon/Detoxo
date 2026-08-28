@@ -198,8 +198,8 @@ class _PauseDialogState extends State<_PauseDialog> {
         ),
         const SizedBox(height: AppSpacing.xs),
         Text(
-          'Every app is allowed for $_minutes min, then Block All resumes '
-          'automatically.',
+          'Reels and blocked sites are allowed for $_minutes min, then '
+          'Block All resumes automatically. App locks stay on.',
           textAlign: TextAlign.center,
           style: text.bodySmall?.copyWith(color: context.glass.onGlassMuted),
         ),
@@ -258,8 +258,8 @@ class _PauseDialogState extends State<_PauseDialog> {
         ),
         const SizedBox(height: AppSpacing.xs),
         Text(
-          'Every app is allowed. Blocking resumes automatically when the '
-          'window ends.',
+          'Reels and blocked sites are allowed; app locks stay on. Blocking '
+          'resumes automatically when the window ends.',
           textAlign: TextAlign.center,
           style: text.bodyMedium?.copyWith(color: context.glass.onGlassMuted),
         ),

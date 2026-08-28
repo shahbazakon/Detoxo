@@ -51,6 +51,10 @@ abstract final class StoreKeys {
   static const String analyticsEvents = 'analytics_events';
   static const String dismissedNotices = 'dismissed_notices';
 
+  /// JSON list of `AppPermission.name`s that were granted on the last
+  /// successful check — the permission gate's memory when a live read fails.
+  static const String grantedPermissions = 'granted_permissions';
+
   /// Anonymous, random per-install id (UUID). Set as the Firebase Analytics /
   /// Crashlytics user id for per-install grouping; carries no PII.
   static const String installId = 'install_id';

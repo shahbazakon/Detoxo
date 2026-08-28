@@ -5,8 +5,6 @@ import android.os.Handler
 import android.os.Looper
 import com.errorxperts.detoxo.overlay.ContentCounterBubble
 import com.errorxperts.detoxo.widget.ContentCounterWidgetProvider
-import java.text.SimpleDateFormat
-import java.util.Locale
 
 /**
  * Decides WHEN a distinct short video is counted, persists via
@@ -60,6 +58,14 @@ class ContentCounter(private val context: Context) {
     private var usageActivePkg: String? = null
     private var usageLastTickMs = 0L
 
+    // Accumulated-but-unwritten usage time. Accessibility events arrive at
+    // scroll frequency; writing prefs per event re-serialised the whole file
+    // tens of times a second. Flushed at USAGE_FLUSH_MS, on app switch, on
+    // snapshot reads, and on dispose.
+    // ponytail: <=5s of usage time lost on a hard process kill; a flush that
+    // straddles midnight attributes up to the pending window to the wrong day.
+    private var pendingUsageMs = 0L
+
     val isEnabled: Boolean get() = store.enabled
 
     /**
@@ -71,6 +77,9 @@ class ContentCounter(private val context: Context) {
     fun onForegroundChanged(pkg: String, isReelApp: Boolean) {
         if (pkg == context.packageName || pkg in TRANSIENT_PKGS) return
         if (pkg == lastForegroundPkg) return
+        // Settle the previous app's usage window — leaving for an unmonitored
+        // app means onAppActivity (and its flush) won't fire again.
+        flushUsage()
         lastForegroundPkg = pkg
         endReel()
         if (isReelApp && store.enabled) {
@@ -133,10 +142,22 @@ class ContentCounter(private val context: Context) {
         val now = now()
         if (pkg == usageActivePkg) {
             val delta = now - usageLastTickMs
-            if (delta in 1L until USAGE_ACTIVE_GAP_MS) store.recordUsage(delta, dateKey())
+            if (delta in 1L until USAGE_ACTIVE_GAP_MS) {
+                pendingUsageMs += delta
+                if (pendingUsageMs >= USAGE_FLUSH_MS) flushUsage()
+            }
+        } else {
+            flushUsage() // app switch: settle the old app's window first
         }
         usageActivePkg = pkg
         usageLastTickMs = now
+    }
+
+    /** Writes the accumulated usage time through to the store. */
+    private fun flushUsage() {
+        if (pendingUsageMs <= 0L) return
+        store.recordUsage(pendingUsageMs, dateKey())
+        pendingUsageMs = 0L
     }
 
     /**
@@ -145,6 +166,7 @@ class ContentCounter(private val context: Context) {
      * and attributed to the previously-foreground monitored app.
      */
     fun onProtectedForeground() {
+        flushUsage()
         usageActivePkg = null
     }
 
@@ -183,7 +205,10 @@ class ContentCounter(private val context: Context) {
     }
 
     /** Current counter snapshot (for the pull command). */
-    fun snapshot(): Map<String, Any?> = store.snapshot(dateKey())
+    fun snapshot(): Map<String, Any?> {
+        flushUsage() // pulls must see the accumulated-but-unwritten time
+        return store.snapshot(dateKey())
+    }
 
     /**
      * The bubble's appearance changed (pushed from Dart). Re-render the visible
@@ -196,6 +221,7 @@ class ContentCounter(private val context: Context) {
 
     /** Cleanup hook called from the service's onUnbind/onDestroy. */
     fun dispose() {
+        flushUsage()
         handler.removeCallbacks(dwellRunnable)
         handler.removeCallbacks(hideRunnable)
         bubble.hide()
@@ -244,6 +270,7 @@ class ContentCounter(private val context: Context) {
 
     private fun count(pkg: String) {
         if (!store.enabled) return
+        flushUsage() // the event's timeTodayMs must include the pending window
         store.recordCount(pkg, dateKey())
         val snap = store.snapshot(dateKey())
         val today = snap["today"] as? Int ?: 0
@@ -256,6 +283,10 @@ class ContentCounter(private val context: Context) {
                 "perAppToday" to snap["perAppToday"],
                 "perAppTotal" to snap["perAppTotal"],
                 "timeTodayMs" to (snap["timeTodayMs"] as? Long ?: 0L),
+                // Dart's stream mapper defaults missing flags to true — carry
+                // the real values so a streamed update can't corrupt them.
+                "enabled" to (snap["enabled"] as? Boolean ?: true),
+                "bubbleEnabled" to (snap["bubbleEnabled"] as? Boolean ?: true),
             ),
         )
         pushWidget(snap)
@@ -274,8 +305,7 @@ class ContentCounter(private val context: Context) {
 
     private fun now() = System.currentTimeMillis()
 
-    private fun dateKey(): String =
-        SimpleDateFormat("dd-MM-yyyy", Locale.US).format(System.currentTimeMillis())
+    private fun dateKey(): String = DateKeys.today()
 
     private companion object {
         /** A reel must be on screen this long to count as "watched" (anti-inflation). */
@@ -300,6 +330,9 @@ class ContentCounter(private val context: Context) {
          * and not counted (see [onAppActivity]).
          */
         const val USAGE_ACTIVE_GAP_MS = 12000L
+
+        /** Batch usage-time prefs writes to at most one per this interval. */
+        const val USAGE_FLUSH_MS = 5000L
 
         /**
          * Windows that must NOT be treated as a foreground-app change — our own

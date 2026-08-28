@@ -1,5 +1,11 @@
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:detoxo/core/constants/channel_constants.dart';
 import 'package:detoxo/core/platform/platform_capabilities.dart';
 import 'package:detoxo/core/platform_channels/engine_channel.dart';
+import 'package:detoxo/core/storage/local_store.dart';
+import 'package:detoxo/core/utils/app_logger.dart';
 import 'package:detoxo/features/blocking/shared/domain/entities/enums.dart';
 import 'package:detoxo/features/permissions/domain/entities/permission_status.dart';
 import 'package:detoxo/features/permissions/domain/repositories/permission_repository.dart';
@@ -8,10 +14,17 @@ import 'package:permission_handler/permission_handler.dart' as ph;
 
 /// Resolves permission status via the native channel (accessibility, overlay,
 /// usage, battery, device-admin) and permission_handler (notifications).
+///
+/// Reads are tri-state: a channel call that doesn't answer reads as
+/// [PermissionState.unknown] (after one retry), never as denied — and every
+/// successful check persists the granted set so the splash gate has a memory
+/// to fall back on. Without this, one flaky read at cold start re-opened the
+/// full permission setup wall for an already-set-up user.
 class PermissionRepositoryImpl implements PermissionRepository {
-  PermissionRepositoryImpl(this._channel);
+  PermissionRepositoryImpl(this._channel, this._store);
 
   final EngineChannel _channel;
+  final LocalStore _store;
 
   @override
   Future<List<PermissionStatus>> statuses() async {
@@ -23,6 +36,7 @@ class PermissionRepositoryImpl implements PermissionRepository {
     for (final p in AppPermission.values) {
       result.add(await status(p));
     }
+    _persistGranted(result);
     return result;
   }
 
@@ -34,28 +48,99 @@ class PermissionRepositoryImpl implements PermissionRepository {
     // Notifications is the one true runtime permission: it can be
     // permanently denied (don't-ask-again), which the settings-based ones can't.
     if (permission == AppPermission.notifications) {
-      final s = await ph.Permission.notification.status;
-      return PermissionStatus(
-        kind: permission,
-        state: s.isGranted
-            ? PermissionState.granted
-            : s.isPermanentlyDenied
-            ? PermissionState.permanentlyDenied
-            : PermissionState.denied,
-      );
+      try {
+        final s = await ph.Permission.notification.status;
+        return PermissionStatus(
+          kind: permission,
+          state: s.isGranted
+              ? PermissionState.granted
+              : s.isPermanentlyDenied
+              ? PermissionState.permanentlyDenied
+              : PermissionState.denied,
+        );
+      } on Object catch (e) {
+        // A plugin throw must read as "unknown" — an uncaught rejection here
+        // used to fail the splash's Future.wait and hang the app on the splash.
+        AppLogger.e('notification permission status failed', e);
+        return PermissionStatus(kind: permission); // state defaults to unknown
+      }
     }
-    final granted = switch (permission) {
-      AppPermission.accessibility => await _channel.isAccessibilityEnabled(),
-      AppPermission.overlay => await _channel.canDrawOverlays(),
-      AppPermission.usageAccess => await _channel.hasUsageAccess(),
-      AppPermission.batteryOptimization => await _channel.isIgnoringBattery(),
-      AppPermission.deviceAdmin => await _channel.isDeviceAdminActive(),
-      AppPermission.notifications => false, // handled above
-    };
+    var granted = await _read(permission);
+    if (granted == null) {
+      // One flaky channel read must not read as "denied". Retry once, then
+      // admit "unknown" and let the gate fall back to [lastKnownGranted].
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+      granted = await _read(permission);
+    }
     return PermissionStatus(
       kind: permission,
-      state: granted ? PermissionState.granted : PermissionState.denied,
+      state: switch (granted) {
+        true => PermissionState.granted,
+        false => PermissionState.denied,
+        null => PermissionState.unknown,
+      },
     );
+  }
+
+  Future<bool?> _read(AppPermission permission) => switch (permission) {
+    AppPermission.accessibility => _channel.invokeBoolOrNull(
+      ChannelMethods.isAccessibilityEnabled,
+    ),
+    AppPermission.overlay => _channel.invokeBoolOrNull(
+      ChannelMethods.canDrawOverlays,
+    ),
+    AppPermission.usageAccess => _channel.invokeBoolOrNull(
+      ChannelMethods.hasUsageAccess,
+    ),
+    AppPermission.batteryOptimization => _channel.invokeBoolOrNull(
+      ChannelMethods.isIgnoringBatteryOptimizations,
+    ),
+    AppPermission.deviceAdmin => _channel.invokeBoolOrNull(
+      ChannelMethods.isDeviceAdminActive,
+    ),
+    AppPermission.notifications => Future.value(false), // handled in status()
+  };
+
+  @override
+  Future<Set<AppPermission>> lastKnownGranted() async {
+    final byName = AppPermission.values.asNameMap();
+    return {for (final n in _readGrantedNames()) ?byName[n]};
+  }
+
+  /// Updates the persisted granted set: adds every granted, removes every
+  /// definitively denied, leaves unknown untouched. Fire-and-forget.
+  void _persistGranted(List<PermissionStatus> statuses) {
+    final known = <String>{..._readGrantedNames()};
+    var changed = false;
+    for (final s in statuses) {
+      if (s.state == PermissionState.granted) {
+        changed = known.add(s.kind.name) || changed;
+      } else if (s.state != PermissionState.unknown) {
+        changed = known.remove(s.kind.name) || changed;
+      }
+    }
+    if (changed) {
+      // Guarded: an IO failure (disk full) must log, not surface as an
+      // uncaught-zone error — and losing the write only means the granted-set
+      // memory stays one refresh stale.
+      unawaited(
+        _store
+            .write(StoreKeys.grantedPermissions, jsonEncode(known.toList()))
+            .catchError(
+              (Object e) => AppLogger.e('granted-set persist failed', e),
+            ),
+      );
+    }
+  }
+
+  List<String> _readGrantedNames() {
+    final raw = _store.read(StoreKeys.grantedPermissions);
+    if (raw == null) return const [];
+    try {
+      return (jsonDecode(raw) as List).cast<String>();
+    } on Object {
+      return const []; // corrupt blob: no memory beats a crash
+    }
   }
 
   @override

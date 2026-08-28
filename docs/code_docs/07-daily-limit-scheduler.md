@@ -177,16 +177,22 @@ this feature. The "scheduler" is entirely a **lazy, on-read date comparison**.
 ### `todaySignature()`
 
 ```dart
-// Device-local date signature, e.g. "07-06-2026".
-static String todaySignature() =>
-    DateFormat('dd-MM-yyyy').format(DateTime.now());
+// Device-local date signature for "today", e.g. "07-06-2026".
+String todaySignature() => daySignature(_clock());
 ```
 
-- Format is `dd-MM-yyyy` via `package:intl`.
-- It uses `DateTime.now()` — **device-local wall-clock time**, so the reset
-  boundary is the device's local midnight, and it honors whatever the device
-  reports (including manual clock changes and DST). There is no server time and
-  no monotonic guard.
+- An **instance method** on the cubit, delegating to the shared
+  **`daySignature(DateTime)`** helper (`lib/core/utils/day_signature.dart`) —
+  the single Dart definition of the `dd-MM-yyyy` day key (via `package:intl`),
+  which must always agree with the native engine's `DateKeys` format or
+  day-scoped counters drift at midnight. `StreakCubit` uses the same helper.
+- `_clock` is an **injectable clock** (`DailyLimitCubit(repo, {DateTime
+  Function()? clock})`, default `DateTime.now`) so tests can pin the
+  midnight-reset boundary (`test/daily_limit_rollover_test.dart`). In
+  production it is device-local wall-clock time — the reset boundary is the
+  device's local midnight, honoring whatever the device reports (including
+  manual clock changes and DST). There is no server time and no monotonic
+  guard.
 
 ### When the reset fires
 
@@ -213,7 +219,8 @@ unit-tested.
 
 ### `DailyLimitCubit extends Cubit<DailyLimit>`
 
-Initial state `const DailyLimit()`. Three methods:
+Initial state `const DailyLimit()`; the constructor takes the optional
+injectable `clock` (§4). Three methods:
 
 | Method | Behavior |
 |--------|----------|
@@ -236,7 +243,8 @@ day. Note the deliberate asymmetry: only `refreshed()` (a new day) clears
   (→ **5-minute steps**), with a draft (`_draftMinutes`) held in local
   `setState` until the user taps **Save limit**, which calls
   `setLimit(Duration(minutes: minutes.round()))`, clears the draft, and shows a
-  "Daily limit saved." `SnackBar`.
+  "Daily limit saved." **`GlassToast`** (success tone — the design system's
+  toast, not a raw `SnackBar`).
 - **InfoBanner** — see next section.
 
 Reached from **Settings** (`settings_screen.dart` → `context.push(Routes.dailyLimit)`)
@@ -354,11 +362,18 @@ states, so re-observes are cheap no-ops). The pure transition
   else reset (`base = lastDay==yesterday && !todayFailed ? count : 0`);
 - **gap / first run** → start fresh.
 
+`observe` computes "yesterday" with **calendar arithmetic** —
+`DateTime(now.year, now.month, now.day - 1)` — **not**
+`subtract(Duration(days: 1))`: that subtracts 24 h of absolute time, which on
+the day after a DST spring-forward (a 23 h day) lands two calendar days back
+and silently reset the streak once a year. Day signatures come from the shared
+`daySignature` helper (§4).
+
 Because "under limit" is only observed while the app is open, a fully skipped day
 resets the streak — standard streak behaviour, and consistent with the lazy
 date-rollover used for the limit itself (§4). Like the limit, it is a
 **display-only** metric — it never gates or blocks. Covered by
-`test/streak_test.dart`.
+`test/streak_test.dart` (including the DST spring-forward case).
 
 ---
 
@@ -373,6 +388,7 @@ date-rollover used for the limit itself (§4). Like the limit, it is a
 - `lib/features/limits/streak/domain/repositories/streak_repository.dart`
 - `lib/features/limits/streak/data/repositories/streak_repository_impl.dart`
 - `lib/features/limits/streak/presentation/streak_cubit.dart`
+- `lib/core/utils/day_signature.dart` (shared `dd-MM-yyyy` day-key helper — must agree with native `DateKeys`)
 - `lib/features/limits/limits.dart`
 - `lib/core/storage/local_store.dart` (`StoreKeys.dailyLimit = 'daily_limit'`, `StoreKeys.streak = 'daily_limit_streak'`)
 - `lib/core/di/injector.dart` (`DailyLimitRepository` + `StreakRepository` registrations)
@@ -382,4 +398,4 @@ date-rollover used for the limit itself (§4). Like the limit, it is a
 - `lib/main.dart` (global `DailyLimitCubit` + `StreakCubit` providers)
 - `lib/features/dashboard/presentation/dashboard_tab.dart` (reads `limit` for the ring; observes the under-limit streak and reads its `count`)
 - `lib/features/dashboard/presentation/widgets/command_center_card.dart` (the day-streak stat pill)
-- `test/domain_test.dart` (`DailyLimit reset` group) / `test/streak_test.dart` (streak transitions)
+- `test/domain_test.dart` (`DailyLimit reset` group) / `test/streak_test.dart` (streak transitions incl. the DST spring-forward day) / `test/daily_limit_rollover_test.dart` (cubit midnight reset via the injected clock)

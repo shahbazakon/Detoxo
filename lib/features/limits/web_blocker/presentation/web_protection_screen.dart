@@ -88,8 +88,9 @@ class _WebProtectionView extends StatelessWidget {
                 AppToggleTile(
                   title: 'Block adult content (18+)',
                   subtitle:
-                      'Blocks known adult sites in any browser, on top of '
-                      'your own blocklist.',
+                      'Blocks every page of 200+ known adult sites and every '
+                      '.xxx, .porn, .sex or .adult address — in any browser, '
+                      'on top of your own blocklist.',
                   leading: const IconBadge(
                     icon: Icons.shield_outlined,
                     color: AppColors.danger,

@@ -14,4 +14,11 @@ abstract interface class PinRepository {
   /// Wall-clock millis of the last native `ACTION_SCREEN_OFF` (0 = never seen
   /// this process). Drives [AutoLockTimeout.screenOff].
   Future<int> lastScreenOffMillis();
+
+  /// The device's monotonic clocks: `SystemClock.elapsedRealtime()` millis
+  /// plus the `Settings.Global.BOOT_COUNT` they belong to, or null off-Android
+  /// / on a channel error. Anchors the PIN lockout so a Settings clock change
+  /// cannot clear it (the boot count makes cross-boot readings detectable);
+  /// callers fall back to the wall clock on null.
+  Future<({int elapsedMs, int bootCount})?> monotonicNow();
 }

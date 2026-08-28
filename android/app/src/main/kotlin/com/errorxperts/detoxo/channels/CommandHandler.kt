@@ -23,16 +23,16 @@ import android.view.WindowManager
 import com.errorxperts.detoxo.MainActivity
 import com.errorxperts.detoxo.accessibility.DetoxoAccessibilityService
 import com.errorxperts.detoxo.admin.DetoxoDeviceAdminReceiver
+import com.errorxperts.detoxo.engine.AccessibilityCheck
 import com.errorxperts.detoxo.engine.ConfigStore
 import com.errorxperts.detoxo.engine.ContentCounterStore
+import com.errorxperts.detoxo.engine.DateKeys
 import com.errorxperts.detoxo.widget.ContentCounterWidgetProvider
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
-import java.text.SimpleDateFormat
-import java.util.Locale
 import java.util.concurrent.Executors
 
 /**
@@ -66,8 +66,15 @@ class CommandHandler(
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
         when (call.method) {
             "pushConfig" -> {
-                store.platformsConfigJson = call.argument<String>("json")
-                DetoxoAccessibilityService.instance?.reload()
+                // Fail-safe like pushWebBlocklist: an absent or malformed arg is
+                // a no-op, never a wipe — a nulled config parses to EMPTY, which
+                // kills both blocking and counting until the next good push.
+                call.argument<String>("json")?.let { json ->
+                    if (runCatching { JSONObject(json) }.isSuccess) {
+                        store.platformsConfigJson = json
+                        DetoxoAccessibilityService.instance?.reload()
+                    }
+                }
                 result.success(true)
             }
             "pushSettings" -> {
@@ -109,10 +116,15 @@ class CommandHandler(
             "pushWebBlocklist" -> {
                 // Fail-safe like pushProtectedApps: an absent or malformed arg
                 // is a no-op, never a wipe. Clearing requires an explicit "[]".
+                // An unchanged payload (every screen entry re-pushes) skips the
+                // prefs rewrite; a changed one swaps the rule set only — a full
+                // reload() re-parsed the 31 KB platforms config per site toggle.
                 call.argument<String>("json")?.let { json ->
-                    if (runCatching { JSONArray(json) }.isSuccess) {
+                    if (json != store.webBlocklistJson &&
+                        runCatching { JSONArray(json) }.isSuccess
+                    ) {
                         store.webBlocklistJson = json
-                        DetoxoAccessibilityService.instance?.reload()
+                        DetoxoAccessibilityService.instance?.refreshWebBlocklist()
                     }
                 }
                 result.success(true)
@@ -132,6 +144,20 @@ class CommandHandler(
                 }
                 result.success(true)
             }
+            "pushAppBlocklist" -> {
+                // Custom whole-app blocks. Same fail-safe contract as
+                // pushProtectedApps: absent/malformed arg = no-op (clearing
+                // requires an explicit empty list); an unchanged set skips the
+                // prefs rewrite and the service refresh.
+                call.argument<List<*>>("packages")?.let { list ->
+                    val next = list.filterIsInstance<String>().toSet()
+                    if (next != store.blockedAppPackages) {
+                        store.blockedAppPackages = next
+                        DetoxoAccessibilityService.instance?.refreshAppBlocklist()
+                    }
+                }
+                result.success(true)
+            }
             "consciousState" -> result.success(
                 DetoxoAccessibilityService.instance?.consciousSnapshot() ?: mapOf(
                     "bankMs" to store.consciousBankMs,
@@ -143,9 +169,11 @@ class CommandHandler(
             )
             "resetConsciousBank" -> {
                 // Explicit fresh-start reset, fired only on a genuine user entry
-                // to Conscious (auto-reverts keep the earned bank).
-                store.resetConsciousBank(System.currentTimeMillis())
-                DetoxoAccessibilityService.instance?.reload()
+                // to Conscious (auto-reverts keep the earned bank). The service
+                // hook (not a plain reload) also drops its cached/unflushed bank
+                // so the pending accrual can't resurrect the zeroed value.
+                store.resetConsciousBank()
+                DetoxoAccessibilityService.instance?.onConsciousBankReset()
                 result.success(true)
             }
             "armReelSession" -> {
@@ -225,8 +253,21 @@ class CommandHandler(
                 result.success(true)
             }
             "lastScreenOff" -> result.success(MainActivity.lastScreenOffMillis)
+            // Monotonic clocks: the PIN lockout anchor a Settings clock change
+            // cannot move; BOOT_COUNT makes a cross-boot reading detectable
+            // (elapsedRealtime alone restarts at 0 and is ambiguous).
+            "monotonicNow" -> result.success(
+                mapOf(
+                    "elapsedMs" to android.os.SystemClock.elapsedRealtime(),
+                    "bootCount" to try {
+                        Settings.Global.getInt(context.contentResolver, Settings.Global.BOOT_COUNT)
+                    } catch (_: Throwable) {
+                        -1
+                    },
+                ),
+            )
             "blockStats" -> {
-                val (today, total, date) = store.blockStats()
+                val (today, total, date) = store.blockStats(DateKeys.today())
                 result.success(mapOf("today" to today, "total" to total, "date" to date))
             }
             "contentCounterSnapshot" -> {
@@ -388,24 +429,9 @@ class CommandHandler(
         }
     }
 
-    private fun dateKey(): String =
-        SimpleDateFormat("dd-MM-yyyy", Locale.US).format(System.currentTimeMillis())
+    private fun dateKey(): String = DateKeys.today()
 
-    private fun isAccessibilityEnabled(): Boolean {
-        val component = ComponentName(context, DetoxoAccessibilityService::class.java)
-        // Most ROMs write the long form (pkg/pkg.Class), but some OEMs write the
-        // short form (pkg/.Class). Accept either — a false "not enabled" would
-        // send an already-granted user down the restricted-settings recovery flow.
-        val long = component.flattenToString()
-        val short = component.flattenToShortString()
-        val enabled = Settings.Secure.getString(
-            context.contentResolver,
-            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES,
-        ) ?: return false
-        return enabled.split(':').any {
-            it.equals(long, ignoreCase = true) || it.equals(short, ignoreCase = true)
-        }
-    }
+    private fun isAccessibilityEnabled(): Boolean = AccessibilityCheck.isEnabled(context)
 
     private fun hasUsageAccess(): Boolean {
         return try {

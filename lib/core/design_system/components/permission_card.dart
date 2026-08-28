@@ -16,6 +16,7 @@ class PermissionCard extends StatelessWidget {
     required this.granted,
     required this.onGrant,
     this.isRequired = false,
+    this.unknown = false,
     this.permanentlyDenied = false,
     this.actionLabel,
     super.key,
@@ -26,6 +27,11 @@ class PermissionCard extends StatelessWidget {
   final String why;
   final bool granted;
   final bool isRequired;
+
+  /// The status read didn't answer (channel hiccup) and there is no granted
+  /// history to fall back on — render a neutral "Checking…" row, not a red
+  /// denied state. Ignored when [granted] is true.
+  final bool unknown;
 
   /// When true the OS won't prompt again, so the action label becomes
   /// "Open settings" (its callback should route to the app's system settings).
@@ -88,6 +94,23 @@ class PermissionCard extends StatelessWidget {
                       ),
                       SizedBox(width: AppSpacing.xs),
                       Text('Granted'),
+                    ],
+                  )
+                else if (unknown)
+                  Row(
+                    children: [
+                      Icon(
+                        Icons.sync,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        size: 18,
+                      ),
+                      const SizedBox(width: AppSpacing.xs),
+                      Text(
+                        'Checking…',
+                        style: text.bodyMedium?.copyWith(
+                          color: Theme.of(context).colorScheme.onSurfaceVariant,
+                        ),
+                      ),
                     ],
                   )
                 else

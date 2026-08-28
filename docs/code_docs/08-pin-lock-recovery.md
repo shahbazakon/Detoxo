@@ -32,8 +32,8 @@ touches it only through `PinCubit`, the public barrel
 |-------|------|----------------|
 | domain / entity | `domain/entities/pin_config.dart` | `PinConfig` (persisted state) + `AutoLockTimeout` + `AutoLockPolicy` (resume re-lock) + `PinLockoutPolicy` (the ladder) |
 | domain / hashing | `domain/pin_hasher.dart` | `PinHasher` — salted SHA-256 for custom PINs |
-| domain / contract | `domain/repositories/pin_repository.dart` | `PinRepository` interface (load / save / secure-screen / screen-off query) |
-| data | `data/repositories/pin_repository_impl.dart` | secure-storage persistence, legacy plaintext migration, channel calls for FLAG_SECURE + screen-off |
+| domain / contract | `domain/repositories/pin_repository.dart` | `PinRepository` interface (load / save / secure-screen / screen-off + elapsed-realtime queries) |
+| data | `data/repositories/pin_repository_impl.dart` | secure-storage persistence, legacy plaintext migration, channel calls for FLAG_SECURE + screen-off + `monotonicNow()` (via `EngineChannel.monotonicNow`) |
 | presentation / state | `presentation/pin_cubit.dart` | `PinCubit` — setup, verify, lockout, biometrics |
 | presentation / gate | `presentation/pin_gate.dart` | `requirePin()` + `PinGuard` — how other features demand the PIN |
 | presentation / relock | `presentation/pin_auto_relock.dart` | `PinAutoRelock` — lifecycle observer that re-locks on resume |
@@ -61,25 +61,51 @@ repository round-trips to secure storage. Fields:
 | `secretLength` | `int` | digit count of a custom PIN — stored so the lock screen can draw the right number of dots and auto-submit **without ever holding the secret** |
 | `scopes` | `Set<PinScope>` | which sections the PIN guards |
 | `retryCount` | `int` | cumulative failed attempts (persisted, drives the ladder) |
-| `lockedUntil` | `DateTime?` | end of the current cooldown window (null = not locked) |
+| `lockedUntil` | `DateTime?` | end of the current cooldown window (null = not locked) — the **wall-clock leg** |
+| `lockoutElapsedUntilMs` | `int?` | monotonic (`elapsedRealtime`) expiry of the lockout (EVO-015) — the **monotonic leg** a Settings clock change can't move. Null on legacy configs / when the native clocks were unavailable |
+| `lockoutBootCount` | `int?` | the `Settings.Global.BOOT_COUNT` the monotonic leg was anchored in — the leg is trusted only while the live boot count still matches |
 | `biometricEnabled` | `bool` | whether fingerprint/face/device-credential unlock is allowed |
 | `autoLock` | `AutoLockTimeout` | resume re-lock timing (default `m1`); see §10 |
 | `secureScreen` | `bool` | FLAG_SECURE — hide in Recents + block screenshots (default `false`) |
 
-Derived getters:
+Derived getters / checks:
 
 - `isConfigured` → `type != PinType.none`.
-- `isLockedOut` → `lockedUntil != null && lockedUntil.isAfter(now)`.
+- `isLockedOut` → `lockedUntil != null && lockedUntil.isAfter(now)` — wall-clock
+  only, and now documented as the lock screen's **display approximation**
+  (countdown text, dialogs). Enforcement does **not** use it alone: a Settings
+  clock bump would defeat it.
+- **`lockoutRemainingAt(now, {elapsedMs, bootCount})`** — the clock-robust
+  truth (EVO-015), pure. The monotonic leg is authoritative **in both
+  directions while valid** — `monotonicLegValid` requires both readings
+  present, the lockout to carry a monotonic leg, and `bootCount ==
+  lockoutBootCount` (same boot, by identity — not a heuristic). Cross-boot or
+  null readings fall back to the wall clock (`lockedUntil`).
+  **`isLockedOutAt(...)`** is `lockoutRemainingAt(...) > Duration.zero`.
+  `ponytail:` reboot **plus** clock-forward together still clears a lockout —
+  the wall leg is all that survives a reboot; accepted ceiling.
+- **`PinCubit.reconciled(config, now, {elapsedMs, bootCount})`** — pure
+  reconciliation, driven by `reconcileLockout()` from `load()`, lock-screen
+  entry and `verify()`: an expired lockout (by the authoritative clock) is
+  cleared, and while the monotonic leg is valid a wall stamp that drifted >2s
+  from `now + remaining` is rewritten — so the lock screen's cheap wall-clock
+  rendering can never disagree with enforcement (a forward clock jump
+  re-shows the countdown instead of answering the correct PIN with
+  "Incorrect PIN"; a backward jump releases the keypad after the true
+  remaining time).
 - `guards(scope)` → `scopes.contains(scope)`.
 
 `copyWith` has one non-obvious parameter: **`clearLockout`**. Because `lockedUntil`
 is nullable, an ordinary `copyWith(lockedUntil: null)` can't distinguish "leave
-it" from "clear it", so passing `clearLockout: true` forces `lockedUntil = null`.
-This is how a successful verify wipes the cooldown.
+it" from "clear it", so passing `clearLockout: true` forces `lockedUntil = null`
+**and nulls both monotonic-leg fields**. This is how a successful verify wipes
+the cooldown.
 
 **JSON:** `toJson`/`fromJson` use each enum's `wire` token (`type` and each
-`scope`), and `lockedUntil` is stored as `millisecondsSinceEpoch`. This is the
-exact shape written under the secure key `pin_config`.
+`scope`), and `lockedUntil` is stored as `millisecondsSinceEpoch`;
+`lockoutElapsedUntilMs` / `lockoutBootCount` are **additive** int keys
+(older configs simply read them as null). This is the exact shape written under
+the secure key `pin_config`.
 
 ---
 
@@ -181,19 +207,35 @@ to a fresh `LocalAuthentication()`, injectable for tests). Registered app-wide (
 `verify(entry)` is the core:
 
 ```
-if (isLockedOut) return false;               // keypad is disabled anyway
+mono = lockedUntil == null ? null : await repo.monotonicNow()  // {elapsedMs, bootCount}?
+if (lockedUntil != null) reconcile-and-emit(reconciled(state, now, mono))   // realign display
+if (isLockedOutAt(now, mono)) return false;                    // clock-robust gate
 if (matches(config, entry, now)) { retryCount=0, clearLockout; save+emit; return true; }
-retries    = retryCount + 1;
-lockout    = PinLockoutPolicy.lockoutFor(retries);
-lockedUntil = lockout == null ? null : now + lockout;
-save+emit(retryCount: retries, lockedUntil);
+retries = retryCount + 1;
+lockout = PinLockoutPolicy.lockoutFor(retries);
+anchor  = lockout == null ? null : await repo.monotonicNow();  // lazy: common path pays nothing
+updated = config.copyWith(clearLockout: true)        // drop any STALE monotonic leg first
+            .copyWith(retryCount: retries,
+                      lockedUntil: lockout == null ? null : now + lockout,
+                      lockoutElapsedUntilMs: anchor == null ? null : anchor.elapsedMs + lockout,
+                      lockoutBootCount: anchor?.bootCount);
+save+emit(updated);
 return false;
 ```
 
+Enforcement therefore runs on `isLockedOutAt` with the native monotonic clock
+(EVO-015) — `isLockedOut` alone is wall-clock and a Settings clock bump would
+clear the ladder. A fresh lockout is **anchored to the monotonic clock** when
+the read answered; the `clearLockout`-first dance matters because an escalating
+lockout must never keep a *stale* monotonic leg (e.g. the elapsed read flaked
+to null this time) — an already-expired old anchor would override the fresh
+wall-clock lockout.
+
 `retryCount` is **cumulative and persisted** — it is only ever reset by a correct
-PIN or a completed recovery. Because both `retryCount` and `lockedUntil` live in
-secure storage, the escalation and any active cooldown **survive an app restart**;
-force-quitting during a lockout does not clear it.
+PIN or a completed recovery. Because both `retryCount` and `lockedUntil` (plus
+the monotonic legs) live in secure storage, the escalation and any active
+cooldown **survive an app restart**; force-quitting during a lockout does not
+clear it — and changing the device clock no longer does either.
 
 The match itself is `PinCubit.matches(config, entry, now)` — a static,
 clock-injected `@visibleForTesting` method (the repo's pure-logic idiom), so
@@ -463,6 +505,7 @@ gate.
 | Custom PIN storage | live — salted SHA-256, plaintext never persisted; legacy plaintext auto-migrated |
 | Date/Time PINs | live — clock-derived convenience locks, no stored secret |
 | Retry-lockout ladder | live — cumulative, persisted, survives restart |
+| Clock-robust lockout (EVO-015) | live — enforcement anchored to `elapsedRealtime` + `BOOT_COUNT`, with display reconciled to the monotonic truth on load / lock-screen entry / verify. Ceiling: reboot + clock-forward together still clears (only the wall leg survives a reboot) |
 | Biometric / device-credential unlock | live via `local_auth` (Android); bypasses the keypad lockout by design |
 | Smart Auto Lock (resume re-lock) | live — `never`/`immediately`/15 s/30 s/1 m/5 m/`screenOff`; default 1 minute |
 | Recents privacy (FLAG_SECURE) | live — opt-in toggle; also blocks screenshots (QA screenshots go black while on) |
@@ -495,6 +538,6 @@ gate.
 - `lib/core/navigation/routes.dart`, `lib/core/navigation/app_router.dart` (`/pin/setup`, `/pin/lock`)
 - `lib/app/splash_screen.dart` (launch gating)
 - `lib/features/settings/presentation/settings_screen.dart` (`requirePin` call sites)
-- `lib/core/constants/channel_constants.dart`, `lib/core/platform_channels/engine_channel.dart` (`setSecureScreen`, `lastScreenOff`)
+- `lib/core/constants/channel_constants.dart`, `lib/core/platform_channels/engine_channel.dart` (`setSecureScreen`, `lastScreenOff`, `monotonicNow`)
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/MainActivity.kt` (screen-off receiver)
-- `android/app/src/main/kotlin/com/errorxperts/detoxo/channels/CommandHandler.kt` (`setSecureScreen`, `lastScreenOff` branches)
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/channels/CommandHandler.kt` (`setSecureScreen`, `lastScreenOff`, `monotonicNow` branches)

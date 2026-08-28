@@ -149,15 +149,20 @@ can never self-toggle into a show/hide loop.
 
 ### 2.5 Fan-out on each count
 
-`count(pkg)` does four things:
+`count(pkg)` does five things:
 
-1. `store.recordCount(pkg, dateKey())` — persist.
-2. Emit the `contentCounted` event on `ServiceEventBus` (see §4).
-3. `pushWidget(snapshot)` — throttled to `WIDGET_MIN_INTERVAL_MS = 1000ms` so a
+1. `flushUsage()` — settle the batched usage window first, so the event's
+   `timeTodayMs` includes the accumulated-but-unwritten time.
+2. `store.recordCount(pkg, dateKey())` — persist.
+3. Emit the `contentCounted` event on `ServiceEventBus` (see §4).
+4. `pushWidget(snapshot)` — throttled to `WIDGET_MIN_INTERVAL_MS = 1000ms` so a
    burst of counts can't hammer the launcher.
-4. If the bubble is enabled and visible, `bubble.onCounted(today)` (springy pop).
+5. If the bubble is enabled and visible, `bubble.onCounted(today)` (springy pop).
 
-The emitted `contentCounted` payload also carries `timeTodayMs` (§2.6, §4).
+The emitted `contentCounted` payload also carries `timeTodayMs` (§2.6, §4) and
+the real `enabled` / `bubbleEnabled` flags — Dart's stream mapper defaults
+missing flags to `true`, which used to corrupt the toggles' state on a streamed
+update.
 
 ### 2.6 Whole-app usage-time accrual (`onAppActivity`)
 
@@ -172,9 +177,14 @@ per-package throttle.
 `onAppActivity` accrues the gap between consecutive events from the **same**
 monitored app, but only when that gap is under `USAGE_ACTIVE_GAP_MS = 12000ms`; a
 longer silence (screen off / user away → no events) starts a fresh window and is
-not counted, and a switch to a different package restarts the window. Each accrued
-delta is persisted via `store.recordUsage(deltaMs, dateKey())` into `cc_time_today`
-/ `cc_time_total` (§3).
+not counted, and a switch to a different package restarts the window. Accrued
+deltas are **batched in memory** (`pendingUsageMs`) and flushed via
+`store.recordUsage(pendingMs, dateKey())` into `cc_time_today` /
+`cc_time_total` (§3) at `USAGE_FLUSH_MS = 5000ms`, on app switch, on
+protected-app foreground, on every snapshot pull, and on dispose — previously
+one SharedPreferences write per accessibility event at scroll frequency.
+Ceiling: ≤ 5 s of usage lost on a hard process kill, and a flush straddling
+midnight attributes up to the pending window to the wrong day.
 
 > **Known ceiling (`ponytail:`).** This counts active, event-bearing time and
 > deliberately **undercounts truly passive, event-quiet playback** (a silent long
@@ -255,10 +265,13 @@ so a bubble edit doesn't re-push the widget style and vice-versa.
 Emitted on every counted reel:
 
 ```
-{ type: "contentCounted", package, today, total, perAppToday, perAppTotal, timeTodayMs }
+{ type: "contentCounted", package, today, total, perAppToday, perAppTotal,
+  timeTodayMs, enabled, bubbleEnabled }
 ```
 
-`timeTodayMs` is today's whole-app usage time (§2.6). The `contentCounterSnapshot`
+`timeTodayMs` is today's whole-app usage time (§2.6). `enabled` /
+`bubbleEnabled` carry the real toggle values because Dart's stream mapper
+defaults missing flags to `true`. The `contentCounterSnapshot`
 pull reply additionally carries `timeTotalMs`; no new method/event name was added.
 
 `ContentCounterRepositoryImpl.watch()` yields an initial pull, then re-maps each
@@ -274,8 +287,20 @@ pull reply additionally carries `timeTotalMs`; no new method/event name was adde
   service. All view ops run on the main `Looper`.
 - `WindowManager` overlay: `TYPE_APPLICATION_OVERLAY` (API 26+) with a
   `TYPE_PHONE` fallback pre-O; flags `NOT_FOCUSABLE | NOT_TOUCH_MODAL |
-  LAYOUT_NO_LIMITS`. **Silently no-ops without `Settings.canDrawOverlays`** —
-  counting still works, only the overlay is skipped.
+  LAYOUT_NO_LIMITS`. **No-ops without `Settings.canDrawOverlays`** — counting
+  still works, only the overlay is skipped, and a once-per-process `Log.w`
+  ("bubble suppressed: overlay permission missing") leaves a trace so a revoked
+  grant doesn't read as "the counter stopped".
+- **Steady-state fast path + revoke recovery**: `show()` checks
+  `shown && view.isAttachedToWindow` *before* the `canDrawOverlays` binder
+  call, so the per-detection IPC is gone while the window is alive — and the
+  attach check is what makes a **revoke → re-grant** re-attach the bubble
+  instead of updating a detached view forever (the OS removes the window on
+  revoke but the fields survive). A detached-but-tracked view is torn down via
+  the private `detach()` (shared with `hide()`) before re-adding.
+- **Day key**: the bubble's `dateKey()` uses the shared engine
+  `DateKeys.today()` (its private `SimpleDateFormat` was the last holdout;
+  the shared formatter is timezone-change correct).
 - **Draggable + edge-snapping**: drag past touch-slop moves it; on release it
   springs (`ValueAnimator`, 240ms) to the nearest horizontal edge and persists
   `cc_bubble_x/y`. Position is clamped on-screen and restored across shows /
@@ -377,7 +402,9 @@ background, reached from the drawer and Settings. There is no longer a standalon
   and exposes `setEnabled` and `refresh()` — a `refresh()` re-pulls the snapshot
   so `timeToday` is fresh on demand (usage time advances between counted reels,
   which the `contentCounted` stream doesn't emit; the dashboard hero calls it on
-  mount and on pull-to-refresh). It is provided globally in `lib/main.dart` so the
+  mount and on pull-to-refresh, and `AppResumeSync` calls it on **every app
+  resume** — the day-rollover repair for a dashboard kept in recents across
+  midnight). It is provided globally in `lib/main.dart` so the
   dashboard ring can watch it.
 - **UI**: `ReelCounterCard` (hero count-up card with today / all-time toggle and
   an animated per-app breakdown; reduce-motion safe) — shown on the **Activity**
@@ -442,7 +469,8 @@ background, reached from the drawer and Settings. There is no longer a standalon
   anything is watched.
 - `HomeWidgetScreen` — background carousel, theme/density segmented controls,
   line toggles, `accentByUsage`, and an "Add to home screen" button
-  (`pin` → `refresh`, with a launcher-unsupported fallback message).
+  (`pin` → `refresh`; the confirm / launcher-unsupported fallback message is a
+  `GlassToast`, not a raw `SnackBar`).
 - Both drive `CounterAppearanceCubit`; the pinned Flutter previews
   (`BubblePreview`, `WidgetPreview`, `VariantCarousel`) mirror the native render,
   and — because the cubit's debounced push live re-renders native — any on-screen

@@ -229,6 +229,22 @@ void main() {
       await engine.reelController.close();
     });
 
+    test(
+      'resync pushes the repository truth, not the stale in-memory state',
+      () async {
+        await cubit.bootstrap();
+        // The Web Blocker's protection toggles write the repository directly.
+        await settings.save(
+          (await settings.load()).copyWith(blockAdultWebsites: true),
+        );
+
+        await cubit.resync();
+
+        expect(engine.pushed.last.blockAdultWebsites, isTrue);
+        expect(cubit.state.blockAdultWebsites, isTrue);
+      },
+    );
+
     test('startPause sets Block All with a live pause window', () async {
       await cubit.startPause(pause: const Duration(minutes: 5));
       expect(cubit.state.activePlan, BlockingPlan.blockAll);
@@ -415,6 +431,9 @@ class _FakeEngineRepo implements EngineRepository {
 
   @override
   Future<void> pushProtectedApps(List<String> packages) async {}
+
+  @override
+  Future<void> pushAppBlocklist(List<String> packages) async {}
 
   @override
   Stream<ServiceSnapshot> statusStream() => const Stream.empty();

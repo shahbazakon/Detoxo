@@ -42,6 +42,7 @@ Return coercion helpers (define the default a failed/absent call yields):
 | Helper | On success | On null/error |
 |---|---|---|
 | `invokeBool` | the `bool` | `false` |
+| `invokeBoolOrNull` | the `bool` | `null` — **tri-state**: null means "the call didn't answer" (channel error / no native side), *not* "the OS said no". Permission checks use this so one flaky read can't masquerade as a revoked grant ([13](13-onboarding-permissions.md) §3.2) |
 | `invokeVoid` | — | — (fire-and-forget) |
 | `invokeMap`  | `Map<String,dynamic>` | `{}` (empty map) |
 | raw `_invoke<List>` (installedPackages) | the list | `null` |
@@ -62,10 +63,11 @@ Method-name constants live in `ChannelMethods` (Dart) and are matched by string 
 
 | Method | Args | Native effect | Returns | Dart wrapper |
 |---|---|---|---|---|
-| `pushConfig` | `{json: String}` | `store.platformsConfigJson = json`; `service.reload()` | `true` | `pushConfig(String json)` |
+| `pushConfig` | `{json: String}` | fail-safe: a null arg or one failing a `JSONObject` parse is a **no-op** (never a config wipe — a nulled config parses to `EMPTY` and kills blocking *and* counting), else `store.platformsConfigJson = json`; `service.reload()` | `true` | `pushConfig(String json)` |
 | `pushSettings` | settings map (see below) | applies each present key to `ConfigStore`; `service.reload()` | `true` | `pushSettings(Map settings)` |
-| `pushWebBlocklist` | `{json: String}` | fail-safe like `pushProtectedApps`: null / non-JSON-array arg is a **no-op** (never a wipe; clearing needs an explicit `"[]"`), else `store.webBlocklistJson = json`; `service.reload()` | `true` | `pushWebBlocklist(String json)` |
+| `pushWebBlocklist` | `{json: String}` | fail-safe like `pushProtectedApps`: null / non-JSON-array arg is a **no-op** (never a wipe; clearing needs an explicit `"[]"`), an **unchanged** payload (every Web Blocker screen entry re-pushes) skips everything, else `store.webBlocklistJson = json` + `service.refreshWebBlocklist()` (rule set only — no config re-parse) | `true` | `pushWebBlocklist(String json)` |
 | `pushProtectedApps` | `{packages: List<String>}` | set-if-changed: absent/malformed arg is a **no-op** (never a wipe), unchanged set skips everything, changed set → `store.protectedPackages` + `service.refreshProtectedPackages()` (no full `reload()`) | `true` | `pushProtectedApps(List<String> packages)` |
+| `pushAppBlocklist` | `{packages: List<String>}` | same contract as `pushProtectedApps`: absent/malformed arg = **no-op** (clearing needs an explicit empty list), unchanged set skips everything, changed set → `store.blockedAppPackages` + `service.refreshAppBlocklist()` | `true` | `pushAppBlocklist(List<String> packages)` |
 
 **`pushConfig` payload** — `json` is the full `platforms_config.json` string
 (featuredApps → platforms → detectors), parsed natively by `DetectionConfig`.
@@ -103,11 +105,25 @@ minimal: app names and categories never cross the channel — native only needs
 "is this package protected". Pushed by `ProtectedAppsCubit` on every list change
 and by `syncProtectedAppsAtBoot` at splash.
 
+**`pushAppBlocklist` payload** — `packages` is a flat list of the **enabled**
+custom whole-app-block package names, built by `syncAppBlocklist`
+(`lib/features/limits/app_blocker/domain/app_block_sync.dart`) from persisted
+state; a failed load aborts the push (native keeps its last-good set). The
+service HOME-bounces any event from one of these packages (see
+[06-app-and-web-blocker.md](06-app-and-web-blocker.md)). Pushed on every App
+Blocker mutation, at splash, and by the resume re-sync heavy leg.
+
 ### Permission queries & launches
 
 Each `is*/has*/canDrawOverlays` returns a `Boolean`; each `open*/request*` launches
 a system settings/consent intent and returns a `Boolean` = *launch succeeded*
 (true if `startActivity` didn't throw — **not** whether the user granted it).
+The boolean permission **queries** (`hasUsageAccess`,
+`isIgnoringBatteryOptimizations`, `isDeviceAdminActive`) have **no
+`EngineChannel` convenience wrapper** — the permission repository reads them
+tri-state via `invokeBoolOrNull(method)` directly, so a channel hiccup reads as
+`unknown`, never as "revoked" (the old bool-coercing wrappers were deleted as
+orphans).
 
 | Method | Args | Returns | Dart wrapper |
 |---|---|---|---|
@@ -116,11 +132,11 @@ a system settings/consent intent and returns a `Boolean` = *launch succeeded*
 | `openAccessibilitySettings` | — | `Boolean` | `openAccessibilitySettings()` |
 | `canDrawOverlays` | — | `Boolean` (`Settings.canDrawOverlays`) | `canDrawOverlays()` |
 | `requestOverlayPermission` | — | `Boolean` | `requestOverlay()` |
-| `hasUsageAccess` | — | `Boolean` (`AppOpsManager` GET_USAGE_STATS) | `hasUsageAccess()` |
+| `hasUsageAccess` | — | `Boolean` (`AppOpsManager` GET_USAGE_STATS) | *(none — read tri-state via `invokeBoolOrNull` from the permission repository)* |
 | `openUsageAccessSettings` | — | `Boolean` | `openUsageAccess()` |
-| `isIgnoringBatteryOptimizations` | — | `Boolean` | `isIgnoringBattery()` |
-| `requestIgnoreBatteryOptimizations` | — | `Boolean` (launches `ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS` — the list, **not** the permission-gated one-tap dialog) | `requestIgnoreBattery()` |
-| `isDeviceAdminActive` | — | `Boolean` | `isDeviceAdminActive()` |
+| `isIgnoringBatteryOptimizations` | — | `Boolean` | *(none — read tri-state via `invokeBoolOrNull` from the permission repository)* |
+| `requestIgnoreBatteryOptimizations` | — | `Boolean` (launches `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` with the package Uri — the one-tap exemption dialog; the manifest holds `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`) | `requestIgnoreBattery()` |
+| `isDeviceAdminActive` | — | `Boolean` | *(none — read tri-state via `invokeBoolOrNull` from the permission repository)* |
 | `requestDeviceAdmin` | — | `Boolean` (launches `ACTION_ADD_DEVICE_ADMIN`) | `requestDeviceAdmin()` |
 | `removeDeviceAdmin` | — | `true` (removes active admin; swallows errors) | `removeDeviceAdmin()` |
 
@@ -159,6 +175,7 @@ the accessibility service.
 |---|---|---|---|---|
 | `setSecureScreen` | `{enabled: bool}` | add/clear `FLAG_SECURE` on the activity window (hide in Recents + block screenshots); no-op if no activity attached | `true` | `setSecureScreen({required bool enabled})` |
 | `lastScreenOff` | — | `MainActivity.lastScreenOffMillis` — wall-clock stamp of the last `ACTION_SCREEN_OFF` this process (0 = never) | `Long` | `lastScreenOff()` → `Future<int>` (0 off-Android) |
+| `monotonicNow` | — | The monotonic clocks — immune to Settings clock changes; anchor the PIN lockout (EVO-015). `bootCount` makes a cross-boot reading detectable (`-1` when `BOOT_COUNT` is unreadable) | `Map {elapsedMs: Long, bootCount: Int}` | `monotonicNow()` → `Future<({int elapsedMs, int bootCount})?>` (`null` off-Android / channel error / bootCount < 0 — callers fall back to the wall clock) |
 
 ### One Reel / Unblock session control
 
@@ -186,7 +203,7 @@ ran from a Conscious base) keeps the earned bank; only a genuine user entry empt
 
 | Method | Args | Native effect | Returns | Dart wrapper |
 |---|---|---|---|---|
-| `resetConsciousBank` | — | `store.resetConsciousBank(now)` (bank→0, anchor→now); `service.reload()` | `true` | `resetConsciousBank()` |
+| `resetConsciousBank` | — | `store.resetConsciousBank()` (no-arg; bank→0 — the tick anchor is runtime-only in the service); then `service.onConsciousBankReset()` (drops the cached bank + pending unflushed accrual, `reload()`) | `true` | `resetConsciousBank()` |
 
 Fired only by `SettingsCubit.enterConscious()` (Dart), which `await`s it right after
 setting the plan to `CURIOUS`.
@@ -195,7 +212,7 @@ setting the plan to `CURIOUS`.
 
 | Method | Args | Returns (map shape) | Dart wrapper |
 |---|---|---|---|
-| `blockStats` | — | `{today: Int, total: Int, date: String}` | `blockStats() → Map` |
+| `blockStats` | — | `{today: Int, total: Int, date: String}` — `date` is today's `dd-MM-yyyy` key (`DateKeys.today()`); `ConfigStore.blockStats(dateKey)` does **read-time day rollover**, so after midnight `today` reads `0` before the day's first block instead of yesterday's number | `blockStats() → Map` |
 | `consciousState` | — | `{bankMs: Long, maxBankMs: Long, watching: Bool, blocked: Bool, active: Bool}` | `consciousState() → Map` |
 | `contentCounterSnapshot` | — | `{enabled: Bool, bubbleEnabled: Bool, today: Int, total: Int, date: String, perAppToday: Map<String,Int>, perAppTotal: Map<String,Int>, timeTodayMs: Long, timeTotalMs: Long, bubbleStyle: String, widgetStyle: String}` | `contentCounterSnapshot() → Map` |
 | `deviceInfo` | — | `{brand, manufacturer, model, sdkInt}` | *(no Dart wrapper)* |
@@ -245,20 +262,14 @@ as JSON and re-renders.
   `lib/features/content_counter/home_content_counter/domain/entities/widget_style.dart`):
   `{background: String, theme: String, density: String, showToday: bool, showLabel: bool, showTotal: bool, accentByUsage: bool}`
 
-### Declared-but-unhandled methods
+Every `ChannelMethods` constant now has a native `when` arm — the dead
+declared-but-unhandled constants (`showOverlay`, `hideOverlay`,
+`foregroundPackage`) were **deleted**: no callers, no native branches. An
+unknown method still hits `else -> result.notImplemented()` → a
+`PlatformException` that `EngineChannel._invoke` swallows to `null`.
 
-These constants exist in `ChannelMethods` but `CommandHandler` has **no `when`
-branch** for them, so they hit `else -> result.notImplemented()` → a
-`PlatformException` that `EngineChannel._invoke` swallows to `null`. They also have
-**no Dart convenience wrapper**. Treat them as reserved / planned:
-
-- `showOverlay`, `hideOverlay` — overlay control is currently driven internally by
-  the engine (one-reel grace overlay, counter bubble), not via these commands.
-- `foregroundPackage` — no native handler; foreground info is not exposed as a
-  pull command.
-
-(`deviceInfo` is the inverse case: handled natively but no Dart wrapper — callable
-only via a raw `invokeMap('deviceInfo')`.)
+(`deviceInfo` is the one asymmetry: handled natively but no Dart wrapper —
+callable only via a raw `invokeMap('deviceInfo')`.)
 
 ---
 
@@ -268,36 +279,45 @@ One multiplexed stream. Native posts through
 `ServiceEventBus.post(type, data)` (`android/.../engine/ServiceEventBus.kt`), which
 merges `data` with `{"type": type}` and delivers on the main thread **only while a
 sink is registered** — i.e. while Dart is listening (`DetoxoEventStream.onListen`
-sets the sink; `onCancel` clears it). With the UI dead, events are dropped; the
-block hot-path never depends on Dart.
+sets the sink; `onCancel` clears it only if it is still the sink that instance
+installed, so engine recreation can't null a live listener's sink). With the UI
+dead, events are dropped; the block hot-path never depends on Dart. **Exception:
+the last `serviceStatus` payload is sticky** — recorded even with no sink and
+replayed to a late subscriber by `onListen` (`replayLastStatus()`), so a cold
+start where `onServiceConnected` beats the Dart subscription still sees
+`running:true`.
 
 Dart side: `EngineChannel.events()` maps each payload to
 `Map<String,dynamic>`, is a broadcast stream, and multiplexes on the `type` field.
-Repositories filter by `e['type'] == ChannelEvents.<x>`.
+Repositories filter by `e['type'] == ChannelEvents.<x>`. The stream is
+**self-healing**: if the underlying EventChannel stream closes (native engine
+detach/recreation), it re-subscribes after 1 s — cubits hold process-lifetime
+subscriptions, and a silent close would otherwise freeze live counters and
+status forever.
 
 Every payload carries `type` plus the fields below.
 
 | `type` | Emitted by | Payload (beyond `type`) | Dart consumer |
 |---|---|---|---|
 | `serviceStatus` | `DetoxoAccessibilityService` (connect / interrupt / unbind) | `{running: Bool}` | `engine_repository_impl.dart` |
-| `blocked` | `DetoxoAccessibilityService.onDetected` | `{package: String, platformId: String, mode: String, today: Int, total: Int}` | `engine_repository_impl.dart` (status + block history) |
-| `webBlocked` | `DetoxoAccessibilityService.handleBrowser` | `{host: String, mode: "PRESS_BACK", today: Int, total: Int}` | `web_block_stats_repository_impl.dart` |
+| `blocked` | `DetoxoAccessibilityService.onDetected` / `onAppBlocked` | `{package: String, platformId: String, mode: String, today: Int, total: Int}` | `engine_repository_impl.dart` (status + block history) |
+| `webBlocked` | `DetoxoAccessibilityService.handleBrowser` | `{source: "RULE" \| "ADULT", mode: "PRESS_BACK", today: Int, total: Int, host?: String}` — `host` only for `RULE` hits; adult-list blocks are counted, never named (EVO-018) | `web_block_stats_repository_impl.dart` |
 | `consciousState` | `DetoxoAccessibilityService` (1 Hz accountant) | `{bankMs: Long, maxBankMs: Long, watching: Bool, blocked: Bool, active: Bool}` | `engine_repository_impl.dart` |
 | `reelSessionState` | `DetoxoAccessibilityService` (One Reel / Unblock allow/block/arm) | `{consumed: Int, allowance: Int, blocked: Bool, active: Bool}` | `engine_repository_impl.dart` |
-| `contentCounted` | `ContentCounter.count` | `{package: String, today: Int, total: Int, perAppToday: Map<String,Int>, perAppTotal: Map<String,Int>, timeTodayMs: Long}` | `content_counter_repository_impl.dart` |
+| `contentCounted` | `ContentCounter.count` | `{package: String, today: Int, total: Int, perAppToday: Map<String,Int>, perAppTotal: Map<String,Int>, timeTodayMs: Long, enabled: Bool, bubbleEnabled: Bool}` | `content_counter_repository_impl.dart` |
 
 `mode` on `blocked` is the resolved block mode: `PRESS_BACK` \| `KILL_APP` \|
-`LOCK_SCREEN` \| `NONE`. `consciousState.watching`/`blocked` are AND-ed with "plan
+`LOCK_SCREEN` \| `NONE` — or `HOME` with `platformId: "app_block"` for a custom
+whole-app block (`onAppBlocked`), which records to the same today/total counters.
+`contentCounted` carries `enabled`/`bubbleEnabled` because Dart's stream mapper
+defaults missing flags to `true` — a streamed update without the real values
+used to corrupt the toggles' state. `consciousState.watching`/`blocked` are AND-ed with "plan
 is `CURIOUS`" (the Conscious plan); `reelSessionState.blocked`/`active` are AND-ed
 with "plan is `ONE_REEL`" (`blocked = active && consumed >= allowance`).
 
-### Declared-but-inert event types
-
-`ChannelEvents` also declares `detection` and `foregroundChanged`. As of this
-source there is **no native emitter** (`ServiceEventBus.post` is never called with
-those strings) and **no Dart consumer**. They are reserved constants — a diagnostic
-"raw detection" stream and a foreground-app-change stream are the obvious planned
-uses. Do not assume they fire.
+Every `ChannelEvents` constant has a live native emitter — the inert reserved
+constants (`detection`, `foregroundChanged`) were **deleted**: no native emitter
+ever posted them and no Dart consumer read them.
 
 ---
 
@@ -327,17 +347,17 @@ source of truth**), so these `home_widget` calls only trigger a refresh/pin — 
 - **2 channels**: commands (Method) + events (Event), both under
   `com.errorxperts.detoxo/*`, wired in `MainActivity`.
 - **Commands**: string-dispatched in `CommandHandler`; returns are `Boolean`
-  (queries/launches/actions), `true` (fire-and-forget mutations), a map
-  (stats/snapshots/deviceInfo), or a `List`/`null` (installedPackages). Three
-  declared methods (`showOverlay`, `hideOverlay`, `foregroundPackage`) are
-  unhandled → `notImplemented`.
-- **Events**: 6 live types multiplexed by `type`; 2 declared-but-inert
-  (`detection`, `foregroundChanged`).
+  (queries/launches/actions), `true` (fire-and-forget mutations), a `Long`
+  (`lastScreenOff`), a map (stats/snapshots/deviceInfo/`monotonicNow`), or
+  a `List`/`null` (installedPackages). Every declared constant has a native
+  arm; unknown methods → `notImplemented`.
+- **Events**: 6 live types multiplexed by `type`; every declared constant has
+  a native emitter.
 - **Widget**: separate `home_widget` bridge, keys `cc_today`/`cc_total`, provider
   `ContentCounterWidgetProvider`, native store is source of truth.
 
-See also [03-detection-engine.md](03-detection-engine.md) for how `blocked` /
-`detection` are produced, and the content-counter engine doc for `contentCounted`
+See also [03-detection-engine.md](03-detection-engine.md) for how `blocked` is
+produced, and the content-counter engine doc for `contentCounted`
 and the bubble/widget surfaces.
 
 ## Source files

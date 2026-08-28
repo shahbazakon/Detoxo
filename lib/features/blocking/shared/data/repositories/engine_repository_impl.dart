@@ -144,6 +144,10 @@ class EngineRepositoryImpl implements EngineRepository {
       _channel.pushProtectedApps(packages);
 
   @override
+  Future<void> pushAppBlocklist(List<String> packages) =>
+      _channel.pushAppBlocklist(packages);
+
+  @override
   Future<void> performBack() => _channel.performBack();
 
   @override

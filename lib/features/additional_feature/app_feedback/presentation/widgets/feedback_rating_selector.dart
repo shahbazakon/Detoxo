@@ -22,8 +22,11 @@ class FeedbackRatingSelector extends StatelessWidget {
         for (var star = 1; star <= 5; star++)
           IconButton(
             padding: EdgeInsets.zero,
-            visualDensity: VisualDensity.compact,
-            constraints: const BoxConstraints(minWidth: 34, minHeight: 34),
+            // 48dp targets + a label per star: icon-only controls are
+            // otherwise invisible to TalkBack and hard to hit.
+            constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+            tooltip: star == rating ? 'Clear rating' : 'Rate $star of 5 stars',
+            isSelected: star <= rating,
             onPressed: () => onChanged(star == rating ? 0 : star),
             icon: Icon(
               star <= rating ? Icons.star_rounded : Icons.star_border_rounded,

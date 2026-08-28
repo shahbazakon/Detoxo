@@ -30,7 +30,7 @@ by the `../info_docs/` set.
 | Pause | Clock-based window (`pauseUntil`) that suspends blocking | ✅ |
 | Content counter | Side-effect-free counting pass (decoupled from blocking) → overlay bubble + home-screen widget | ✅ Native, on by default |
 | Blocklist | Data-driven from bundled `platforms_config.json`; install-aware | ✅ |
-| App blocker / Web blocker / Daily limit | UI + persistence; web host matching runs natively | ✅ UI + persistence; native app/usage enforcement is a follow-up (v1 native engine focuses on the reel/short + web-host path) |
+| App blocker / Web blocker / Daily limit | Custom whole-app blocks (HOME bounce) and web host matching run natively; daily limit is UI + persistence | ✅ App + web enforced natively; native usage/daily-limit enforcement is the remaining follow-up |
 | Access protection (PIN) | PIN setup/lock/recovery, biometric, retry lockout | ✅ (`local_auth` + secure storage) |
 | Permissions funnel | Accessibility, overlay, usage access, battery exemption, device admin | ✅ (Android-only) |
 | Premium / entitlement | Modeled; unlocked via a **local dev-unlock** (Settings → Developer) | ⚠️ No live Play Billing (swap-in) |
@@ -152,8 +152,12 @@ resolving its repository from the locator `sl`:
 
 `SettingsCubit` doubles as the app's appearance source: a `BlocSelector` drives
 theme mode + ambient background, and a `BlocListener` mirrors the vibration
-preference into `AppHaptics`. The tree then renders `MaterialApp.router` wired to
-the go_router config.
+preference into `AppHaptics`. The tree then renders `AppResumeSync` →
+`PinAutoRelock` → `MaterialApp.router` wired to the go_router config.
+`AppResumeSync` (`lib/app/app_resume_sync.dart`) re-runs the Dart↔native syncs
+on every app resume — cheap refreshes (permissions, service status, counter,
+settings re-push) every time, the heavy config/blocklist re-push at most every
+15 min (see [12-analytics-notifications-resilience.md](12-analytics-notifications-resilience.md) §3.2).
 
 ### 2. Dependency injection — `lib/core/di/injector.dart`
 
@@ -189,7 +193,10 @@ After first frame, `_bootstrap()` awaits **only what the gating below reads** �
 awaited **only on first run**, where its installed-defaults are needed to seed
 the enabled-platform set; on every later launch it is fire-and-forgotten so it
 still pushes config to native without holding the splash. A home-widget refresh
-with the latest counter snapshot is likewise fire-and-forget. Then it routes:
+with the latest counter snapshot and the blocklist drift repair
+(`syncEngineBlocklists()` from `lib/app/engine_sync.dart` — the shared
+protected-apps + web-blocklist + app-blocklist push, also the resume path's
+heavy leg) are likewise fire-and-forget. Then it routes:
 
 ```
 onboarding  →  PIN lock  →  permissions  →  home
@@ -212,6 +219,18 @@ analytics, content-counter appearance) are reached via routes.
 `ProtectionStatusCard` → `BlockerSection`. The house split is that a section
 needing cubits stays inline in `dashboard_tab.dart` as a private `_Xxx` widget
 while its presentational half lives in `presentation/widgets/`.
+
+Two rebuild/state notes on the dashboard (EVO-014 + polish):
+
+- `ProtectionStatusCard` renders `ServiceStatus.unknown` (the cold-start
+  default of `ServiceSnapshot` — the status read simply hasn't answered) as a
+  **neutral "Protection Status / Checking…" card**, not the danger "Protection
+  off" card; the next refresh (resume/stream) settles it. A scare card that
+  cries wolf on every hiccup teaches the user to ignore the real one.
+- The `_Hero`'s Conscious countdown uses `context.select` on a **record of the
+  four displayed fields** so the 1 Hz Conscious tick doesn't rebuild the whole
+  hero, and the Conscious session banner is extracted into a private
+  `_ConsciousBanner` widget so that tick rebuilds only that tile.
 
 `ModeSelector` (`presentation/widgets/mode_selector.dart`) is the horizontally
 scrolling strip of five mode pills. Each pill is an illustration "coin" over its
@@ -315,16 +334,19 @@ short-circuit to safe defaults and the event stream is `Stream.empty()`, so
 screens render with sane defaults instead of throwing `MissingPluginException`.
 On iOS/web the router surfaces `UnsupportedScreen`.
 
-### The native engine is a bound service, not a foreground service
+### The native engine is a bound service run as a foreground service
 
 There is **no separate `:as_process`** — the AccessibilityService
-(`accessibility/DetoxoAccessibilityService.kt`) runs in the main process. It does
-**not** call `startForeground()`: the system binds accessibility services with
-`BIND_FOREGROUND_SERVICE`, so the process already runs at foreground-service
-priority, and an FGS would only have added a `FOREGROUND_SERVICE_SPECIAL_USE`
-Play review. It posts an ongoing status notification instead (channel
-`detoxo_protection_channel`, id `1125`). The OS re-binds an enabled accessibility
-service automatically after boot; `receivers/BootReceiver.kt` only logs.
+(`accessibility/DetoxoAccessibilityService.kt`) runs in the main process. On
+connect it promotes itself with `startForeground(...)`
+(`FOREGROUND_SERVICE_TYPE_SPECIAL_USE` on API 34+) behind an ongoing status
+notification (channel `detoxo_protection_channel`, id `1125`). The OS re-binds
+an enabled accessibility service automatically after boot;
+`receivers/BootReceiver.kt` (re)arms the protection watchdog
+(`receivers/WatchdogJobService.kt` — a 15-min JobScheduler check that posts a
+"Protection stopped" notification when the service has been silently killed;
+a rebind cannot be forced, so detect + notify is the ceiling). See
+[12-analytics-notifications-resilience.md](12-analytics-notifications-resilience.md).
 
 ---
 
@@ -382,7 +404,8 @@ widget/
 admin/
   DetoxoDeviceAdminReceiver.kt  uninstall protection + lockNow (force-lock)
 receivers/
-  BootReceiver.kt               logs only (OS re-binds the a11y service)
+  BootReceiver.kt               (re)arms the watchdog job (OS re-binds the a11y service)
+  WatchdogJobService.kt         15-min "is protection alive?" check → "Protection stopped" notification
 ```
 
 ---

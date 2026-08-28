@@ -20,7 +20,7 @@ class SessionCountdown {
   final double progress;
   final Duration remaining;
 
-  /// A one- or two-word live state shown in the ring, e.g. "apps allowed".
+  /// A one- or two-word live state shown in the ring, e.g. "reels allowed".
   final String caption;
   final AppTone tone;
 

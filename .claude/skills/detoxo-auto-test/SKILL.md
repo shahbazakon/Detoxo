@@ -9,7 +9,7 @@ Everything runs through one driver, `tool/qa.sh`. Paths are relative to the repo
 
 ```bash
 bash tool/qa.sh [-d <serial>] [--reset] [--baseline] \
-  {functional|e2e|perf|blocking|all|prep|restore|devices}
+  {functional|e2e|perf|blocking|blockers|all|prep|restore|devices}
 ```
 
 Layer 1 needs no device. Layers 2–3 need an attached, **unlocked** Android phone. Artifacts land
@@ -23,6 +23,7 @@ in `build/qa/` (gitignored via `/build/`).
 | Touched UI, routing, splash gating, a cubit | `+ e2e` |
 | Touched startup, build config, deps, a hot path | `+ perf` |
 | Touched native detection or the accessibility service | `+ blocking` |
+| Touched the App Blocker / Web Blocker (Dart or native) | `+ blockers` |
 | "Is it ready to ship" | `all`, then `blocking`, then `restore` |
 
 `all` runs **`functional → e2e → perf`** cheapest-first, so a red Layer 1 surfaces in ~30s rather
@@ -56,7 +57,7 @@ Delegates to `bash tool/dev.sh precommit` (format → analyze → `flutter test`
 and tees to `build/qa/functional.log`, exit code to `build/qa/functional.rc`. It never fails the
 driver, so a red Layer 1 still lets Layers 2–3 run and report.
 
-Current green baseline: **188 tests**, analyzer clean, 12 known boundary violations from
+Current green baseline: **321 tests**, analyzer clean, 12 known boundary violations from
 `tool/boundaries_baseline.txt` and **0 new**.
 
 ## Layer 2 — real-boot E2E + screenshots
@@ -151,6 +152,38 @@ signal.
 uninstalls the app, so running `blocking` last always hits it. **Run `blocking` before `restore`.**
 A stale `blocking.status` is scored as if it were this run's — check its mtime against the other
 artifacts before you trust it.
+
+## Layer 2c — App/Web Blocker walk + real block probes
+
+```bash
+bash tool/qa.sh -d <serial> blockers
+```
+
+Fully automated, unlike `blocking`: `integration_test/blockers_e2e_test.dart` boots the real
+app, reaches home (shared `reachHome()` in `qa_walk.dart`), then drives the two blocker screens
+the way a user does — adds **YouTube** as a custom whole-app lock through the installed-app
+picker, adds **example.com** to the website blocklist, pauses it for 5 min — asserting the
+persisted Hive state at each step. At each `QA_PROBE:<name>` marker the test prints the marker
+and **sleeps 40 s without pumping** (a backgrounded app renders no frames; a pump there hangs
+until it is re-foregrounded) while `shots_pump` hands the phone to `probe_<name>` in the driver:
+launch the target, poll `logcat -d -s DetoxoService:I`, record the verdict, `am start` Detoxo
+back. Needs `com.google.android.youtube` and `com.android.chrome` installed (checked up front —
+a probe against a missing target proves nothing).
+
+| Probe | Launch | Expects | Verdicts |
+|---|---|---|---|
+| `app` | YouTube's launcher activity | `blocked app_block in com.google.android.youtube via HOME` | `blocked` / `notblocked` |
+| `web` | `https://example.com/` in Chrome | `web-blocked in com.android.chrome` | `blocked` / `notblocked` |
+| `web-paused` | the same URL again, entry paused | **no** block line within 12 s | `allowed` / `leaked` |
+
+Artifacts: `build/qa/blockers.walk` (`pass`/`fail` — the walk's own assertions), `blockers.status`
+(one `<probe> <verdict>` per line), `blockers.<probe>.logcat`, `blockers.log`, PNGs in
+`build/qa/shots-blockers/`. Report the walk and each probe verdict verbatim; a `notblocked` or
+`leaked` is an engine failure, a failed walk with green probes is a UI/harness failure — say
+which. Everything the walk adds it removes again, and `flutter test -d` uninstalls afterwards
+anyway. Finder gotcha it cost a run to learn: once the first block lands, the stats section
+renders the host as plain text too, so the row is `find.widgetWithText(AppCard, host)`, never
+`find.text(host)`. And `probe_run` verifies Detoxo is `topResumedActivity` after its `am start` (retrying up to 5×): the engine's HOME bounce is still animating when the first start lands and the launcher can win that race, which parks the walk forever on a backgrounded app. Chrome is left on an `example.com` tab.
 
 ## Leave the phone as you found it
 

@@ -138,7 +138,9 @@ round-trips cleanly, but most are inert in this build.
 
 ## 4. How the config reaches the native engine
 
-The push happens once on blocklist load, in
+The push happens on blocklist load — at cold start through the splash, on the
+blocklist screen, and (throttled to once per 15 min) by the resume re-sync
+(`lib/app/app_resume_sync.dart`) — in
 `lib/features/blocking/blocklist/presentation/targets_cubit.dart`:
 
 ```dart
@@ -169,12 +171,17 @@ ConfigRepositoryImpl.rawConfigJson()              // read assets/config/platform
 
 Native side (grounded in source):
 
-- `CommandHandler.kt` `"pushConfig"` writes `call.argument<String>("json")` into
-  `store.platformsConfigJson` and calls `service.reload()`.
-- `ConfigStore.kt` persists it under key `platforms_config_json` in the
-  SharedPreferences file `detoxo_engine_prefs`. **The last-pushed config
-  survives process death** — the getter returns `null` only before the first
-  push.
+- `CommandHandler.kt` `"pushConfig"` is **fail-safe**: an absent `json` arg or
+  one failing a `JSONObject` parse is a no-op, never a wipe (a nulled config
+  parses to `EMPTY` and kills blocking *and* counting until the next good
+  push). A valid payload is written to `store.platformsConfigJson` and applied
+  via `service.reload()`.
+- `ConfigStore.kt` persists it under key `platforms_config_json` in its **own**
+  SharedPreferences file `detoxo_platforms_config` (split out of the hot
+  `detoxo_engine_prefs` file so counter writes stop re-serialising the ~31 KB
+  blob; a one-time idempotent migration runs in `init`). **The last-pushed
+  config survives process death** — the getter returns `null` only before the
+  first push.
 - `DetectionConfig.parse()` re-parses the JSON into an O(1) package-indexed
   lookup for the hot path. A null/blank/malformed config yields
   `DetectionConfig.EMPTY` (no detectors → nothing blocked), so a parse failure
@@ -305,5 +312,5 @@ replacement URL in code — it belongs in the config payload.
 - `assets/config/platforms_config.json`, `assets/config/initial_config.json` — bundled config payloads.
 - `pubspec.yaml` — asset declarations; unused `dio` dependency.
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/channels/CommandHandler.kt` — native `pushConfig` handler.
-- `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/ConfigStore.kt` — persists pushed config (`platforms_config_json` in `detoxo_engine_prefs`).
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/ConfigStore.kt` — persists pushed config (`platforms_config_json` in its own `detoxo_platforms_config` prefs file).
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/DetectionConfig.kt` — parses the pushed config into the native lookup.

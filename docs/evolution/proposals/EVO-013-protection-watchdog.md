@@ -40,6 +40,23 @@ the "user never reopens the app" gap, but adds background wakeups + notification
 plumbing; workmanager is a pubspec-rejected dependency. Documented ceiling: detection
 happens on app open/resume only. Upgrade path: AlarmManager receiver check.
 
+> **Update (2026-08, `sensitive_protection`):** the upgrade path shipped — a native
+> `receivers/WatchdogJobService.kt` (persisted 15-min JobScheduler job, armed from
+> `onServiceConnected` and `BootReceiver`) now detects `masterEnabled && instance ==
+> null && (setting enabled || serviceEverConnected)` while the app is closed and posts
+> a "Protection stopped" notification (channel `detoxo_watchdog_channel`, deep link to
+> accessibility settings, 6 h re-notify debounce). Detect + notify remains the hard
+> ceiling: an accessibility service cannot be rebound programmatically. See
+> [12-analytics-notifications-resilience.md](../../code_docs/12-analytics-notifications-resilience.md) §3.1
+>
+> **Caveat (2026-08 audit):** a full OEM **force-stop** also cancels the package's
+> JobScheduler jobs *and* puts the app in the stopped state (excluded from
+> `BOOT_COMPLETED`), so in exactly that scenario neither the persisted job nor the
+> boot re-arm runs until the user next opens the app — the watchdog covers service
+> death (crash, OS unbind, setting cleared), not a force-stopped package. The next
+> app open re-arms it; this is inside the same detect-only ceiling.
+> and [04-native-android-layer.md](../../code_docs/04-native-android-layer.md) §5.
+
 ## Rollback
 Remove the `serviceAlive` branch + the `&& alive` term. No persisted state.
 

@@ -20,6 +20,8 @@ class _FakePinRepo implements PinRepository {
   Future<void> setSecureScreen({required bool enabled}) async {}
   @override
   Future<int> lastScreenOffMillis() async => 0;
+  @override
+  Future<({int elapsedMs, int bootCount})?> monotonicNow() async => null;
 }
 
 PinConfig _configuredCustom() {

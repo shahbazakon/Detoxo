@@ -1,3 +1,4 @@
+import 'package:detoxo/app/app_resume_sync.dart';
 import 'package:detoxo/core/design_system/foundations/ambient_background.dart';
 import 'package:detoxo/core/design_system/foundations/background_scope.dart';
 import 'package:detoxo/core/design_system/foundations/motion.dart';
@@ -184,21 +185,23 @@ class _RouterState extends State<_Router> {
             onSubmit: onSubmit,
             scrollController: scrollController,
           ),
-      child: PinAutoRelock(
-        router: _router,
-        child: MaterialApp.router(
-          title: 'Detoxo',
-          theme: AppTheme.light(
-            brandPrimary: widget.lightBrand.primary,
-            brandAccent: widget.lightBrand.accent,
+      child: AppResumeSync(
+        child: PinAutoRelock(
+          router: _router,
+          child: MaterialApp.router(
+            title: 'Detoxo',
+            theme: AppTheme.light(
+              brandPrimary: widget.lightBrand.primary,
+              brandAccent: widget.lightBrand.accent,
+            ),
+            darkTheme: AppTheme.dark(
+              brandPrimary: widget.darkBrand.primary,
+              brandAccent: widget.darkBrand.accent,
+            ),
+            themeMode: widget.themeMode,
+            routerConfig: _router,
+            debugShowCheckedModeBanner: false,
           ),
-          darkTheme: AppTheme.dark(
-            brandPrimary: widget.darkBrand.primary,
-            brandAccent: widget.darkBrand.accent,
-          ),
-          themeMode: widget.themeMode,
-          routerConfig: _router,
-          debugShowCheckedModeBanner: false,
         ),
       ),
     );

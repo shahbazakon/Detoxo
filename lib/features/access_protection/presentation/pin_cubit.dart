@@ -27,6 +27,58 @@ class PinCubit extends Cubit<PinConfig> {
       await _repo.setSecureScreen(enabled: true);
     }
     emit(config);
+    // Housekeeping + anti-tamper: realign or clear a persisted lockout
+    // against the monotonic clock. Free for the no-lockout majority (it
+    // early-returns before any channel call).
+    await reconcileLockout();
+  }
+
+  /// Realigns the persisted lockout with the authoritative (monotonic-when-
+  /// valid) clock, so the wall-clock display the lock screen renders can
+  /// never disagree with what [verify] enforces:
+  ///  - lockout genuinely over (incl. cross-boot with wall expired) → cleared;
+  ///  - wall stamp drifted from the monotonic truth (Settings clock moved
+  ///    forward OR backward) → `lockedUntil` rewritten to now + remaining.
+  /// Called from [load], on lock-screen entry, and inside [verify].
+  Future<void> reconcileLockout() async {
+    if (state.lockedUntil == null) return;
+    final mono = await _repo.monotonicNow();
+    final next = reconciled(
+      state,
+      DateTime.now(),
+      elapsedMs: mono?.elapsedMs,
+      bootCount: mono?.bootCount,
+    );
+    if (next == state) return;
+    await _repo.save(next);
+    emit(next);
+  }
+
+  /// Pure reconciliation (extracted for tests) — see [reconcileLockout].
+  @visibleForTesting
+  static PinConfig reconciled(
+    PinConfig c,
+    DateTime now, {
+    int? elapsedMs,
+    int? bootCount,
+  }) {
+    if (c.lockedUntil == null) return c;
+    final remaining = c.lockoutRemainingAt(
+      now,
+      elapsedMs: elapsedMs,
+      bootCount: bootCount,
+    );
+    if (remaining <= Duration.zero) return c.copyWith(clearLockout: true);
+    // Only the monotonic leg can justify moving the wall stamp; while it is
+    // invalid (cross-boot, off-Android) the wall clock IS the authority.
+    if (c.monotonicLegValid(elapsedMs: elapsedMs, bootCount: bootCount)) {
+      final expected = now.add(remaining);
+      if (c.lockedUntil!.difference(expected).abs() >
+          const Duration(seconds: 2)) {
+        return c.copyWith(lockedUntil: expected);
+      }
+    }
+    return c;
   }
 
   Future<void> setup({
@@ -96,9 +148,34 @@ class PinCubit extends Cubit<PinConfig> {
   }
 
   /// Verifies [entry]; updates the retry/lockout state on failure.
+  ///
+  /// Enforcement uses the monotonic clock (EVO-015): `isLockedOut` alone is
+  /// wall-clock and a Settings clock bump would clear the ladder. The
+  /// reconcile step first realigns (and emits) the wall stamp, so when a
+  /// tampered clock made the keypad reappear, the refusal below comes with
+  /// the lockout UI restored rather than reading as "Incorrect PIN".
   Future<bool> verify(String entry) async {
+    final mono = state.lockedUntil == null ? null : await _repo.monotonicNow();
+    if (state.lockedUntil != null) {
+      final next = reconciled(
+        state,
+        DateTime.now(),
+        elapsedMs: mono?.elapsedMs,
+        bootCount: mono?.bootCount,
+      );
+      if (next != state) {
+        await _repo.save(next);
+        emit(next);
+      }
+    }
     final config = state;
-    if (config.isLockedOut) return false;
+    if (config.isLockedOutAt(
+      DateTime.now(),
+      elapsedMs: mono?.elapsedMs,
+      bootCount: mono?.bootCount,
+    )) {
+      return false;
+    }
 
     final ok = matches(config, entry, DateTime.now());
     if (ok) {
@@ -110,10 +187,22 @@ class PinCubit extends Cubit<PinConfig> {
 
     final retries = config.retryCount + 1;
     final lockout = PinLockoutPolicy.lockoutFor(retries);
-    final updated = config.copyWith(
-      retryCount: retries,
-      lockedUntil: lockout == null ? null : DateTime.now().add(lockout),
-    );
+    // The monotonic reading is fetched lazily here: the common no-lockout
+    // attempt paid no channel round-trip above.
+    final anchor = lockout == null ? null : await _repo.monotonicNow();
+    // clearLockout first: an escalating lockout must never keep a STALE
+    // monotonic leg (e.g. the reading flaked to null this time) — an
+    // already-expired old leg would override the fresh wall-clock lockout.
+    final updated = config
+        .copyWith(clearLockout: true)
+        .copyWith(
+          retryCount: retries,
+          lockedUntil: lockout == null ? null : DateTime.now().add(lockout),
+          lockoutElapsedUntilMs: anchor == null
+              ? null
+              : anchor.elapsedMs + lockout!.inMilliseconds,
+          lockoutBootCount: anchor?.bootCount,
+        );
     await _repo.save(updated);
     emit(updated);
     return false;

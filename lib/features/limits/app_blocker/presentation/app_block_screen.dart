@@ -8,6 +8,7 @@ import 'package:detoxo/features/blocking/blocking.dart';
 import 'package:detoxo/features/blocking/blocklist/presentation/targets_cubit.dart';
 import 'package:detoxo/features/blocking/blocklist/presentation/widgets/block_app_tile.dart';
 import 'package:detoxo/features/blocking/shared/presentation/settings_cubit.dart';
+import 'package:detoxo/features/limits/app_blocker/domain/app_block_sync.dart';
 import 'package:detoxo/features/limits/app_blocker/domain/entities/app_block_entry.dart';
 import 'package:detoxo/features/limits/app_blocker/domain/repositories/app_block_repository.dart';
 import 'package:detoxo/features/limits/app_blocker/presentation/app_block_cubit.dart';
@@ -30,8 +31,12 @@ class AppBlockScreen extends StatelessWidget {
     return BlocProvider(
       create: (_) => AppBlockCubit(
         sl<AppBlockRepository>(),
-        // Keep native's app-derived web rules in step with every mutation.
-        onChanged: () => syncWebBlocklist(sl(), sl(), sl(), sl()),
+        // Keep native in step with every mutation: the enforced whole-app
+        // blocklist first, then the app-derived web rules.
+        onChanged: () async {
+          await syncAppBlocklist(sl(), sl());
+          await syncWebBlocklist(sl(), sl(), sl(), sl());
+        },
       )..load(),
       child: const _AppBlockView(),
     );
@@ -72,8 +77,8 @@ class _AppBlockViewState extends State<_AppBlockView> {
         actions: [
           InfoButton(
             'Two ways to block: switch off a built-in feed (Reels, Shorts, '
-            'Explore…) to keep the app but lose the feed, or add an app by its '
-            'package name to lock the whole thing.',
+            'Explore…) to keep the app but lose the feed, or pick any app on '
+            'your phone to lock the whole thing.',
           ),
         ],
       ),
@@ -265,8 +270,8 @@ class _AppBlockViewState extends State<_AppBlockView> {
 
   /// The toast tells the truth: "Added" only counts adds that landed, and a
   /// batch where nothing landed says why instead of celebrating a no-op.
-  /// ("Added", not "Blocked": custom locks record intent — enforcement is the
-  /// documented follow-up.)
+  /// ("Added", not "Blocked": enforcement is native and real, but it engages
+  /// on the entry's toggle/sync — this toast reports only the list mutation.)
   void _showAddOutcome(
     BuildContext context,
     List<InstalledApp> picked,
@@ -288,6 +293,7 @@ class _AppBlockViewState extends State<_AppBlockView> {
     final message = switch (results.first) {
       AppBlockAddResult.sensitive => 'Sensitive app — Detoxo never blocks it.',
       AppBlockAddResult.duplicate => 'Already in your list.',
+      AppBlockAddResult.failed => 'Couldn’t save — try again.',
       _ => 'That doesn’t look like a package id.',
     };
     GlassToast.show(context, message, tone: AppTone.warning);

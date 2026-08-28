@@ -50,12 +50,12 @@ The activity holds the `CommandHandler` and nulls out its activity reference in 
 
 ### Foreground service
 
-On `onServiceConnected` the service sets its static `instance`, loads config, calls `startAsForeground()`, and posts a `serviceStatus {running:true}` event.
+On `onServiceConnected` the service sets its static `instance`, marks `ConfigStore.serviceEverConnected = true`, loads config, calls `startAsForeground()`, schedules the protection watchdog job (idempotent — §5), and posts a `serviceStatus {running:true}` event.
 
 `startAsForeground()`:
 
 - Creates notification channel `detoxo_protection_channel` (name **"Detoxo Service Status"**, `IMPORTANCE_LOW`, no badge, description "Focus protection active") on API 26+.
-- Builds an ongoing, `PRIORITY_MIN` notification ("Detoxo is active" / "Monitoring and blocking short-form video.", small icon `ic_launcher`).
+- Builds an ongoing, `PRIORITY_MIN` notification ("Detoxo is active" / "Monitoring and blocking short-form video.", small icon `ic_launcher`). All four user-facing strings come from `res/values/strings.xml` (`fgs_channel_name` / `fgs_channel_description` / `fgs_title` / `fgs_text`), not hardcoded Kotlin.
 - Calls `startForeground(NOTIF_ID, notification, FOREGROUND_SERVICE_TYPE_SPECIAL_USE)` on Android 14+ (`UPSIDE_DOWN_CAKE`), else the 2-arg overload.
 
 | Constant | Value |
@@ -69,19 +69,31 @@ On `onServiceConnected` the service sets its static `instance`, loads config, ca
 
 | Callback | Behaviour |
 |---|---|
-| `onServiceConnected` | set `instance`, load config, start FGS, emit `serviceStatus{running:true}` |
-| `onAccessibilityEvent` | the hot-path: content-count pass → block gate → detection → block/Conscious (see [03](03-detection-engine.md)) |
+| `onServiceConnected` | set `instance`, mark `serviceEverConnected`, load config, start FGS, schedule the watchdog job, emit `serviceStatus{running:true}` |
+| `onAccessibilityEvent` | the hot-path: content-count pass → master switch → whole-app-block branch (above the Pause gate) → Pause gate → detection → block/Conscious (see [03](03-detection-engine.md)) |
 | `onInterrupt` | emit `serviceStatus{running:false}` |
 | `onTaskRemoved` | re-arm the FGS so swiping the app away does not kill protection |
-| `onUnbind` / `onDestroy` | clear `instance`, stop the Conscious ticker, dispose the counter, emit `serviceStatus{running:false}` |
+| `onUnbind` / `onDestroy` | clear `instance`, stop the Conscious ticker, force-flush the cached Conscious bank, dispose the counter (flushing pending usage time), emit `serviceStatus{running:false}` |
+
+### Hot-path efficiency notes
+
+- **Per-event detector-match memo** (`matchMemo: HashMap<DetectorRule, Boolean>`, cleared at the top of every event): the counting pass and the block pass test the same detectors against the same window — the second pass becomes map lookups instead of a second full tree walk. Events are delivered serially on the main thread, so no locking. (`ponytail:` the memo is keyed by detector only while each pass obtains its own root — sub-ms staleness accepted; upgrade path is threading one root through both passes.)
+- **Hot-path settings cache** — `masterOn` / `pausedUntil` / `activePlan` / `enabledPlatformIds` are `@Volatile` mirrors on the service (same pattern as the protected/blocked-app caches), refreshed in `reload()` — the event path reads **no SharedPreferences** for these ([03](03-detection-engine.md) §2.2).
+- **Conscious bank write batching** — the 1 Hz accountant used to do two prefs `.apply()` per tick (≈172k writes/day); the bank now lives in a `@Volatile` cache and `flushConsciousBank()` writes at most once per 5 s (`CONSCIOUS_FLUSH_MS`), forced on bank-empty / plan stop / `reload()` / unbind/destroy. The tick anchor is runtime-only (a restart re-anchors to now). Ceiling: ≤5 s of earned bank lost on a hard kill ([03](03-detection-engine.md) §5.2).
+- **Precomputed detector targets** — `matches()` builds its fully-qualified target-id list **once per call** instead of a `"$pkg$id"` concat per DFS node (up to 12000 nodes).
+- **Node recycling below API 33** — `engine/NodeRecycling.kt` adds a `recycleSafe()` extension (no-op on 33+, where `recycle()` became a no-op; swallows double-recycle throws). Used in `matches()` tree walks and `BrowserUrlExtractor`; unrecycled nodes were a steady native-heap leak on the hottest path. All five `rootInActiveWindow` obtain sites (event loop, `countContent`, `handleBrowser`, and `performBackInternal`/`lockScreen` via the `activeWindowProtectedNow()` helper) recycle the root in `try/finally`.
+- **Batched usage-time writes** — `ContentCounter` accumulates foreground usage in memory (`pendingUsageMs`) and flushes to prefs at `USAGE_FLUSH_MS` (5 s), on app switch, on protected-app foreground, on every snapshot pull, and on dispose. Previously it wrote SharedPreferences once per accessibility event at scroll frequency. Ceiling: ≤5 s of usage time lost on a hard process kill.
+- **Shared day-key formatter** — `engine/DateKeys.kt`: one `ThreadLocal` `"dd-MM-yyyy"` `SimpleDateFormat` (thread-local because the widget provider / job service can run off the main thread), replacing the duplicated per-call allocations (service, `ContentCounter`, `CommandHandler`, widget provider — and the bubble's `dateKey()`, the last `SimpleDateFormat` holdout, now timezone-change correct). `today()` re-applies `TimeZone.getDefault()` on every call — the cached formatter would otherwise freeze the zone captured at first use, and the service process lives long enough for a timezone change (travel / auto-adjust) to roll days over at the old zone's midnight.
+- **Config prefs split** — the ~31 KB `platforms_config_json` lives in its own SharedPreferences file `detoxo_platforms_config` (every `.apply()` re-serialises the whole file, and the hot path writes counters into `detoxo_engine_prefs` constantly). `ConfigStore.init` runs an idempotent one-time migration out of the old file.
+- **Conscious daily reset** — `accountConscious` checks `ConfigStore.consciousDate` against today and zeroes the bank on day change, so an overnight abstain no longer stockpiles a free 10-minute morning allowance.
 
 ### Static handle
 
 `DetoxoAccessibilityService.instance` (volatile, private-set) is the bridge everything else uses: `CommandHandler` reaches the live service through it (`instance?.reload()`, `instance?.contentCounter`, `instance?.consciousSnapshot()`, `instance?.armReelSession()`, `instance?.reelSessionSnapshot()`, etc.). `isRunning()` returns whether `instance != null`. Every call site null-checks, so commands degrade gracefully when the service is disabled.
 
-**One Reel / Unblock runtime state.** The `oneReel` plan (allow N reels, then block — algorithm in [03-detection-engine.md](03-detection-engine.md) §5.3) keeps two `@Volatile` wall-clock timestamps on the service (`lastScrollAtMs`, `lastAllowAtMs`) that are meaningless across a restart, so `armReelSession()` zeroes them, `reload()`s, and emits fresh state. The consumed-count itself lives in `ConfigStore` (`reels_consumed`) and is **persisted**, so an OS-driven service restart keeps the user blocked until an explicit re-tap — the volatile timestamps self-correct from the persisted count. `reelSessionSnapshot()` (`{consumed, allowance, blocked, active}`) mirrors `consciousSnapshot()` and backs both the `reelSessionState` event and its pull query.
+**One Reel / Unblock runtime state.** The `oneReel` plan (allow N reels, then block — algorithm in [03-detection-engine.md](03-detection-engine.md) §5.3) keeps its dwell state in `@Volatile` runtime fields on the service (`lastScrollAtMs`, `reelViewStartMs`, `reelViewCounted`, `lastReelCountMs`) that are meaningless across a restart, so `armReelSession()` zeroes them, `reload()`s, and emits fresh state. The consumed-count itself lives in `ConfigStore` (`reels_consumed`) and is **persisted**, so an OS-driven service restart keeps the user blocked until an explicit re-tap — the volatile timestamps self-correct from the persisted count. `reelSessionSnapshot()` (`{consumed, allowance, blocked, active}`) mirrors `consciousSnapshot()` and backs both the `reelSessionState` event and its pull query.
 
-Note the service is **never** started manually. An enabled AccessibilityService is bound (and re-bound after reboot) by the OS — which is exactly why `BootReceiver` does nothing but log (§5).
+Note the service is **never** started manually. An enabled AccessibilityService is bound (and re-bound after reboot) by the OS — and it cannot be rebound programmatically, which is why the boot-time hook only (re)arms the detect-and-notify watchdog rather than trying to restart anything (§5).
 
 ---
 
@@ -92,7 +104,9 @@ Note the service is **never** started manually. An enabled AccessibilityService 
 Broadly the methods fall into four groups. (Argument/return shapes are in [18-platform-channel-contracts.md](18-platform-channel-contracts.md).)
 
 **Config / settings push** — write to `ConfigStore`, then `DetoxoAccessibilityService.instance?.reload()`:
-`pushConfig`, `pushSettings`, `pushWebBlocklist`, `pushProtectedApps`.
+`pushConfig`, `pushSettings`, `pushWebBlocklist`, `pushProtectedApps`, `pushAppBlocklist`.
+
+- `pushConfig` is **fail-safe**: an absent `json` arg or one that fails a `JSONObject` parse is a no-op, never a wipe. (Previously a null arg silently nulled the stored config, which parses to `EMPTY` — killing both blocking and counting until the next good push.)
 
 - `pushSettings` unpacks `activePlan`, `defaultBlockMode`, `enabledPlatforms`, `vibration`, `masterEnabled`, `pauseUntil`, `reelAllowance`, `consciousEarnDivisor`, `consciousMaxBankMs`, `blockAdultWebsites`, `blockWebsitesForBlockedApps`. The `activePlan` is stored **verbatim** — the old auto-reset of the Conscious bank on a `*→CURIOUS` transition was **removed**, so an auto-revert *into* Conscious (after an override that ran from a Conscious base) keeps the earned bank; the fresh-start reset now lives in the separate `resetConsciousBank` command below. `reelAllowance` is stored as the target (survives restart) but the One Reel / Unblock **consumed-count is not reset here** — only the imperative `armReelSession` re-arms, so an unrelated push can't refill a spent session.
 
@@ -108,10 +122,19 @@ Broadly the methods fall into four groups. (Argument/return shapes are in [18-pl
   are individually guarded as fail-closed backstops. See
   [24-protected-apps.md](24-protected-apps.md).
 
+- `pushAppBlocklist` stores the custom whole-app-block package names as a
+  `StringSet` (`app_blocklist_packages`) with the same fail-safe/set-if-changed
+  contract as `pushProtectedApps`: absent/malformed arg = no-op (clearing
+  requires an explicit empty list), unchanged set skips the write and the
+  cheap `refreshAppBlocklist()` refresh. Enforcement (HOME bounce, own 1200 ms
+  debounce, shared block counter, protected/self/launcher/systemui skips) is
+  in the service's `onAppBlocked` — see
+  [06-app-and-web-blocker.md](06-app-and-web-blocker.md).
+
 **Permission queries & launches** — pure platform checks and Settings intents:
 `isAccessibilityEnabled`, `openAccessibilitySettings`, `canDrawOverlays`, `requestOverlayPermission`, `hasUsageAccess`, `openUsageAccessSettings`, `isIgnoringBatteryOptimizations`, `requestIgnoreBatteryOptimizations`, `isDeviceAdminActive`, `requestDeviceAdmin`, `removeDeviceAdmin`.
 
-- `isAccessibilityEnabled` reads `Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES` and matches our `ComponentName` case-insensitively in **both** flattened forms — long (`pkg/pkg.Class`) and short (`pkg/.Class`), since some OEM ROMs write the short one. It does **not** rely on the service's `instance`, so it is correct even before first bind. A false negative here would push an already-granted user into the restricted-settings recovery flow, hence accepting both.
+- `isAccessibilityEnabled` delegates to the shared **`engine/AccessibilityCheck.kt`** (also used by the watchdog): it reads `Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES` and matches our `ComponentName` case-insensitively in **both** flattened forms — long (`pkg/pkg.Class`) and short (`pkg/.Class`), since some OEM ROMs write the short one. It does **not** rely on the service's `instance`, so it is correct even before first bind. A false negative here would push an already-granted user into the restricted-settings recovery flow, hence accepting both. Note this is the *setting*, not liveness — `serviceAlive` (`instance != null`) is the truth for "running".
 - `hasUsageAccess` uses `AppOpsManager` (`OPSTR_GET_USAGE_STATS`), API-versioned (`unsafeCheckOpNoThrow` on Q+).
 - Device-admin add/remove go through `DevicePolicyManager` against `DetoxoDeviceAdminReceiver` (§6).
 - `launch(intent)` prefers the held `Activity`; with none it adds `FLAG_ACTIVITY_NEW_TASK` and starts from the app context. All launches are wrapped in try/catch and return a boolean.
@@ -120,9 +143,11 @@ Broadly the methods fall into four groups. (Argument/return shapes are in [18-pl
 `performBack`, `killApp` (needs a `package`), `lockScreen`, `consciousState`, `resetConsciousBank`, `armReelSession`, `reelSessionState`, `blockStats`.
 
 - `consciousState` returns the live `instance?.consciousSnapshot()`, else a store-derived fallback map so the UI still gets a sensible value when the service is dead.
-- `resetConsciousBank` empties the Conscious earn-bank (`store.resetConsciousBank(now)` → bank→0, anchor→now) and `reload()`s. It is the **only** bank-reset path (the old `pushSettings` plan-transition reset is gone), fired only by Dart's `SettingsCubit.enterConscious()` on a genuine user entry — so an auto-revert into Conscious keeps the bank. The service's own `accountConscious` accountant also **freezes** the bank during a live Pause (`now < pauseUntil`), mirroring its master-off freeze, so a paused Conscious base doesn't accrue free allowance ([03](03-detection-engine.md) §5.2).
+- `resetConsciousBank` empties the Conscious earn-bank: `store.resetConsciousBank()` (no-arg — zeroes **only the bank**; the tick anchor is runtime-only now), then the service hook `instance?.onConsciousBankReset()` drops the cached bank *and* any pending unflushed accrual (so it can't resurrect the zeroed value) and `reload()`s. It is the **only** bank-reset path (the old `pushSettings` plan-transition reset is gone), fired only by Dart's `SettingsCubit.enterConscious()` on a genuine user entry — so an auto-revert into Conscious keeps the bank. The service's own `accountConscious` accountant also **freezes** the bank during a live Pause (`now < pauseUntil`), mirroring its master-off freeze, so a paused Conscious base doesn't accrue free allowance ([03](03-detection-engine.md) §5.2).
 - `armReelSession` ((re)arm One Reel / Unblock): reads `count` (clamped 1..20), sets `store.reelAllowance` + `activePlan = "ONE_REEL"`, calls `store.resetReelSession()` (consumed→0), then `instance?.armReelSession()`. Imperative so an unrelated `pushSettings` never re-arms mid-session.
 - `reelSessionState` returns the live `instance?.reelSessionSnapshot()`, else a store-derived fallback (`consumed`/`allowance` from prefs, `blocked = consumed >= allowance` AND-ed with plan `ONE_REEL`).
+- `blockStats` reads `store.blockStats(DateKeys.today())` — `ConfigStore.blockStats(dateKey)` (like its `webBlockStats(dateKey)` twin) does **read-time day rollover**: a stale stored date reads `today` as 0 without writing (the next `recordBlock` does the durable reset), mirroring `ContentCounterStore.snapshot`. So a post-midnight pull no longer reports yesterday's count.
+- `monotonicNow` returns `{elapsedMs: SystemClock.elapsedRealtime(), bootCount: Settings.Global.BOOT_COUNT}` — monotonic clocks immune to Settings changes, with the boot count making cross-boot readings detectable. They anchor the PIN lockout (EVO-015) so moving the clock forward can't clear it ([08](08-pin-lock-recovery.md)); the PIN-lock siblings `setSecureScreen` / `lastScreenOff` are in [18](18-platform-channel-contracts.md).
 
 **Content counter & widget** — see §7/§8:
 `contentCounterSnapshot`, `setContentCounterEnabled`, `setContentBubbleEnabled`, `refreshContentWidget`, `setCounterStyle`, `pinContentWidget`.
@@ -142,18 +167,39 @@ Any unrecognized method returns `result.notImplemented()`.
 
 Native → Dart events use two small classes:
 
-- **`engine/ServiceEventBus.kt`** — a singleton `object` with a `@Volatile var sink: Sink?`. The service calls `ServiceEventBus.post(type, data)`, which merges `data` with `{"type": type}` and delivers it to the sink **on the main thread** (`Handler(Looper.getMainLooper())`). If no sink is registered (UI dead / not listening), the event is silently dropped — the block hot-path never depends on it.
-- **`channels/DetoxoEventStream.kt`** — the `EventChannel.StreamHandler`. `onListen` installs a sink that forwards to `events.success(...)`; `onCancel` clears it. So the bus is "connected" only while Dart is actively listening on `com.errorxperts.detoxo/events`.
+- **`engine/ServiceEventBus.kt`** — a singleton `object` with a `@Volatile var sink: Sink?`. The service calls `ServiceEventBus.post(type, data)`, which merges `data` with `{"type": type}` and delivers it to the sink **on the main thread** (`Handler(Looper.getMainLooper())`). If no sink is registered (UI dead / not listening), the event is silently dropped — the block hot-path never depends on it. **Exception: `serviceStatus` is sticky** — the last payload is recorded even with no sink, and `replayLastStatus()` re-emits it to the current sink. A cold start races the service rebind: `onServiceConnected`'s `running:true` fires before Dart attaches the EventChannel and would otherwise be lost, leaving the dashboard on "Protection off" for the whole session.
+- **`channels/DetoxoEventStream.kt`** — the `EventChannel.StreamHandler`. `onListen` installs a sink that forwards to `events.success(...)` and then calls `replayLastStatus()` to catch the late subscriber up. `onCancel` clears the sink **only if it is the one this instance installed** — Flutter engine recreation can run the new engine's `onListen` before the old engine's `onCancel`, and an unconditional clear nulled the live listener's sink. So the bus is "connected" only while Dart is actively listening on `com.errorxperts.detoxo/events`. (Dart's side is symmetric: `EngineChannel.events()` is a self-healing broadcast stream that re-subscribes 1 s after the underlying channel stream closes, so cubits' process-lifetime subscriptions survive a native stream close.)
 
-Event `type` values emitted by the native layer: `serviceStatus`, `detection`, `blocked`, `webBlocked`, `foregroundChanged`, `consciousState`, `reelSessionState`, `contentCounted`. Payload shapes are in [18](18-platform-channel-contracts.md). The events are multiplexed onto the single channel and demultiplexed on the Dart side by the `type` field.
+Event `type` values emitted by the native layer: `serviceStatus`, `blocked`, `webBlocked`, `consciousState`, `reelSessionState`, `contentCounted`. Payload shapes are in [18](18-platform-channel-contracts.md). The events are multiplexed onto the single channel and demultiplexed on the Dart side by the `type` field.
 
 ---
 
-## 5. BootReceiver (log-only)
+## 5. BootReceiver + WatchdogJobService (protection watchdog)
 
-`receivers/BootReceiver.kt` is a `BroadcastReceiver` registered in the manifest for `BOOT_COMPLETED`, `MY_PACKAGE_REPLACED`, and `QUICKBOOT_POWERON`. Its `onReceive` does exactly one thing: `Log.i("DetoxoBoot", "received <action>")`.
+`receivers/BootReceiver.kt` is a `BroadcastReceiver` registered in the manifest for `BOOT_COMPLETED`, `MY_PACKAGE_REPLACED`, and `QUICKBOOT_POWERON`. Its `onReceive` logs the action and **(re)schedules the watchdog job** (`WatchdogJobService.schedule`).
 
-It intentionally does **not** restart the service. An enabled AccessibilityService is re-bound automatically by the OS after boot/update, so there is nothing to do. There is no date-changed receiver and no custom command broadcast — all commands arrive over the MethodChannel. The receiver exists mainly as a hook point (and for the manifest declaration) should a "re-enable me" nudge ever be wired up.
+`exported="true"` is required for `BOOT_COMPLETED` / `MY_PACKAGE_REPLACED` (both **protected** broadcasts only the system can send). `QUICKBOOT_POWERON`, however, is an **unprotected OEM action any app may send** — so the receiver's payload must stay an idempotent, harmless re-schedule; never add state changes to `BootReceiver`. (The manifest comment documents the same invariant.)
+
+It intentionally does **not** restart the service. An enabled AccessibilityService is re-bound automatically by the OS after boot/update — and **cannot be rebound programmatically**, so after an OEM force-stop only the user can re-enable it. Detect + notify is therefore the ceiling (this matches EVO-013's Realme/ColorOS finding), and that is what the watchdog does. There is no date-changed receiver and no custom command broadcast — all commands arrive over the MethodChannel.
+
+`receivers/WatchdogJobService.kt` — a persisted periodic `JobScheduler` job:
+
+| Constant | Value |
+|---|---|
+| `JOB_ID` | `1126` |
+| Period | 15 min (`setPeriodic`, `setPersisted(true)` — survives reboot via `RECEIVE_BOOT_COMPLETED`) |
+| `NOTIF_ID` | `1127` |
+| Channel | `detoxo_watchdog_channel` — **"Protection alerts"**, `IMPORTANCE_DEFAULT` |
+| Re-notify debounce | once per 6 h (`ConfigStore.lastWatchdogNotifiedMs`) |
+
+`checkAndNotify` (all synchronous, runs in the app's single process so the live service `instance` is directly visible):
+
+1. `!store.masterEnabled` → return (the user turned protection off themselves).
+2. `DetoxoAccessibilityService.instance != null` → **recovery**: `clearAlert` cancels any standing notification and zeroes `lastWatchdogNotifiedMs` (so a stale "Protection stopped" never outlives the outage, and a NEW outage isn't silently swallowed by the old debounce), then return. `onServiceConnected` calls the same `clearAlert` so recovery clears immediately rather than at the next 15-min check.
+3. Neither `AccessibilityCheck.isEnabled` nor `store.serviceEverConnected` → return (only nag someone who actually had protection — the setting still lists the dead service after a force-stop, or it connected at least once before the OS/OEM cleared the setting).
+4. Within the 6 h debounce → return; else record the time and post the notification: **"Protection stopped"** / "Detoxo is no longer blocking. Tap to re-enable it.", auto-cancel, deep-linking to `ACTION_ACCESSIBILITY_SETTINGS` (exactly where the re-toggle happens). Channel name/description and title/text come from `res/values/strings.xml` (`watchdog_channel_name` / `watchdog_channel_description` / `watchdog_title` / `watchdog_text`).
+
+Scheduling is idempotent (a still-pending `JOB_ID` is left alone) and armed from two places: the service's own `onServiceConnected` and `BootReceiver`. Everything is try/caught — a missing `POST_NOTIFICATIONS` grant must never crash the job.
 
 ---
 
@@ -191,7 +237,9 @@ Beyond counting reels, the counter also accrues **whole-app foreground time** in
 
 - `WindowManager` overlay. Type is `TYPE_APPLICATION_OVERLAY` on API 26+, falling back to the deprecated `TYPE_PHONE` below that (`overlayType()`).
 - Flags: `FLAG_NOT_FOCUSABLE | FLAG_NOT_TOUCH_MODAL | FLAG_LAYOUT_NO_LIMITS`, `TRANSLUCENT`, gravity `TOP|START`.
-- **Silently no-ops without overlay permission** — `show()` returns early if `!Settings.canDrawOverlays(context)`. `addView`/`updateViewLayout`/`removeView` are all try/caught so a revoked permission or a race can't crash the service.
+- **Steady-state fast path first** — `show()` checks `shown && view != null && view.isAttachedToWindow` *before* the `Settings.canDrawOverlays` binder call, so the per-detection IPC is gone while the window is alive. The `isAttachedToWindow` requirement is what makes an overlay **revoke → re-grant** recover: the OS removes the window on revoke but the fields survive, and without the check a later re-grant would keep updating a detached view forever. A detached-but-tracked view is torn down via the private `detach()` (shared with `hide()`) before re-adding.
+- **No-ops without overlay permission** — past the fast path, `show()` returns early if `!Settings.canDrawOverlays(context)`, with a **once-per-process `Log.w`** ("bubble suppressed: overlay permission missing") so a revoked grant doesn't read as "the counter stopped" with zero trace (counting itself keeps running). `addView`/`updateViewLayout`/`removeView` are all try/caught so a revoked permission or a race can't crash the service.
+- **Day key via `DateKeys.today()`** — the bubble's `dateKey()` uses the shared engine formatter (its private `SimpleDateFormat` was the last holdout; the shared one re-applies the default timezone per call, so a timezone change rolls the day correctly).
 
 ### Interaction
 
@@ -266,7 +314,8 @@ Provider metadata (`res/xml/content_counter_widget_info.xml`): `minWidth/minHeig
 
 - **`.MainActivity`** — `FlutterFragmentActivity`, `singleTop`, `taskAffinity=""`, exported launcher activity. `enableOnBackInvokedCallback="true"` on `<application>`.
 - **`.accessibility.DetoxoAccessibilityService`** — `exported="false"`, permission `BIND_ACCESSIBILITY_SERVICE`, `foregroundServiceType="specialUse"` with the required `PROPERTY_SPECIAL_USE_FGS_SUBTYPE` property string, an `AccessibilityService` intent-filter, and `<meta-data android:name="android.accessibilityservice">` → `@xml/accessibility_service_config`. No `android:process` → **main process**.
-- **`.receivers.BootReceiver`** — exported, filters `BOOT_COMPLETED` / `MY_PACKAGE_REPLACED` / `QUICKBOOT_POWERON`.
+- **`.receivers.BootReceiver`** — exported (required for the protected `BOOT_COMPLETED` / `MY_PACKAGE_REPLACED` broadcasts; `QUICKBOOT_POWERON` is an unprotected OEM action, so the payload must stay an idempotent re-schedule — §5).
+- **`.receivers.WatchdogJobService`** — `exported="false"`, permission `BIND_JOB_SERVICE` (the protection watchdog, §5).
 - **`.widget.ContentCounterWidgetProvider`** — `exported="false"`, `APPWIDGET_UPDATE` filter, `<meta-data>` → `@xml/content_counter_widget_info`.
 - **`.admin.DetoxoDeviceAdminReceiver`** — exported, `BIND_DEVICE_ADMIN`, `<meta-data>` → `@xml/device_admin_policies`, `DEVICE_ADMIN_ENABLED` filter.
 
@@ -283,16 +332,17 @@ Provider metadata (`res/xml/content_counter_widget_info.xml`): `minWidth/minHeig
 
 | Attribute | Value |
 |---|---|
-| `accessibilityEventTypes` | `typeAllMask` (need window-state + content + scroll to catch reels) |
+| `accessibilityEventTypes` | `typeWindowStateChanged \| typeWindowContentChanged \| typeViewScrolled` — exactly the three types the engine acts on (EVO-016; was `typeAllMask`, which binder-delivered every other type only to discard it at the handler's first lines). Device QA still outstanding — see `docs/evolution/proposals/EVO-016-event-mask-narrowing.md`. |
 | `accessibilityFeedbackType` | `feedbackGeneric` |
-| `accessibilityFlags` | `flagDefault \| flagRetrieveInteractiveWindows \| flagReportViewIds \| flagRequestFilterKeyEvents \| flagIncludeNotImportantViews` |
+| `accessibilityFlags` | `flagDefault \| flagRetrieveInteractiveWindows \| flagReportViewIds \| flagIncludeNotImportantViews` |
 | `canRetrieveWindowContent` | `true` (read node trees) |
-| `canRequestFilterKeyEvents` | `true` |
 | `canPerformGestures` | `true` (global-action back / future gesture blocks) |
 | `notificationTimeout` | `100` ms |
 | `description` / `summary` | `@string/accessibility_service_description` / `@string/accessibility_service_summary` |
 
 `flagRetrieveInteractiveWindows` + `flagReportViewIds` are what make the 3-stage view-id detection ([03](03-detection-engine.md)) possible — reading the foreground app's view tree and resource-ids.
+
+**No key-event filtering**: `flagRequestFilterKeyEvents` / `canRequestFilterKeyEvents` were dropped — there is no `onKeyEvent` override, and requesting the capability both scares the Play reviewer and costs key-event delivery overhead for nothing.
 
 ### `device_admin_policies.xml`
 
@@ -304,7 +354,7 @@ See §8.
 
 ### `strings.xml`
 
-`app_name` (Detoxo), the accessibility description/summary, `device_admin_label`/`device_admin_description`, and `cc_widget_description` ("Reel counter").
+`app_name` (Detoxo), the accessibility description/summary, `device_admin_label`/`device_admin_description`, `cc_widget_description` ("Reel counter") — plus the **engine surfaces**: `toast_blocked` (`"%1$s is blocked by Detoxo"`, one shared string for both web and whole-app block toasts so the copy can never drift apart), `toast_blocked_adult` (`"Adult site blocked by Detoxo"` — adult-list hits are never named on screen, EVO-018), the FGS notification strings (`fgs_*`) and the watchdog notification strings (`watchdog_*`).
 
 ---
 
@@ -341,7 +391,11 @@ See §8.
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/channels/DetoxoEventStream.kt`
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/ServiceEventBus.kt`
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/ContentCounterStore.kt`
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/DateKeys.kt` (shared ThreadLocal day-key formatter)
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/AccessibilityCheck.kt` (shared enabled-in-Settings check)
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/NodeRecycling.kt` (`recycleSafe` extension)
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/receivers/BootReceiver.kt`
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/receivers/WatchdogJobService.kt` (protection watchdog)
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/admin/DetoxoDeviceAdminReceiver.kt`
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/overlay/ContentCounterBubble.kt`
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/widget/ContentCounterWidgetProvider.kt`

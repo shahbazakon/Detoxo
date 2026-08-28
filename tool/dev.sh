@@ -38,6 +38,7 @@ MENU=(
   "firebase|Firebase Reconfigure|t_firebase"
   "assets|Asset Generation (FlutterGen)|t_assets"
   "icons|App Launcher Icons|t_icons"
+  "adultlist|Compile 18+ blocklist asset (tool/web_blocker → android assets)|t_adultlist"
   "release|Build Signed Release Bundle (.aab)|t_release"
 )
 
@@ -57,6 +58,10 @@ t_reset()    { run flutter clean; run flutter pub cache repair; run flutter pub 
 t_firebase() { need flutterfire "dart pub global activate flutterfire_cli"; run flutterfire configure; run flutter clean; run flutter pub get; }
 t_assets()   { need fluttergen "dart pub global activate flutter_gen (or brew install FlutterGen/tap/fluttergen)"; run fluttergen; run dart format lib/gen; }
 t_icons()    { run dart run flutter_launcher_icons; }
+# The 18+ web-blocklist source (tool/web_blocker/blocked_websites.json) compiles
+# into the native asset the WebBlockEngine reads; test/adult_blocklist_test.dart
+# fails when the two drift, so run this after every edit to the JSON.
+t_adultlist(){ need python3 "brew install python"; run python3 tool/web_blocker/compile_adult_list.py; }
 
 # Play upload artifact. --obfuscate needs --split-debug-info; without it the
 # Dart frames in Crashlytics are unreadable. Upload BOTH symbol sets after:

@@ -72,4 +72,8 @@ class PinRepositoryImpl implements PinRepository {
 
   @override
   Future<int> lastScreenOffMillis() => _channel.lastScreenOff();
+
+  @override
+  Future<({int elapsedMs, int bootCount})?> monotonicNow() =>
+      _channel.monotonicNow();
 }

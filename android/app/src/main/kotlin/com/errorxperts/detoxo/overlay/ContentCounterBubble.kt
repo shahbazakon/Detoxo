@@ -26,9 +26,8 @@ import android.view.WindowManager
 import android.view.animation.DecelerateInterpolator
 import android.view.animation.OvershootInterpolator
 import com.errorxperts.detoxo.engine.ContentCounterStore
+import com.errorxperts.detoxo.engine.DateKeys
 import com.errorxperts.detoxo.engine.UsageLadder
-import java.text.SimpleDateFormat
-import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.roundToInt
 import org.json.JSONObject
@@ -55,6 +54,7 @@ class ContentCounterBubble(private val context: Context) {
     private var view: BubbleView? = null
     private var params: WindowManager.LayoutParams? = null
     private var shown = false
+    private var warnedNoOverlay = false
     private var snapAnimator: ValueAnimator? = null
 
     /** Last count shown — replayed when the view is rebuilt on a style change. */
@@ -73,11 +73,24 @@ class ContentCounterBubble(private val context: Context) {
     // ── Public API (called by ContentCounter on the main thread) ───────────────
 
     fun show(count: Int) = runOnMain {
-        if (!Settings.canDrawOverlays(context)) return@runOnMain
         lastCount = count
+        // Steady state first — no binder call while the window is alive. The
+        // attach check matters: on an overlay revoke the OS removes the window
+        // but our fields survive, and without it a later re-grant would update
+        // a detached view forever.
         val existing = view
-        if (shown && existing != null) {
+        if (shown && existing != null && existing.isAttachedToWindow) {
             existing.setCount(count)
+            return@runOnMain
+        }
+        if (view != null) detach() // OS tore the window down — reset for re-add
+        if (!Settings.canDrawOverlays(context)) {
+            // Once per process: a revoked overlay grant otherwise reads as "the
+            // counter stopped" with zero trace (counting itself keeps running).
+            if (!warnedNoOverlay) {
+                warnedNoOverlay = true
+                Log.w(TAG, "bubble suppressed: overlay permission missing")
+            }
             return@runOnMain
         }
         val spec = BubbleStyleSpec.fromJson(store.bubbleStyleJson)
@@ -141,10 +154,13 @@ class ContentCounterBubble(private val context: Context) {
         }.start()
     }
 
-    fun hide() = runOnMain {
+    fun hide() = runOnMain { detach() }
+
+    /** Synchronous teardown (main thread only) — shared by [hide] and [show]. */
+    private fun detach() {
         snapAnimator?.cancel()
         mainHandler.removeCallbacks(revertRunnable)
-        val v = view ?: return@runOnMain
+        val v = view ?: return
         try {
             wm.removeView(v)
         } catch (_: Throwable) {
@@ -163,6 +179,10 @@ class ContentCounterBubble(private val context: Context) {
     fun onStyleChanged() = runOnMain {
         if (!shown) return@runOnMain
         val lp = params ?: return@runOnMain
+        // A live edge-snap animator captured the OLD view and mutates the
+        // shared LayoutParams — left running it would fight the rebuilt view
+        // and desync the persisted x from the visible position.
+        snapAnimator?.cancel()
         val spec = BubbleStyleSpec.fromJson(store.bubbleStyleJson)
         val old = view
         val v = BubbleView(context, spec).apply {
@@ -294,8 +314,7 @@ class ContentCounterBubble(private val context: Context) {
         mainHandler.postDelayed(revertRunnable, REVEAL_MS)
     }
 
-    private fun dateKey(): String =
-        SimpleDateFormat("dd-MM-yyyy", Locale.US).format(System.currentTimeMillis())
+    private fun dateKey(): String = DateKeys.today()
 
     // ── Geometry helpers ───────────────────────────────────────────────────────
 
