@@ -80,7 +80,7 @@ Those three are **temporary** modes — one-off overrides. The moment their unit
 
 Yes, the reel counter is **completely separate from blocking**. It runs on its own and simply tallies the short videos you actually watch, so you can see the number even if you never turn blocking on.
 
-- A video only counts **after you've watched it for about 2 seconds** — quick flick-throughs are ignored, so the count reflects real watching, not accidental scrolls.
+- A video only counts **once you've stopped on it for about a second** — flicks, half-swipes and scrolling the comments are ignored, and the same reel never counts twice, so the number reflects the reels you actually saw.
 - It counts reels and shorts, but deliberately **skips** regular feeds, Stories, and statuses (those aren't "reels").
 - The count keeps running whether blocking is on, off, or paused. It's on by default because awareness alone tends to change habits.
 
@@ -103,6 +103,8 @@ The small **day streak** beside your reels count is how many days in a row you'v
 ## The floating bubble needs "Display over apps" — why?
 
 The little counter bubble floats on top of whatever app you're in, so Android asks for the **Display over apps** permission (sometimes shown as "Draw over other apps") before it can appear. It's optional — if you skip it, counting still works everywhere; you just won't see the bubble. Blocking does not need this permission.
+
+If the bubble is switched on but the permission is missing, the **Bubble** card on the Appearance screen tells you so — tap the warning to open the setting; it clears on its own once granted.
 
 ## What happens when I tap the counter bubble?
 
@@ -144,7 +146,7 @@ No — Detoxo is **Android-only**, and this isn't a temporary gap. The whole pro
 - For a **quick break**, use **Pause** — pick 2–10 minutes and reels and blocked websites are allowed until the timer ends, then it returns to your base mode (Block All or Conscious) on its own. Apps you've fully locked on the Block apps screen stay locked through the break. This is the recommended way to step away without forgetting to turn protection back on.
 - To **turn blocking off entirely**, open **Settings** and switch off **Protection** (the master switch for all detection). If you've set a PIN, Detoxo will ask for it first — that's the intentional speed bump that stops an impulsive "just turn it off."
 
-The reel counter is controlled separately (in the reel counter screen), so you can keep counting even with blocking off.
+The reel counter is controlled separately (**Count short videos** on the Appearance screen), so you can keep counting even with blocking off.
 
 ## I set a PIN — why does Detoxo ask for it again when I switch back?
 

@@ -11,7 +11,7 @@ boundary:
 | `flutter_secure_storage` | Dart | Keystore / EncryptedSharedPreferences | Secrets only (the PIN config) |
 | `detoxo_engine_prefs` | Native (Kotlin) | `SharedPreferences` | The engine's own runtime state: plan, counters, blocklists, Conscious bank, watchdog markers |
 | `detoxo_platforms_config` | Native (Kotlin) | `SharedPreferences` | Just the pushed ~31 KB `platforms_config_json` — split out so hot-path counter writes stop re-serialising it (§2.1) |
-| `home_widget` data + native store | Bridge | `home_widget` plugin + `detoxo_engine_prefs` | Home-screen widget face (`cc_today` / `cc_total`) |
+| Home-screen widget | Native (Kotlin) | reads `detoxo_engine_prefs` (`cc_today` / `cc_total` / styles) | Rendered natively from the store; no plugin-side data (the `home_widget` package was removed) |
 
 > **Not used (from the old blueprint):** Room, drift/SQLite, any
 > `ContentProvider`, and any multi-process `SharedPreferences`
@@ -285,9 +285,12 @@ count, so an unrelated settings change can't refill a spent session. See
 ### 2.2 `ContentCounterStore` keys
 
 The counter is **decoupled from blocking** and enabled by default. Written by
-`engine/ContentCounter.kt` (`recordCount`) and by `CommandHandler`
+`engine/ContentCounter.kt` (`recordCount(pkg, dateKey, usageDeltaMs)` — one
+edit for the count *and* the batched usage time, returning the snapshot;
+`recordUsage` for the periodic usage flush) and by `CommandHandler`
 (`setContentCounterEnabled`, `setContentBubbleEnabled`, `setCounterStyle`); read
-by the bubble overlay and the widget provider.
+by the bubble overlay and the widget provider. `cc_enabled` / `cc_bubble_enabled`
+are cached per store instance (see [17](17-content-counter.md) §3).
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
@@ -352,32 +355,23 @@ but they are not interchangeable:
 
 ---
 
-## 3. Home-screen widget bridge (`cc_today` / `cc_total`)
+## 3. Home-screen widget (`cc_today` / `cc_total`)
 
-`home_content_counter/data/repositories/home_widget_repository_impl.dart` drives
-the 2×2 home-screen widget through the `home_widget` plugin. The important
-design point: **the native `ContentCounterStore` is the real source of truth** —
-the widget provider (`widget/ContentCounterWidgetProvider.kt`) renders its face
-from `ContentCounterStore(context).snapshot(...)`, so it stays correct even when
-the Flutter UI is dead.
+The 2×2 home-screen widget has **one** data source: the `cc_*` integers and
+style JSON in `detoxo_engine_prefs`, written by the native counter and read by
+`widget/ContentCounterWidgetProvider.kt` (`ContentCounterStore(context).snapshot(...)`),
+so it stays correct even when the Flutter UI is dead. Nothing is written from
+Dart — the former `home_widget` plugin mirror (its own `cc_today` / `cc_total`
+copy) was removed on 2026-08-29; native never read it.
 
-- `pushSnapshot(count)` writes `cc_today` and `cc_total` via
-  `HomeWidget.saveWidgetData<int>(...)` **and** calls
-  `_channel.refreshContentWidget()`. The `home_widget` write is a best-effort
-  convenience mirror; if the plugin is unavailable the `catch` swallows it and
-  the native render is still authoritative.
-- `pin()` calls `HomeWidget.requestPinWidget(...)` and falls back to the native
-  `pinContentWidget()` command if the launcher refuses or the plugin is
-  unavailable.
-- All widget calls are gated by `PlatformCapabilities.supportsBlockingEngine`
-  (Android-only); on unsupported platforms `pin()` returns `false` and
-  `pushSnapshot`/`refresh` no-op.
-
-So there are **two `cc_today`/`cc_total` copies**: the `home_widget` plugin's own
-data store (written by Dart, a convenience mirror) and the authoritative
-`detoxo_engine_prefs` integers written by the native counter. The provider only
-reads the latter; the native counter also calls `pushUpdate` directly on each
-counted reel (throttled) so the widget refreshes without any Dart round-trip.
+- Dart control is `home_content_counter/data/repositories/home_widget_repository_impl.dart`:
+  `pin()` → the `pinContentWidget` command (`false` when the launcher can't pin,
+  so the editor tells the user to add it by hand), `refresh()` → the
+  `refreshContentWidget` command. Off-Android the channel itself no-ops.
+- Native pushes: `ContentCounter.pushWidget` on every counted reel (throttled to
+  1 s with a trailing flush), `setCounterStyle` for a widget-style edit, and the
+  15-min `WatchdogJobService` job (the midnight rollover repair — the widget
+  otherwise re-renders only on a count).
 
 ---
 

@@ -2,18 +2,12 @@ import 'dart:async';
 import 'dart:ui' show ImageFilter;
 
 import 'package:detoxo/core/design_system/design_system.dart';
-import 'package:detoxo/core/di/injector.dart';
 import 'package:detoxo/core/navigation/routes.dart';
 import 'package:detoxo/core/widgets/common_widgets.dart';
 import 'package:detoxo/features/blocking/shared/domain/entities/app_settings.dart';
 import 'package:detoxo/features/blocking/shared/domain/entities/enums.dart';
 import 'package:detoxo/features/blocking/shared/presentation/settings_cubit.dart';
-import 'package:detoxo/features/content_counter/content_counter_appearance/presentation/widgets/bubble_preview.dart';
-import 'package:detoxo/features/content_counter/content_counter_appearance/presentation/widgets/widget_preview.dart';
-import 'package:detoxo/features/content_counter/content_counter_bubble/domain/repositories/bubble_repository.dart';
-import 'package:detoxo/features/content_counter/content_counter_core/domain/entities/counter_appearance.dart';
-import 'package:detoxo/features/content_counter/content_counter_core/domain/repositories/content_counter_repository.dart';
-import 'package:detoxo/features/content_counter/content_counter_core/domain/repositories/counter_appearance_repository.dart';
+import 'package:detoxo/features/content_counter/content_counter.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_svg/flutter_svg.dart';
@@ -24,84 +18,11 @@ import 'package:go_router/go_router.dart';
 /// reel counter's two surfaces — the floating bubble and the home-screen widget,
 /// each shown as a large live preview you tap to customise. The bubble carries
 /// its own on/off; the widget and both editors are gated by the counting master.
-class AppearanceScreen extends StatefulWidget {
+class AppearanceScreen extends StatelessWidget {
   const AppearanceScreen({super.key});
 
   @override
-  State<AppearanceScreen> createState() => _AppearanceScreenState();
-}
-
-class _AppearanceScreenState extends State<AppearanceScreen> {
-  final ContentCounterRepository _counter = sl<ContentCounterRepository>();
-  final BubbleRepository _bubble = sl<BubbleRepository>();
-  final CounterAppearanceRepository _appearanceRepo =
-      sl<CounterAppearanceRepository>();
-
-  bool _counterOn = true;
-  bool _bubbleOn = true;
-  bool _loaded = false;
-
-  // Live style + representative counts, so the previews read at a legible number
-  // even before anything is counted today.
-  CounterAppearance _appearance = const CounterAppearance.defaults();
-  int _today = 137;
-  int _total = 1240;
-
-  @override
-  void initState() {
-    super.initState();
-    unawaited(_load());
-  }
-
-  Future<void> _load() async {
-    final count = await _counter.current();
-    final appearance = await _appearanceRepo.current();
-    if (!mounted) return;
-    setState(() {
-      _counterOn = count.enabled;
-      _bubbleOn = count.bubbleEnabled;
-      _appearance = appearance;
-      if (count.today > 0) _today = count.today;
-      if (count.total > 0) _total = count.total;
-      _loaded = true;
-    });
-  }
-
-  /// Re-pull the styles after returning from an editor so the previews reflect
-  /// any change the user just made.
-  Future<void> _reloadStyles() async {
-    final appearance = await _appearanceRepo.current();
-    if (!mounted) return;
-    setState(() => _appearance = appearance);
-  }
-
-  void _toggleCounter(bool on) {
-    setState(() => _counterOn = on);
-    unawaited(_counter.setEnabled(enabled: on));
-  }
-
-  void _toggleBubble(bool on) {
-    setState(() => _bubbleOn = on);
-    unawaited(_applyBubble(on));
-  }
-
-  Future<void> _applyBubble(bool on) async {
-    await _bubble.setEnabled(enabled: on);
-    if (on && !await _bubble.canShow()) {
-      await _bubble.requestPermission();
-    }
-  }
-
-  Future<void> _openStyle(String route) async {
-    await context.push(route);
-    await _reloadStyles();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    final bubbleStyle = _appearance.bubble;
-    final widgetStyle = _appearance.widget;
-    final bubbleEditable = _counterOn && _bubbleOn;
     return GlassScaffold(
       appBar: const GlassAppBar(title: Text('Appearance')),
       body: ListView(
@@ -111,66 +32,103 @@ class _AppearanceScreenState extends State<AppearanceScreen> {
           AppSpacing.md,
           AppSpacing.xxl + MediaQuery.viewPaddingOf(context).bottom,
         ),
-        children: [
+        children: const [
           // ── App theme ───────────────────────────────────────────────────
-          const SectionHeader('Theme'),
-          const _ThemeControl(),
+          SectionHeader('Theme'),
+          _ThemeControl(),
 
           // ── App background ──────────────────────────────────────────────
-          const SectionHeader('Background'),
-          const _BackgroundSection(),
+          SectionHeader('Background'),
+          _BackgroundSection(),
 
           // ── Reel counter: master switch + the two surfaces as cards ─────
-          const SectionHeader('Reel counter'),
-          AppToggleTile(
-            leading: const IconBadge(icon: Icons.movie_filter_rounded),
-            title: 'Count short videos',
-            value: _counterOn,
-            onChanged: _loaded ? _toggleCounter : null,
-          ),
-          const SizedBox(height: AppSpacing.sm),
-          IntrinsicHeight(
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [
-                Expanded(
-                  child: _SurfaceCard(
-                    title: 'Bubble',
-                    preview: BubblePreview(
-                      style: bubbleStyle,
-                      count: _today,
-                      area: 88,
-                    ),
-                    editable: bubbleEditable,
-                    onEdit: () => unawaited(_openStyle(Routes.bubbleStyle)),
-                    trailing: AppToggle(
-                      value: _bubbleOn,
-                      enabled: _loaded && _counterOn,
-                      onChanged: _toggleBubble,
-                    ),
-                    disabledHint: !_counterOn ? 'Counting off' : 'Bubble off',
-                  ),
-                ),
-                const SizedBox(width: AppSpacing.sm),
-                Expanded(
-                  child: _SurfaceCard(
-                    title: 'Widget',
-                    preview: WidgetPreview(
-                      style: widgetStyle,
-                      today: _today,
-                      total: _total,
-                      size: 88,
-                    ),
-                    editable: _counterOn,
-                    onEdit: () => unawaited(_openStyle(Routes.homeWidget)),
-                    disabledHint: 'Counting off',
-                  ),
-                ),
-              ],
-            ),
-          ),
+          SectionHeader('Reel counter'),
+          _CounterSection(),
         ],
       ),
+    );
+  }
+}
+
+// ── Reel counter section ────────────────────────────────────────────────────────
+
+/// Master switch + the two surfaces. Reads the app-wide cubits: the live count
+/// (switch states, overlay grant, representative figures) and the appearance
+/// (live styles — an edit made in either editor shows here on return without a
+/// re-pull). No local mirrors of native state.
+class _CounterSection extends StatelessWidget {
+  const _CounterSection();
+
+  @override
+  Widget build(BuildContext context) {
+    final count = context.watch<ContentCounterCubit>().state;
+    final appearance = context.watch<CounterAppearanceCubit>().state;
+    final cubit = context.read<ContentCounterCubit>();
+    // Representative figures so the previews read at a legible number even
+    // before anything is counted today.
+    final today = count.today > 0 ? count.today : 137;
+    final total = count.total > 0 ? count.total : 1240;
+    final counterOn = count.enabled;
+    final bubbleOn = count.bubbleEnabled;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        AppToggleTile(
+          leading: const IconBadge(icon: Icons.movie_filter_rounded),
+          title: 'Count short videos',
+          value: counterOn,
+          onChanged: (on) => unawaited(cubit.setEnabled(enabled: on)),
+        ),
+        const SizedBox(height: AppSpacing.sm),
+        IntrinsicHeight(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(
+                child: _SurfaceCard(
+                  title: 'Bubble',
+                  preview: BubblePreview(
+                    style: appearance.bubble,
+                    count: today,
+                    area: 88,
+                  ),
+                  editable: counterOn && bubbleOn,
+                  onEdit: () => unawaited(context.push(Routes.bubbleStyle)),
+                  trailing: AppToggle(
+                    value: bubbleOn,
+                    enabled: counterOn,
+                    onChanged: (on) =>
+                        unawaited(cubit.setBubbleEnabled(enabled: on)),
+                  ),
+                  disabledHint: !counterOn ? 'Counting off' : 'Bubble off',
+                  // Truthful state: the switch is on but the overlay grant is
+                  // missing, so no bubble can appear — say so, offer the fix.
+                  notice: count.bubbleBlocked
+                      ? 'Needs “Display over other apps” — tap to allow'
+                      : null,
+                  onNotice: () => unawaited(cubit.requestOverlay()),
+                ),
+              ),
+              const SizedBox(width: AppSpacing.sm),
+              Expanded(
+                child: _SurfaceCard(
+                  title: 'Widget',
+                  preview: WidgetPreview(
+                    style: appearance.widget,
+                    today: today,
+                    total: total,
+                    size: 88,
+                  ),
+                  editable: counterOn,
+                  onEdit: () => unawaited(context.push(Routes.homeWidget)),
+                  disabledHint: 'Counting off',
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }
@@ -261,7 +219,8 @@ class _ThemeControl extends StatelessWidget {
 /// Tapping the preview opens the editor — but only when [editable]; otherwise the
 /// preview dims and a one-line hint explains what to switch on. [trailing] holds
 /// the surface's own on/off switch (the bubble) or is null (the widget, gated by
-/// the counting master).
+/// the counting master). [notice] is a warning line (with a tap action) for a
+/// surface that is switched on but cannot actually appear.
 class _SurfaceCard extends StatelessWidget {
   const _SurfaceCard({
     required this.title,
@@ -270,6 +229,8 @@ class _SurfaceCard extends StatelessWidget {
     required this.onEdit,
     this.trailing,
     this.disabledHint,
+    this.notice,
+    this.onNotice,
   });
 
   final String title;
@@ -278,6 +239,8 @@ class _SurfaceCard extends StatelessWidget {
   final VoidCallback onEdit;
   final Widget? trailing;
   final String? disabledHint;
+  final String? notice;
+  final VoidCallback? onNotice;
 
   @override
   Widget build(BuildContext context) {
@@ -305,9 +268,13 @@ class _SurfaceCard extends StatelessWidget {
             ),
           ),
           const SizedBox(height: AppSpacing.xs),
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: editable ? onEdit : null,
+          // AppPressable, not a bare GestureDetector: the preview is the only
+          // way into the editor, so it must announce as a (possibly disabled)
+          // button to TalkBack / switch access.
+          AppPressable(
+            enabled: editable,
+            onTap: onEdit,
+            semanticLabel: 'Edit $title style',
             child: AnimatedOpacity(
               duration: AppDurations.fast,
               opacity: editable ? 1 : 0.4,
@@ -331,6 +298,32 @@ class _SurfaceCard extends StatelessWidget {
                 style: text.bodySmall?.copyWith(
                   color: context.glass.onGlassMuted,
                 ),
+              ),
+            ),
+          ],
+          if (notice != null) ...[
+            const SizedBox(height: AppSpacing.xs),
+            AppPressable(
+              onTap: onNotice ?? () {},
+              semanticLabel: notice,
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.warning_amber_rounded,
+                    size: 14,
+                    color: AppColors.warning,
+                  ),
+                  const SizedBox(width: AppSpacing.xxs),
+                  Expanded(
+                    child: Text(
+                      notice!,
+                      style: text.bodySmall?.copyWith(
+                        color: AppColors.warning,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
           ],
@@ -433,6 +426,9 @@ class _BackgroundSection extends StatelessWidget {
 /// Aurora). The SVG is blurred to mirror the full-screen ambient background —
 /// which blurs its SVG heavily — so the swatch reads like what actually renders.
 /// The selected card animates to an accent ring + glow with a check badge.
+/// Same shape as the design system's `VariantCarousel` card, minus the per-card
+/// label (the name is shown once below the row) — fold into it if the two
+/// ever need to move together.
 class _BgCard extends StatelessWidget {
   const _BgCard({
     required this.style,

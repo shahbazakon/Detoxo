@@ -75,7 +75,7 @@ final List<ShowcaseStep> featureShowcaseSteps = [
     body:
         'One and done. Watch a single reel, then Detoxo locks straight back to '
         'your base mode. Looping or quick-scrolling won’t cost extra — a reel '
-        'only counts once you’ve watched it a couple of seconds.',
+        'only unlocks once you’ve watched it a couple of seconds.',
   ),
   ShowcaseStep(
     key: FeatureShowcaseKeys.unblock,

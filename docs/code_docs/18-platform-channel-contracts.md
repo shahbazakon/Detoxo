@@ -1,10 +1,10 @@
 # Platform Channel Contracts
 
 The Dart app and the native Android engine communicate over exactly **two Flutter
-platform channels**, plus **one out-of-band bridge** (the `home_widget` plugin)
-for the home-screen widget. This doc is the complete, source-derived contract:
-every command method (args + return) on the MethodChannel, every event `type` +
-payload shape on the EventChannel, and the widget bridge keys.
+platform channels** — the home-screen widget included (pinned and refreshed by
+two commands below; the former `home_widget` plugin bridge is gone). This doc is
+the complete, source-derived contract: every command method (args + return) on
+the MethodChannel and every event `type` + payload shape on the EventChannel.
 
 Channel names are defined once in `lib/core/constants/channel_constants.dart` and
 mirrored in the native `MainActivity`:
@@ -243,11 +243,15 @@ Notes:
 
 | Method | Args | Native effect | Returns | Dart wrapper |
 |---|---|---|---|---|
-| `setContentCounterEnabled` | `{enabled: Bool}` (default `true`) | `store.enabled`; `service.contentCounter.setEnabled` | `true` | `setContentCounterEnabled({enabled})` |
-| `setContentBubbleEnabled` | `{enabled: Bool}` (default `true`) | `store.bubbleEnabled`; `service.contentCounter.setBubbleEnabled` | `true` | `setContentBubbleEnabled({enabled})` |
+| `setContentCounterEnabled` | `{enabled: Bool}` (missing → no-op) | `store.enabled`; `service.contentCounter.setEnabled` | `true`; `false` when `enabled` is absent/malformed (nothing written) | `setContentCounterEnabled({enabled})` |
+| `setContentBubbleEnabled` | `{enabled: Bool}` (missing → no-op) | `store.bubbleEnabled`; `service.contentCounter.setBubbleEnabled` | `true`; `false` when `enabled` is absent/malformed | `setContentBubbleEnabled({enabled})` |
 | `pinContentWidget` | — | `AppWidgetManager.requestPinAppWidget(ContentCounterWidgetProvider)` | `Boolean` (false if launcher can't pin / < API 26) | `pinContentWidget()` |
 | `refreshContentWidget` | — | `ContentCounterWidgetProvider.pushUpdate(store.snapshot)` | `true` | `refreshContentWidget()` |
-| `setCounterStyle` | `{bubble?: Map, widget?: Map}` | persists changed surface(s), live-re-renders bubble + all pinned widgets | `true` | `setCounterStyle({bubble, widget})` |
+| `setCounterStyle` | `{bubble?: Map, widget?: Map}` | persists each present surface (`as? Map` — a malformed one is skipped) and live-re-renders **only that surface**: `bubble` → the visible bubble, `widget` → all pinned widgets | `true` | `setCounterStyle({bubble, widget})` |
+
+The bubble's `BubbleRepository.canShow()` reads `canDrawOverlays` **tri-state**
+(`invokeBoolOrNull`): `null` = the call didn't answer, rendered as unknown —
+never as denied ([17](17-content-counter.md) §6.1).
 
 **`setCounterStyle` payload** — each sub-map is a style *wire map*; only the keys
 present are updated (the Dart wrapper uses null-aware spread `{'bubble': ?bubble,
@@ -321,24 +325,17 @@ ever posted them and no Dart consumer read them.
 
 ---
 
-## Home-widget bridge (out of band)
+## Home-screen widget (over the command channel)
 
-The home-screen reel-counter widget is **not** driven over the two channels above.
-It uses the `home_widget` plugin as a side bridge, in
-`lib/features/content_counter/home_content_counter/data/repositories/home_widget_repository_impl.dart`:
-
-- **Data keys** (`HomeWidget.saveWidgetData<int>`): `cc_today`, `cc_total`.
-- **Provider**: `ContentCounterWidgetProvider` — `name`/`androidName`
-  `"ContentCounterWidgetProvider"`, qualified
-  `"com.errorxperts.detoxo.widget.ContentCounterWidgetProvider"`.
-- **Update**: `HomeWidget.updateWidget(...)` re-renders the provider.
-- **Pin**: `HomeWidget.requestPinWidget(...)`; on failure (plugin unavailable /
-  launcher refused) it falls back to the native `pinContentWidget` command.
-
-The native provider renders from `ContentCounterStore` (the **native store is the
-source of truth**), so these `home_widget` calls only trigger a refresh/pin — a
-`home_widget` failure never breaks counting. Every `pushSnapshot` also calls
-`refreshContentWidget` on the command channel as the authoritative render path.
+The home-screen reel-counter widget is driven by exactly two commands above —
+`pinContentWidget` and `refreshContentWidget` — through
+`lib/features/content_counter/home_content_counter/data/repositories/home_widget_repository_impl.dart`
+(`pin()` / `refresh()`). The native provider renders from `ContentCounterStore`
+(the **native store is the source of truth**); nothing is written from Dart.
+The former `home_widget` plugin side-bridge was removed: its `saveWidgetData`
+keys were never read natively, it rendered every pinned widget twice per push,
+and its `requestPinWidget` never threw, so the launcher-can't-pin case was
+misreported as success.
 
 ---
 
@@ -353,8 +350,8 @@ source of truth**), so these `home_widget` calls only trigger a refresh/pin — 
   arm; unknown methods → `notImplemented`.
 - **Events**: 6 live types multiplexed by `type`; every declared constant has
   a native emitter.
-- **Widget**: separate `home_widget` bridge, keys `cc_today`/`cc_total`, provider
-  `ContentCounterWidgetProvider`, native store is source of truth.
+- **Widget**: `pinContentWidget` / `refreshContentWidget` on the command channel;
+  provider `ContentCounterWidgetProvider`, native store is source of truth.
 
 See also [03-detection-engine.md](03-detection-engine.md) for how `blocked` is
 produced, and the content-counter engine doc for `contentCounted`

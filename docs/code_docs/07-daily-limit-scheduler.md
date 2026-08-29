@@ -354,8 +354,18 @@ A **global** `StreakCubit(sl<StreakRepository>())..load()` is registered in
 `lib/main.dart`. The dashboard hero (`dashboard_tab.dart`) — which already computes
 `underLimit = hasLimit && spent < limit` for the ring — calls
 `observe(now, underLimit)` in a post-frame callback each build (bloc skips equal
-states, so re-observes are cheap no-ops). The pure transition
-(`StreakCubit.advance`, `@visibleForTesting`) is:
+states, so re-observes are cheap no-ops), but **only once every input is real**:
+the counter snapshot has landed (`ContentCount.loaded`), the limit has loaded
+(`DailyLimit.dateSignature` non-empty — `load()` always stamps today's), and
+counting is on (`ContentCount.enabled`; with it off usage-time isn't measured,
+so a zero must not earn a day — and the streak pill shows "—", since the stored
+streak isn't reconciled until counting resumes, when a skipped gap resets it).
+`StreakCubit.observe` additionally ignores calls until its own `load()` has
+emitted. Before these guards the hero's first build
+observed the unloaded defaults — no limit → "today failed", and the empty
+`Streak()` advanced and **persisted** over the real one — which wiped or froze
+the streak on cold starts. The pure transition (`StreakCubit.advance`,
+`@visibleForTesting`) is:
 
 - **same day** → a failure is sticky (`todayFailed |= !underLimit`);
 - **consecutive day** → carry yesterday's committed streak forward if it qualified,

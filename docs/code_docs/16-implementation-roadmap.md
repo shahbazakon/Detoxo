@@ -142,7 +142,7 @@ by where business rules live:
 | Blocking & limits | `web_blocker_test.dart`, `blocklist_install_filter_test.dart`, `streak_test.dart` |
 | Protected apps | `protected_apps_test.dart` (catalog, repo salvage/migration, cubit, fail-closed PIN gate, wire contract) |
 | Permissions | `permissions_restricted_settings_test.dart` (ECM / non-Play install path) |
-| Content counter | `counter_style_test.dart` |
+| Content counter | `content_counter_test.dart` (snapshot mapping, cubit switches + overlay grant, `formatBubbleClock` mirror), `counter_style_test.dart` (Dart) · `android/app/src/test/kotlin/…/engine/ReelTrackerTest.kt` (native counting rule, JVM — run by `precommit` when a JDK 17 is present, see [23-testing-runbook.md](23-testing-runbook.md)) |
 | Help & upgrade | `help_test.dart`, `app_upgrader_test.dart`, `legal_web_view_test.dart` |
 | Dashboard widgets | `blocker_tile_test.dart`, `mode_selector_test.dart` |
 | Feedback | `app_feedback_test.dart` |
@@ -308,7 +308,7 @@ release.
 - `README.md`
 - `pubspec.yaml`
 - `tool/check_boundaries.sh`
-- `test/domain_test.dart`, `test/app_settings_test.dart`, `test/plans_pause_curious_test.dart`, `test/usage_ladder_test.dart`, `test/access_protection_test.dart`, `test/web_blocker_test.dart`, `test/blocklist_install_filter_test.dart`, `test/counter_style_test.dart`, `test/app_feedback_test.dart`
+- `test/domain_test.dart`, `test/app_settings_test.dart`, `test/plans_pause_curious_test.dart`, `test/usage_ladder_test.dart`, `test/access_protection_test.dart`, `test/web_blocker_test.dart`, `test/blocklist_install_filter_test.dart`, `test/counter_style_test.dart`, `test/content_counter_test.dart`, `test/app_feedback_test.dart`
 - `lib/core/storage/local_store.dart`
 - `lib/features/blocking/shared/data/repositories/config_repository_impl.dart`
 - `lib/features/access_protection/data/repositories/pin_repository_impl.dart`

@@ -18,8 +18,7 @@ import 'package:detoxo/features/blocking/shared/domain/entities/app_settings.dar
 import 'package:detoxo/features/blocking/shared/domain/entities/enums.dart';
 import 'package:detoxo/features/blocking/shared/domain/repositories/blocking_repositories.dart';
 import 'package:detoxo/features/blocking/shared/presentation/settings_cubit.dart';
-import 'package:detoxo/features/content_counter/content_counter_core/domain/repositories/content_counter_repository.dart';
-import 'package:detoxo/features/content_counter/content_counter_core/presentation/content_counter_cubit.dart';
+import 'package:detoxo/features/content_counter/content_counter.dart';
 import 'package:detoxo/features/limits/daily_limit/domain/repositories/daily_limit_repository.dart';
 import 'package:detoxo/features/limits/daily_limit/presentation/daily_limit_cubit.dart';
 import 'package:detoxo/features/limits/streak/domain/repositories/streak_repository.dart';
@@ -87,7 +86,16 @@ class DetoxoApp extends StatelessWidget {
         // Live reel-counter stream (today count + today usage time) and the
         // daily limit — both feed the dashboard screen-time ring.
         BlocProvider(
-          create: (_) => ContentCounterCubit(sl<ContentCounterRepository>()),
+          create: (_) => ContentCounterCubit(
+            sl<ContentCounterRepository>(),
+            sl<BubbleRepository>(),
+          ),
+        ),
+        // Bubble + widget styling, shared by the Appearance hub and both
+        // editors. Lazy: hydrated from native on the first screen that reads it.
+        BlocProvider(
+          create: (_) =>
+              CounterAppearanceCubit(sl<CounterAppearanceRepository>()),
         ),
         BlocProvider(
           create: (_) => DailyLimitCubit(sl<DailyLimitRepository>())..load(),

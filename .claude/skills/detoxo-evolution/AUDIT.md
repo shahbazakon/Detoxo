@@ -29,12 +29,12 @@ Already known, pre-tiered. Reference by name when relevant; report only *changes
 
 | Item | Tier | Notes |
 |---|---|---|
-| `tool/boundaries_baseline.txt` (12 grandfathered boundary violations) | 1 | Root cause: `blocking/shared/presentation/settings_cubit.dart` reached into by six features. Burn-down candidates are valid findings; the list itself is not news. |
+| `tool/boundaries_baseline.txt` (8 grandfathered boundary violations, down from 12 on 2026-08-29 via the content_counter barrel) | 1 | Root cause: `blocking/shared/presentation/settings_cubit.dart` reached into by five features. Burn-down candidates are valid findings; the list itself is not news. |
 | `lib/core/theme/` duplicates `lib/core/design_system/` tokens + theme | 1 | Legacy. Consolidation direction: toward `design_system`. |
 | `lib/core/widgets/common_widgets.dart` overlaps `design_system/components/` | 1 | Same direction. Never create a third copy. |
-| Missing public barrels: `lib/features/content_counter/`, `lib/features/additional_feature/` | 1 | The boundary rule keys on barrels; these two features lack `<x>.dart`. |
+| Missing public barrel: `lib/features/additional_feature/` | 1 | The boundary rule keys on barrels; this feature lacks `<x>.dart` (`content_counter` got its barrel on 2026-08-29). |
 | No CI (`tool/dev.sh precommit` is the only gate) | 2 | Proposing CI is a Tier-2 enhancement, not a finding. |
-| 6 `ponytail:` ceiling markers (2 Kotlin, 4 docs) | settled | Deliberate heuristic ceilings (reel identity, active-event counting). Changing one is Tier 2 with a proposal. |
+| `ponytail:` ceiling markers (Kotlin + docs) | settled | Deliberate heuristic ceilings. Changing one is Tier 2 with a proposal. EVO-020 (2026-08-29) replaced the awareness counter's "scroll + 2s dwell" ceiling with settled-page identity in `engine/ReelTracker.kt` — its remaining ceilings (one-or-two-item inner lists — closable per platform with `pagerViewId`, EVO-024 — unindexed pagers, entry-page guess, backward peek) are listed in that file's KDoc. The One Reel gate's own page-at-event-time + 2s ceiling and the active-event usage-time ceiling are unchanged. |
 
 ## Severity rubric
 

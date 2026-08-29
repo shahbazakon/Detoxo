@@ -31,6 +31,18 @@ bash tool/qa.sh [-d <serial>] [--reset] [--baseline] \
 `-d` is optional when exactly one phone is attached — the driver resolves it, and lists them if
 there is more than one. Artifacts land in `build/qa/` (gitignored).
 
+The Android-free engine logic has plain JVM tests too (currently `engine/ReelTracker`,
+the reel counter's identity + dwell state machine). `dev.sh precommit` (and so
+`qa.sh functional`) runs them through `native_tests()` when it can find a JDK 17+
+(`$JAVA_HOME`, macOS `java_home -v 17+`, or the Homebrew `openjdk@17` keg) and
+**warns and skips** otherwise — a host without a JDK never fails the gate, it just
+doesn't cover the native rule. To run them alone:
+
+```bash
+cd android && JAVA_HOME=<jdk17> ./gradlew :app:testDebugUnitTest --tests '*ReelTrackerTest*'
+# report: build/app/reports/tests/testDebugUnitTest/index.html
+```
+
 `all` runs cheapest-first so a red Layer 1 shows up in ~30s instead of 17 minutes. Each device
 layer is self-contained — `perf` installs its own profile APK and clears its own
 onboarding/permission gates — so you can run them individually, in any order.
@@ -38,7 +50,7 @@ onboarding/permission gates — so you can run them individually, in any order.
 ## Everyday loop
 
 ```bash
-bash tool/dev.sh precommit     # before every commit — format, analyze, test, boundaries
+bash tool/dev.sh precommit     # before every commit — format, analyze, test, native tests (JDK 17), boundaries
 ```
 
 `tool/qa.sh functional` delegates to exactly this, and additionally tees the output to

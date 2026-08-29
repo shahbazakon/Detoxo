@@ -91,7 +91,6 @@ launcher icons) — run it bare for a menu or pass an entry name/number.
 | `permission_handler` | `^12.0.3` | **Wired** | Runtime permission checks/requests in `lib/features/permissions/data/repositories/permission_repository_impl.dart` (imported as `ph`). Also provides `openAppSettings()` (→ `ACTION_APPLICATION_DETAILS_SETTINGS`) for the restricted-settings recovery flow. Note: the *specialised* Android permissions (accessibility, overlay, usage-access, battery exemption, device admin) are driven natively over the MethodChannel, not through this package. |
 | `device_info_plus` | `^13.1.0` | **Wired** | Device/OS metadata (model, Android version) for diagnostics/feedback. |
 | `package_info_plus` | `^10.1.0` | **Wired** | App version/build number surfaced in Settings / feedback. Also supplies `installerStore` (→ `getInstallSourceInfo().initiatingPackageName`) for the restricted-settings / ECM detection in [13-onboarding-permissions.md](13-onboarding-permissions.md) §3.4. |
-| `home_widget` | `^0.7.0` | **Wired** | Bridge to the native home-screen **content-counter widget** (`ContentCounterWidgetProvider.kt`). Dart writes the `cc_today` / `cc_total` keys and pins/refreshes the widget. See [17-content-counter.md](17-content-counter.md). |
 
 ---
 

@@ -69,6 +69,7 @@ class AdaptiveSlider extends StatelessWidget {
     this.divisions,
     this.enabled = true,
     this.color,
+    this.semanticFormatter,
     super.key,
   });
 
@@ -81,6 +82,11 @@ class AdaptiveSlider extends StatelessWidget {
 
   /// Active-track tint. Defaults to the live (background-adaptive) brand accent.
   final Color? color;
+
+  /// What a screen reader announces for a value — pass the same formatter the
+  /// visible value label uses ("56 dp", "120%"), else TalkBack reads a bare
+  /// percentage of the track that matches nothing on screen.
+  final String Function(double value)? semanticFormatter;
 
   @override
   Widget build(BuildContext context) {
@@ -106,6 +112,7 @@ class AdaptiveSlider extends StatelessWidget {
       max: max,
       divisions: divisions,
       activeColor: tint,
+      semanticFormatterCallback: semanticFormatter,
       onChanged: on ? onChanged : null,
     );
   }

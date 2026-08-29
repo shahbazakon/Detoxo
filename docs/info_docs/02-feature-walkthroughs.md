@@ -400,7 +400,8 @@ Detoxo counts the short videos you actually watch — Reels, Shorts, and other
 infinite-feed clips — so the habit becomes visible. It's **on by default** and
 runs **independently of blocking**: it keeps counting even while blocking is off,
 paused, or the app is one you didn't block. A video only counts once you've
-watched it for **about 2 seconds**, so quick scroll-bys don't inflate the number.
+**stopped on it for about a second**, and the same reel never counts twice — quick
+scroll-bys, half-swipes and scrolling the comments don't inflate the number.
 
 The counter's controls live on the **Appearance** screen — open it from the menu
 (or **Settings → Appearance**) to turn counting on/off, toggle the bubble, and
@@ -411,10 +412,19 @@ breakdown, open **Activity**.
 
 On the **Appearance** screen, under **Reel counter**:
 
-- **Count short videos** — the master on/off for the whole counter.
+- **Count short videos** — the master on/off for the whole counter. With it
+  off, Detoxo says so wherever a number would otherwise mislead: the
+  **Activity** card explains that counting is off, and the home screen's
+  screen-time ring reads "Counting off — screen time not measured" instead of a
+  reassuring zero (and your "days under your limit" streak doesn't advance on an
+  unmeasured day).
 - The **Bubble** and **Home widget** each appear as a card with a large live
   preview. The **Bubble** card has its own on/off switch; tap either card's preview
   to open its editor (available once the relevant switch — and counting — is on).
+- If the bubble is switched on but Android's **Display over other apps**
+  permission is missing, the Bubble card shows a warning — *Needs "Display over
+  other apps" — tap to allow* — and tapping it opens the setting. The warning
+  clears by itself when you come back with the permission granted.
 
 ### The floating bubble
 
@@ -448,7 +458,8 @@ and your all-time total.
 2. Confirm the placement your launcher offers.
 
 The widget updates itself as you scroll — you don't need to open Detoxo to keep it
-current.
+current — and rolls over to the new day on its own (within about 15 minutes of
+midnight, even if you haven't watched anything yet).
 
 ### Make it yours (appearance)
 

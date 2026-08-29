@@ -47,8 +47,26 @@ t_watch()    { run dart run build_runner watch --delete-conflicting-outputs; }
 t_genclean() { run dart run build_runner clean; }
 t_fresh()    { run flutter clean; run flutter pub get; t_gen; }
 t_quality()  { fmt; run dart fix --apply; run flutter analyze; }
-t_precommit(){ fmt; run flutter analyze; run flutter test; run bash tool/check_boundaries.sh; }
-t_validate() { t_fresh; fmt; run flutter analyze; run flutter test; run bash tool/check_boundaries.sh; }
+t_precommit(){ fmt; run flutter analyze; run flutter test; native_tests; run bash tool/check_boundaries.sh; }
+t_validate() { t_fresh; fmt; run flutter analyze; run flutter test; native_tests; run bash tool/check_boundaries.sh; }
+
+# Native JVM tests (the engine's pure-Kotlin state machines, e.g. ReelTracker).
+# Gradle needs a JDK 17+; the system `java` is often older, so resolve one:
+# $JAVA_HOME if set, else macOS's java_home, else the Homebrew openjdk@17 keg.
+# Missing JDK → warn and skip, never fail the gate on a host without one.
+native_tests() {
+  local jdk="${JAVA_HOME:-}"
+  [ -z "$jdk" ] && command -v /usr/libexec/java_home >/dev/null 2>&1 \
+    && jdk=$(/usr/libexec/java_home -v 17+ 2>/dev/null || true)
+  [ -z "$jdk" ] && [ -d /opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home ] \
+    && jdk=/opt/homebrew/opt/openjdk@17/libexec/openjdk.jdk/Contents/Home
+  if [ -z "$jdk" ] || [ ! -x "$jdk/bin/java" ]; then
+    printf '%s⚠ native tests skipped: no JDK 17+ (set JAVA_HOME).%s\n' "$RED" "$OFF" >&2
+    return 0
+  fi
+  printf '%s→ (cd android && JAVA_HOME=%s ./gradlew :app:testDebugUnitTest)%s\n' "$DIM" "$jdk" "$OFF"
+  (cd android && JAVA_HOME="$jdk" ./gradlew -q :app:testDebugUnitTest)
+}
 # Three QA layers on a real device. `QA_ARGS` passes through to tool/qa.sh:
 #   QA_ARGS='-d ABC123 perf' bash tool/dev.sh qa
 # See .claude/skills/detoxo-auto-test/SKILL.md.

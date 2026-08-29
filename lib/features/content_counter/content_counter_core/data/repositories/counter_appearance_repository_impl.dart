@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:detoxo/core/platform_channels/engine_channel.dart';
+import 'package:detoxo/core/utils/app_logger.dart';
 import 'package:detoxo/features/content_counter/content_counter_bubble/domain/entities/bubble_style.dart';
 import 'package:detoxo/features/content_counter/content_counter_core/domain/entities/counter_appearance.dart';
 import 'package:detoxo/features/content_counter/content_counter_core/domain/repositories/counter_appearance_repository.dart';
@@ -32,13 +33,15 @@ class CounterAppearanceRepositoryImpl implements CounterAppearanceRepository {
       _channel.setCounterStyle(widget: style.toWire());
 
   /// Parses a persisted style value. Native stores each style as a JSON string;
-  /// returns null (→ entity defaults) when absent, empty, or malformed.
+  /// returns null (→ entity defaults) when absent, empty, or malformed — the
+  /// malformed case is logged, since it silently resets the user's styling.
   Map<String, dynamic>? _decode(Object? raw) {
     if (raw is! String || raw.isEmpty) return null;
     try {
       final decoded = jsonDecode(raw);
       return decoded is Map ? Map<String, dynamic>.from(decoded) : null;
-    } catch (_) {
+    } on Object catch (e) {
+      AppLogger.e('counter style decode', e);
       return null;
     }
   }

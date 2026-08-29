@@ -17,6 +17,7 @@ import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.provider.Settings
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
@@ -31,6 +32,7 @@ import com.errorxperts.detoxo.engine.DateKeys
 import com.errorxperts.detoxo.engine.DetectionConfig
 import com.errorxperts.detoxo.engine.DetectorRule
 import com.errorxperts.detoxo.engine.PlatformRule
+import com.errorxperts.detoxo.engine.ReelTracker
 import com.errorxperts.detoxo.engine.ServiceEventBus
 import com.errorxperts.detoxo.engine.WebBlockEngine
 import com.errorxperts.detoxo.engine.recycleSafe
@@ -145,6 +147,12 @@ class DetoxoAccessibilityService : AccessibilityService() {
     // so CommandHandler can reach it via the service instance.
     val contentCounter by lazy { ContentCounter(this) }
     private val lastCountEventByPackage = ConcurrentHashMap<String, Long>()
+    // Consecutive counting-pass misses per package, cycling 0..DFS_SKIP: the
+    // stage-3 DFS runs only at 0 (see countContent). Main thread only.
+    private val countMisses = HashMap<String, Int>()
+    // Scroll-field calibration log switch, read once per bind (a property
+    // lookup per raw scroll event would otherwise sit on the pre-throttle path).
+    private val scrollDebug = Log.isLoggable(TAG, Log.DEBUG)
 
     // ── Website blocking ──────────────────────────────────────────────────────
     private val webEngine by lazy { WebBlockEngine(this) }
@@ -164,14 +172,18 @@ class DetoxoAccessibilityService : AccessibilityService() {
     // Runtime-only dwell state (meaningless across a service restart); the
     // consumed count is persisted in ConfigStore so a restart keeps the user
     // blocked until an explicit re-tap, and these self-correct from it.
-    //  - `lastScrollAtMs`  : a reel-advance scroll (captured pre-throttle).
+    //  - `lastScrollAtMs`  : a reel-advance scroll (captured pre-throttle). Only
+    //    a scroll whose settled pager page differs from `oneReelPage` stamps it
+    //    (`ReelTracker.settledPage`), so mid-fling frames, comment-sheet and
+    //    caption scrolls, and a snap-back onto the same reel never do.
     //  - `reelViewStartMs` : when the current reel view began (0 = none/fresh).
     //  - `reelViewCounted` : the current reel already cost one count (loop-safe).
-    //  - `lastReelCountMs` : when the last reel was counted (debounces in-reel
-    //    scrolls, e.g. opening comments, from being read as a reel advance).
+    //  - `lastReelCountMs` : when the last reel was counted (second guard against
+    //    an in-reel scroll being read as a reel advance).
     // A reel counts toward the allowance only after MIN_VIEW_MS (2s) of dwell, so
     // a quick flick-through or a single looping reel costs at most one count.
     @Volatile private var lastScrollAtMs = 0L
+    @Volatile private var oneReelPage = ReelTracker.NO_INDEX
     @Volatile private var reelViewStartMs = 0L
     @Volatile private var reelViewCounted = false
     @Volatile private var lastReelCountMs = 0L
@@ -266,8 +278,12 @@ class DetoxoAccessibilityService : AccessibilityService() {
             if (pkgProtected || config.platformsFor(pkg).isEmpty()) {
                 lastReelAtMs = 0L
                 reelViewStartMs = 0L // left the reel app → next reel is a fresh view
+                oneReelPage = ReelTracker.NO_INDEX
             }
-            if (contentCounter.isEnabled) {
+            // The soft keyboard's window carries the IME's package: to the
+            // counter that is not a foreground change (typing a comment must
+            // not suspend the reel).
+            if (contentCounter.isEnabled && !isImePackage(pkg)) {
                 contentCounter.onForegroundChanged(
                     pkg,
                     !pkgProtected && config.platformsFor(pkg).any { isReelPlatform(it) },
@@ -318,12 +334,20 @@ class DetoxoAccessibilityService : AccessibilityService() {
 
         // One Reel / Unblock: capture reel-advance scrolls BEFORE the throttle
         // below. A scroll swallowed by the 150 ms throttle would leave the next
-        // reel looking like the same one and leak it past the allowance.
+        // reel looking like the same one and leak it past the allowance. Only a
+        // scroll that lands on a different pager page is an advance; a
+        // multi-item list (comments) never is, an unindexed view always is.
         if (activePlan == PLAN_ONE_REEL &&
             event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED &&
             config.platformsFor(pkg).isNotEmpty()
         ) {
-            lastScrollAtMs = System.currentTimeMillis()
+            val page = ReelTracker.settledPage(event.fromIndex, event.toIndex)
+            if (page != ReelTracker.IGNORE &&
+                (page == ReelTracker.NO_INDEX || page != oneReelPage)
+            ) {
+                lastScrollAtMs = System.currentTimeMillis()
+                oneReelPage = page
+            }
         }
 
         // Per-package throttle.
@@ -364,7 +388,7 @@ class DetoxoAccessibilityService : AccessibilityService() {
 
                 for (detector in platform.detectors) {
                     if (detector.viewDetector != "FINDBYID" && detector.viewDetector != "VIEWID_RES_NAME") continue
-                    if (matchesMemo(root, event, detector, pkg)) {
+                    if (matchesMemo(root, event, detector)) {
                         // Conscious mode: a reel is on screen. While there's allowance,
                         // mark "watching" (so the accountant drains the bank) and let
                         // it play. With an empty bank we leave "watching" untouched and
@@ -402,23 +426,23 @@ class DetoxoAccessibilityService : AccessibilityService() {
         root: AccessibilityNodeInfo,
         event: AccessibilityEvent,
         detector: DetectorRule,
-        pkg: String,
-    ): Boolean = matchMemo.getOrPut(detector) { matches(root, event, detector, pkg) }
+    ): Boolean = matchMemo.getOrPut(detector) { matches(root, event, detector) }
 
+    /**
+     * [deep] = false runs stages 1–2 only (the counting pass's DFS back-off,
+     * EVO-021). Such a result is partial, so callers must NOT memoise it — a
+     * negative could otherwise be reused by the block pass.
+     */
     private fun matches(
         root: AccessibilityNodeInfo,
         event: AccessibilityEvent,
         detector: DetectorRule,
-        pkg: String,
+        deep: Boolean = true,
     ): Boolean {
-        // Fully-qualified target ids, built ONCE per call — stage 3 visits up
-        // to MAX_NODES nodes, and a per-node "$pkg$id" concat was measurable
-        // allocation churn on the hottest path.
-        val targets = if (detector.viewDetector == "VIEWID_RES_NAME") {
-            detector.identifiers
-        } else {
-            detector.identifiers.map { "$pkg$it" }
-        }
+        // Fully-qualified target ids, built once at config parse — stage 3
+        // visits up to MAX_NODES nodes, and a per-node "$pkg$id" concat was
+        // measurable allocation churn on the hottest path.
+        val targets = detector.qualifiedIds
 
         // Stage 1: the event source itself. (Every obtained node is recycled
         // before returning — matches() only ever answers a boolean.)
@@ -447,6 +471,8 @@ class DetoxoAccessibilityService : AccessibilityService() {
                 if (found) return true
             }
         }
+
+        if (!deep) return false
 
         // Stage 3: bounded DFS over the tree. The passed-in root is the caller's
         // to manage; every child obtained here is recycled exactly once.
@@ -492,17 +518,53 @@ class DetoxoAccessibilityService : AccessibilityService() {
         // math on every event; our own package is already excluded upstream.
         contentCounter.onAppActivity(pkg)
 
-        // A scroll is the closest proxy to "advanced to the next reel" (cheap,
-        // no tree walk); the counter debounces these itself.
+        // A scroll carries the pager's own visible-page range — the reel's
+        // identity — for free (no tree walk); the counter settles + classifies
+        // it. Forwarded pre-throttle: the last event of a fling is the one that
+        // matters. `adb shell setprop log.tag.DetoxoService DEBUG` (then re-bind
+        // the service) logs the raw fields for per-app calibration.
         if (event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
-            contentCounter.onScroll(pkg)
+            val deltaY = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) event.scrollDeltaY else 0
+            val isPager = pagerVerdict(event, platforms)
+            if (scrollDebug) {
+                Log.d(
+                    TAG,
+                    "scroll $pkg from=${event.fromIndex} to=${event.toIndex} " +
+                        "n=${event.itemCount} dy=$deltaY cls=${event.className} pager=$isPager",
+                )
+            }
+            contentCounter.onScroll(pkg, event.fromIndex, event.toIndex, deltaY, isPager)
         }
 
-        // Throttle the (more expensive) surface detection per package.
+        // Throttle the (more expensive) surface detection per package. Surface
+        // presence changes on screen transitions, not per frame, so this pass
+        // checks at a slower cadence than the block path — except a window
+        // state change, which always checks (reel entry / exit latency).
         val now = System.currentTimeMillis()
         val last = lastCountEventByPackage[pkg] ?: 0L
-        if (now - last < THROTTLE_MS) return
+        if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            now - last < COUNT_THROTTLE_MS
+        ) {
+            return
+        }
         lastCountEventByPackage[pkg] = now
+
+        // DFS back-off (EVO-021): on a non-reel screen (the feed) every check
+        // used to end in a full stage-3 walk (≤ MAX_NODES binder reads) just to
+        // learn "still no reel". After a miss, the next DFS_SKIP checks run
+        // stages 1–2 only — stage 2 (findAccessibilityNodeInfosByViewId under
+        // flagReportViewIds) resolves any real View by id, so a reel surface is
+        // still seen at the 400 ms cadence. A window change always checks deep.
+        // Shallow results bypass the memo (see matches), so the block pass —
+        // which never backs off — still gets its full answer.
+        // ponytail: a surface only the DFS finds (id not resolvable through the
+        // app's own Resources, e.g. a split-module id) is seen ≤ DFS_SKIP checks
+        // late (≤ 2 s), and a transient deep miss on it can end the reel session.
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            countMisses.remove(pkg)
+        }
+        val misses = countMisses[pkg] ?: 0
+        val deep = misses == 0
 
         val root = rootInActiveWindow ?: return
         try {
@@ -515,12 +577,19 @@ class DetoxoAccessibilityService : AccessibilityService() {
                     ) {
                         continue
                     }
-                    if (matchesMemo(root, event, detector, pkg)) {
+                    val hit = if (deep) {
+                        matchesMemo(root, event, detector)
+                    } else {
+                        matches(root, event, detector, deep = false)
+                    }
+                    if (hit) {
+                        countMisses.remove(pkg)
                         contentCounter.onReelSurfaceSeen(pkg)
                         return
                     }
                 }
             }
+            countMisses[pkg] = (misses + 1) % (DFS_SKIP + 1)
             // We actively checked a reel app's window and found NO reel surface —
             // the user is on a non-reel screen (e.g. the feed). Distinct from "no
             // event" (passive watching), which never reaches here and keeps the
@@ -529,6 +598,37 @@ class DetoxoAccessibilityService : AccessibilityService() {
         } finally {
             root.recycleSafe()
         }
+    }
+
+    /**
+     * EVO-024: is the scrolled view the platform's declared reel pager? `null`
+     * when no platform of this package declares a `pagerViewId` (the common
+     * case — costs nothing) or when the event carries no source; otherwise one
+     * `getSource()` binder read per scroll event, compared against the
+     * declared id(s). Only the awareness counter consumes the verdict.
+     */
+    private fun pagerVerdict(event: AccessibilityEvent, platforms: List<PlatformRule>): Boolean? {
+        var declared = false
+        for (p in platforms) if (p.pagerViewId != null) { declared = true; break }
+        if (!declared) return null
+        val source = event.source ?: return null
+        val sourceId = try {
+            source.viewIdResourceName
+        } finally {
+            source.recycleSafe()
+        }
+        for (p in platforms) if (p.pagerViewId != null && p.pagerViewId == sourceId) return true
+        return false
+    }
+
+    /**
+     * Whether [pkg] is the currently selected soft keyboard. Its window emits
+     * WINDOW_STATE_CHANGED under its own package; read on those events only
+     * (rare), uncached because the user can switch keyboards at any time.
+     */
+    private fun isImePackage(pkg: String): Boolean {
+        val ime = Settings.Secure.getString(contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)
+        return ime != null && pkg == ime.substringBefore('/')
     }
 
     /** A detectable reel/short surface (excludes feed / stories / status surfaces). */
@@ -900,16 +1000,19 @@ class DetoxoAccessibilityService : AccessibilityService() {
      * (2s) — so a quick flick-through and a single looping reel each cost at most
      * one. Reels are delimited by scrolls (consecutive reels share the same
      * continuously-visible view-id, so a scroll is the "moved to the next reel"
-     * signal), but a scroll only counts as an advance once ≥ 2s have passed since
-     * the last count — this debounces in-reel scrolls (opening comments/captions)
-     * so they don't burn the allowance or block the reel you're still watching.
+     * signal) — only a scroll that lands on a different pager page stamps
+     * `lastScrollAtMs` (see the pre-throttle capture), and it only counts as an
+     * advance once ≥ 2s have passed since the last count. Together these keep
+     * in-reel scrolls (opening comments/captions, a snap-back) from burning the
+     * allowance or blocking the reel you're still watching.
      * The currently-playing reel is NEVER blocked; only a fresh reel that appears
      * after the allowance is spent is blocked (which drives the Dart auto-revert).
      *
-     * ponytail: reel identity is heuristic (scroll + 2s dwell, no per-reel id). A
-     * spurious scroll > 2s after a count can still be misread as an advance, and a
-     * fast scroll within 2s of a count is absorbed into the current reel (a small
-     * leniency). Upgrade path = content-based reel identity.
+     * ponytail: reel identity is the pager page at event time (no settle window,
+     * unlike the awareness counter's ReelTracker) plus the 2s dwell. A spurious
+     * page change > 2s after a count can still be misread as an advance, and a
+     * fast advance within 2s of a count is absorbed into the current reel (a
+     * small leniency). Upgrade path = drive this gate from ReelTracker too.
      */
     private fun allowReelOrBlock(now: Long): Boolean {
         // A fresh reel view: session/app start, or a real scroll-advance (≥ 2s
@@ -960,6 +1063,7 @@ class DetoxoAccessibilityService : AccessibilityService() {
         reelViewCounted = false
         lastReelCountMs = 0L
         lastScrollAtMs = 0L
+        oneReelPage = ReelTracker.NO_INDEX
         reload()
         emitReelSessionState(blocked = false)
     }
@@ -1056,6 +1160,24 @@ class DetoxoAccessibilityService : AccessibilityService() {
         private const val CHANNEL_ID = "detoxo_protection_channel"
         private const val NOTIF_ID = 1125
         private const val THROTTLE_MS = 150L
+
+        /**
+         * Cadence of the awareness counter's surface check (its own throttle
+         * map; WINDOW_STATE_CHANGED bypasses it). Slower than the block path's
+         * [THROTTLE_MS] — which is untouched — because a stage-3 miss on a
+         * non-reel screen (the feed) is a full DFS, and a reel's dwell is
+         * anchored to the scroll event, not to this check, so the cadence
+         * never shifts a measurement. Both passes still share one tree walk
+         * per event through the detector memo.
+         */
+        private const val COUNT_THROTTLE_MS = 400L
+
+        /**
+         * Counting-pass checks that skip the stage-3 DFS after a miss before
+         * the next full walk (EVO-021). 4 → the DFS runs at most every 5th
+         * check (2 s) on a non-reel screen instead of every check.
+         */
+        private const val DFS_SKIP = 4
         private const val BLOCK_DEBOUNCE_MS = 1200L
         private const val BACK_RATE_LIMIT_MS = 1100L
         private const val MAX_NODES = 12000
@@ -1065,8 +1187,9 @@ class DetoxoAccessibilityService : AccessibilityService() {
 
         /**
          * A reel must be watched this long (2s) to count toward the One Reel /
-         * Unblock allowance — matching the awareness counter's dwell so a quick
-         * flick-through or a single looping reel costs at most one count.
+         * Unblock allowance, so a quick flick-through or a single looping reel
+         * costs at most one count. Deliberately longer than the awareness
+         * counter's 1s "seen" dwell: an allowance is spent on reels *watched*.
          */
         private const val MIN_VIEW_MS = 2000L
 

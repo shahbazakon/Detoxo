@@ -91,9 +91,9 @@ even when blocking is turned off or paused, so you always get an honest number.
   you have left before it flips back to the daily total.
 - A **home-screen widget** puts "reels today" and your all-time total right on your
   launcher, so the number greets you every time you unlock your phone.
-- A quick-scroll heuristic keeps the count honest: a video only counts once you've
-  actually watched it for about 2 seconds — flicking past clips doesn't inflate the
-  number.
+- A settled-page rule keeps the count honest: a video only counts once you've
+  stopped on it for about a second, and the same reel never counts twice — flicking
+  past clips, half-swipes and scrolling the comments don't inflate the number.
 
 You can restyle both the bubble and the widget — different looks, sizes, colors, and
 an optional "the more you watch, the redder it gets" usage tint — so your counter

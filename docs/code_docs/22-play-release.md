@@ -225,12 +225,14 @@ required a Console special-use declaration and manual review. The app declares n
 sees the persistent low-priority "Detoxo is active" notification, now posted with
 `NotificationManager.notify()`.
 
-`FOREGROUND_SERVICE` does still appear in the **merged** manifest, pulled in transitively
-by `home_widget` → `androidx.glance` → `androidx.work`. It is a normal install-time
-permission with no Console declaration attached, and stripping a library's permission with
-`tools:node="remove"` would make any future WorkManager foreground work throw
-`SecurityException` — so it stays. If a reviewer asks, the answer is "transitive from
-AndroidX WorkManager; the app starts no foreground service."
+`FOREGROUND_SERVICE` no longer arrives transitively (the `home_widget` →
+`androidx.glance` → `androidx.work` chain went with that package on 2026-08-29).
+**Drift to resolve before the next submission:** `android/app/src/main/AndroidManifest.xml`
+lines 7–8 still declare `FOREGROUND_SERVICE` **and** `FOREGROUND_SERVICE_SPECIAL_USE`
+directly, and the service calls `startAsForeground()` — which contradicts the paragraph
+above. Either drop the two `uses-permission` lines and the FGS call, or keep them and file
+the special-use declaration in the Console; this doc describes the intended state, not
+the manifest as it stands.
 
 **Battery optimisation.** Detoxo does **not** declare
 `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`. The "Unrestricted battery" step opens

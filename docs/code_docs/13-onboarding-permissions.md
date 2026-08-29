@@ -17,7 +17,7 @@ The whole flow is driven **imperatively from the splash screen** after app state
 
    `TargetsCubit.load()` is the slow leg (native config push + installed-package scan) and stays **off the critical path**: it is awaited only on a first run (for the seeding below) and fired `unawaited` otherwise.
 2. **First-run seeding of the enabled set.** If `settings.state.enabledPlatformIds` is empty, it awaits `targets.load()` and seeds from every target that is both `defaultEnabled` and `isInstalled` (via `settings.setEnabledPlatforms(...)`). Apps the user doesn't have are never pre-enabled.
-3. **Content-counter widget refresh** (fire-and-forget, never blocks routing): `_refreshReelCounterWidget()` reads `ContentCounterRepository.current()` and pushes it to the home-screen widget via `HomeWidgetRepository.pushSnapshot(...)`. The reel counter runs natively and is on by default, independent of blocking.
+3. **Content-counter widget refresh** (fire-and-forget, never blocks routing): `_refreshReelCounterWidget()` calls `HomeWidgetRepository.refresh()` — the native `refreshContentWidget` command re-renders any pinned widget from the engine store (a day-rollover repair; no snapshot round-trip). The reel counter runs natively and is on by default, independent of blocking.
 4. **Blocklist drift repair** (fire-and-forget): `syncEngineBlocklists()` (`lib/app/engine_sync.dart`) pushes the protected apps, the merged web blocklist and the whole-app blocks to the native engine so it matches Dart without any screen ever being opened. The same shared helper is the resume path's heavy leg ([12](12-analytics-notifications-resilience.md) §3.2) — the splash no longer carries its own copy of the trio.
 
 Then the gate, **in this exact order**:

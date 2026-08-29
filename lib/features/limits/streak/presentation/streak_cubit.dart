@@ -13,16 +13,27 @@ class StreakCubit extends Cubit<Streak> {
 
   final StreakRepository _repo;
 
+  // An observe() that lands before load() has emitted would advance — and
+  // PERSIST — the empty default over the real streak (the dashboard hero
+  // observes post-frame on its first build, ahead of load()'s continuation),
+  // wiping it on the next cold start. Nothing is reconciled until loaded.
+  bool _loaded = false;
+
   static String _sig(DateTime d) => daySignature(d);
 
-  Future<void> load() async => emit(await _repo.load());
+  Future<void> load() async {
+    emit(await _repo.load());
+    _loaded = true;
+  }
 
   /// Reconciles the streak for [now] given whether today is under the limit.
-  /// A cheap no-op when nothing changes (bloc skips equal states).
+  /// A cheap no-op when nothing changes (bloc skips equal states) and before
+  /// [load] has completed.
   Future<void> observe({
     required DateTime now,
     required bool underLimit,
   }) async {
+    if (!_loaded) return;
     final today = DateTime(now.year, now.month, now.day);
     // Calendar arithmetic, NOT subtract(Duration(days: 1)): that subtracts 24h
     // of absolute time, which on the day after a DST spring-forward (a 23h

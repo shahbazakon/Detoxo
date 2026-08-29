@@ -13,11 +13,7 @@ lib/features/limits/app_blocker/presentation/app_block_screen.dart package:detox
 lib/features/limits/app_blocker/presentation/app_block_screen.dart package:detoxo/features/blocking/blocklist/presentation/widgets/block_app_tile.dart
 lib/features/limits/app_blocker/presentation/app_block_screen.dart package:detoxo/features/blocking/shared/presentation/settings_cubit.dart
 lib/features/additional_feature/appearance/presentation/appearance_screen.dart package:detoxo/features/blocking/shared/presentation/settings_cubit.dart
-lib/features/additional_feature/appearance/presentation/appearance_screen.dart package:detoxo/features/content_counter/content_counter_appearance/presentation/widgets/bubble_preview.dart
-lib/features/additional_feature/appearance/presentation/appearance_screen.dart package:detoxo/features/content_counter/content_counter_appearance/presentation/widgets/widget_preview.dart
 lib/features/additional_feature/app_feedback/presentation/widgets/feedback_action_button.dart package:detoxo/features/blocking/shared/presentation/settings_cubit.dart
 lib/features/onboarding/presentation/onboarding_screen.dart package:detoxo/features/limits/daily_limit/presentation/daily_limit_cubit.dart
 lib/features/help/feature_tutorial/presentation/feature_tutorial_screen.dart package:detoxo/features/blocking/shared/presentation/settings_cubit.dart
 lib/features/help/report_issue/presentation/report_issue_dialog.dart package:detoxo/features/blocking/shared/presentation/settings_cubit.dart
-lib/features/analytics/presentation/analytics_screen.dart package:detoxo/features/content_counter/content_counter_core/presentation/content_counter_cubit.dart
-lib/features/analytics/presentation/analytics_screen.dart package:detoxo/features/content_counter/content_counter_core/presentation/widgets/reel_counter_card.dart

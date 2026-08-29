@@ -8,8 +8,7 @@ import 'package:detoxo/features/access_protection/presentation/pin_cubit.dart';
 import 'package:detoxo/features/blocking/blocklist/presentation/targets_cubit.dart';
 import 'package:detoxo/features/blocking/shared/domain/entities/enums.dart';
 import 'package:detoxo/features/blocking/shared/presentation/settings_cubit.dart';
-import 'package:detoxo/features/content_counter/content_counter_core/domain/repositories/content_counter_repository.dart';
-import 'package:detoxo/features/content_counter/home_content_counter/domain/repositories/home_widget_repository.dart';
+import 'package:detoxo/features/content_counter/content_counter.dart';
 import 'package:detoxo/features/permissions/presentation/permissions_cubit.dart';
 import 'package:detoxo/gen/assets.gen.dart';
 import 'package:flutter/material.dart';
@@ -86,11 +85,10 @@ class _SplashScreenState extends State<SplashScreen> {
     context.go(Routes.home);
   }
 
-  /// Pushes the current counter snapshot to the home-screen widget on launch.
-  Future<void> _refreshReelCounterWidget() async {
-    final count = await sl<ContentCounterRepository>().current();
-    await sl<HomeWidgetRepository>().pushSnapshot(count);
-  }
+  /// Re-renders any pinned home-screen widget from the native store on launch
+  /// (day rollover repair for a widget that saw no count since midnight).
+  Future<void> _refreshReelCounterWidget() =>
+      sl<HomeWidgetRepository>().refresh();
 
   @override
   Widget build(BuildContext context) {

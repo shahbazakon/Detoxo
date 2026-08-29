@@ -57,7 +57,7 @@ onAccessibilityEvent(event):
   if WINDOW_STATE_CHANGED:           ; track foreground for Conscious + counter
       foregroundPkg = pkg
       if pkgProtected or no platforms for pkg: lastReelAtMs = 0  ; end "watching"
-      contentCounter.onForegroundChanged(pkg, !pkgProtected && isReelBearing)
+      if pkg is not the IME: contentCounter.onForegroundChanged(pkg, !pkgProtected && isReelBearing)
   if pkgProtected or isProtected(foregroundPkg): return  ; PRIVACY GUARD (see 24)
   if pkg == our own package: return
   if contentCounter.isEnabled: countContent(event, pkg)   ; side-effect-free
@@ -66,14 +66,16 @@ onAccessibilityEvent(event):
       onAppBlocked(pkg); return                            ; whole-app block — ABOVE Pause (see 06)
   if now < pausedUntil: return                             ; Pause window (cached)
   if plan==ONE_REEL and event==VIEW_SCROLLED and pkg has platforms:
-      lastScrollAtMs = now                                 ; capture reel advance BEFORE throttle
+      page = ReelTracker.settledPage(fromIndex, toIndex)   ; pager page / NO_INDEX / IGNORE
+      if page != IGNORE and (page == NO_INDEX or page != oneReelPage):
+          lastScrollAtMs = now; oneReelPage = page         ; capture reel advance BEFORE throttle
   ── per-package throttle (THROTTLE_MS = 150) ──
   if BrowserUrlExtractor.isBrowser(pkg):                   ; web blocking branch
       handleBrowser(pkg) on window/content change; return    ; bails unless the FOCUSED root's package == pkg (split-screen)
   platforms = config.platformsFor(pkg)   ; return if empty
   for each platform (LEGACY/OVERLAY, enabled):
       for each detector (FINDBYID / VIEWID_RES_NAME):
-          if matches(root, event, detector, pkg):
+          if matches(root, event, detector):
               if plan==CURIOUS and bank>0: lastReelAtMs=now; return   ; let it play
               if plan==ONE_REEL and allowReelOrBlock(now): return     ; within allowance
               onDetected(pkg, platformId, detector)
@@ -161,15 +163,23 @@ lastEventByPackage[pkg] = now
 ```
 
 `lastEventByPackage` is a `ConcurrentHashMap<String, Long>`. The counting pass
-keeps its **own** independent throttle map (`lastCountEventByPackage`, same
-150 ms) so counting and blocking never starve each other.
+keeps its **own** independent throttle map (`lastCountEventByPackage`) at a
+slower `COUNT_THROTTLE_MS = 400` (a stage-3 miss on a non-reel screen is a full
+DFS, and a reel's dwell is anchored to the scroll event, not to this check);
+`TYPE_WINDOW_STATE_CHANGED` bypasses it. Counting and blocking never starve
+each other, and the per-event memo (§4) means both passes still share one walk.
+The counting pass additionally **backs off the stage-3 DFS** after a miss
+(EVO-021): a per-package `countMisses` counter cycles `0..DFS_SKIP = 4` and the
+DFS runs only at 0 — stages 1–2 still run every check. A shallow result comes
+from `matches(..., deep = false)` and is never memoised, so the block pass
+always gets the full three stages.
 
 ---
 
 ## 4. The 3-stage view-id detection (`matches`)
 
-`matches(root, event, detector, pkg)` is the verified detection primitive shared
-by both the block path and the counting path — and it is called through
+`matches(root, event, detector, deep = true)` is the verified detection primitive
+shared by both the block path and the counting path — and it is called through
 **`matchesMemo`**, a per-event memo (`matchMemo.getOrPut(detector) { matches(...) }`,
 cleared at the top of every event): the counting pass and the block pass test the
 same detectors against the same window, so the second pass becomes map lookups
@@ -188,11 +198,14 @@ kinds are honoured:
   (e.g. `com.instagram.androidid/clips_video_container`).
 - **`VIEWID_RES_NAME`** — the id is used **verbatim** as the target.
 
-The fully-qualified `targets` list is built **once per `matches()` call** (a
-`detector.identifiers.map { "$pkg$it" }` for `FINDBYID`, the identifiers verbatim
-otherwise) — stage 3 visits up to 12000 nodes, and a per-node `"$pkg$id"` concat
-was measurable allocation churn on the hottest path. Every positive match is
-gated on `isVisibleToUser` so an off-screen/recycled node never triggers a block.
+The fully-qualified `targets` list is `DetectorRule.qualifiedIds`, built **once
+at config parse** (`DetectionConfig.parsePlatform(p, pkg)`: `"$pkg$id"` for
+`FINDBYID`, the identifiers verbatim for `VIEWID_RES_NAME`) — stage 3 visits up
+to 12000 nodes, and a per-node (later per-call) `"$pkg$id"` concat was
+measurable allocation churn on the hottest path. Every positive match is gated
+on `isVisibleToUser` so an off-screen/recycled node never triggers a block.
+`matches(root, event, detector, deep = true)`: `deep = false` (the counting
+pass's back-off, §3) returns after stage 2 and must not be memoised.
 
 The three stages run cheapest-first and short-circuit on the first visible hit:
 
@@ -488,18 +501,23 @@ State in `ConfigStore`: `reelAllowance` (key `reel_allowance`) and the **persist
 event-driven inside the detector loop.
 
 **A reel counts only after 2s of dwell.** A reel is added to `reelsConsumed` **only
-after it's been watched for `MIN_VIEW_MS = 2000 ms`** (matching the awareness
-counter's dwell), so a quick flick-through (<2s) doesn't count, and a **single
-looping reel costs at most one count** — a `reelViewCounted` latch prevents
-re-counting the same view. Reels are still **scroll-delimited** (consecutive reels
-share the same continuously-visible view-id, so `matches()` fires the whole time a
-reel is up), but a scroll only counts as an **advance to a new reel** once **≥ 2s
-have passed since the last count** (`lastReelCountMs`) — this **debounces in-reel
-scrolls** (opening comments/captions/carousels) so they don't burn the allowance or
-block the reel you're still watching. The reel-advance scroll (`TYPE_VIEW_SCROLLED`
-from a monitored app) is still stamped into the runtime `@Volatile lastScrollAtMs`
-**before** the 150 ms throttle (§2.1 step 7); a scroll swallowed by the throttle
-would hide the advance.
+after it's been watched for `MIN_VIEW_MS = 2000 ms`** — deliberately longer than
+the awareness counter's 1 s "seen" dwell, because an allowance is spent on reels
+*watched* — so a quick flick-through (<2s) doesn't count, and a **single looping
+reel costs at most one count** — a `reelViewCounted` latch prevents re-counting the
+same view. Reels are still **scroll-delimited** (consecutive reels share the same
+continuously-visible view-id, so `matches()` fires the whole time a reel is up),
+but only a scroll that **lands on a different pager page** stamps the advance:
+`ReelTracker.settledPage(event.fromIndex, event.toIndex)` is compared with the
+runtime `oneReelPage` — a multi-item list (comments sheet) is never an advance, a
+snap-back onto the same page is not, an unindexed view (`−1`) always is. And a
+stamped advance only counts as an **advance to a new reel** once **≥ 2s have
+passed since the last count** (`lastReelCountMs`). Together these **keep in-reel
+scrolls** (opening comments/captions/carousels) from burning the allowance or
+blocking the reel you're still watching. The capture into the runtime `@Volatile
+lastScrollAtMs` happens **before** the 150 ms throttle (§2.1 step 7); a scroll
+swallowed by the throttle would hide the advance. `oneReelPage` resets with the
+other dwell fields (`armReelSession`, leaving the reel app).
 
 In the detector loop, when a reel matches under `ONE_REEL`:
 
@@ -552,11 +570,12 @@ Conscious). Native still owns the count and still boots the over-allowance reel 
 the override simply doesn't sit blocked afterwards. Full Dart/UI side in
 [05-plans-pause-conscious.md](05-plans-pause-conscious.md) §7.4.
 
-> `ponytail:` reel identity is heuristic (scroll + 2s dwell, no per-reel id). A
-> spurious scroll **> 2s** after a count can still be misread as an advance, and a
-> fast scroll **within 2s** of a count is absorbed into the current reel (a small
+> `ponytail:` reel identity here is the pager page at event time (no settle window,
+> unlike the awareness counter's `ReelTracker`) plus the 2s dwell. A spurious page
+> change **> 2s** after a count can still be misread as an advance, and a fast
+> advance **within 2s** of a count is absorbed into the current reel (a small
 > leniency — safer than false-blocking the reel you're still watching). Accepted
-> ceiling; the service comment names the upgrade path (content-based reel identity).
+> ceiling; the upgrade path is to drive this gate from `ReelTracker` too.
 > Full Dart/UI side in [05-plans-pause-conscious.md](05-plans-pause-conscious.md) §7.
 
 ---
@@ -569,12 +588,22 @@ reads/writes block state. It:
 
 1. Accrues **whole-app usage time** for monitored apps via
    `contentCounter.onAppActivity(pkg)` (see below), before the throttle.
-2. On `TYPE_VIEW_SCROLLED`, forwards `contentCounter.onScroll(pkg)` (cheap proxy
-   for "advanced to next reel"; the counter debounces internally).
-3. Applies its **own** 150 ms per-package throttle (`lastCountEventByPackage`).
+2. On `TYPE_VIEW_SCROLLED`, forwards `contentCounter.onScroll(pkg, fromIndex,
+   toIndex, scrollDeltaY, isPager)` — the pager's own visible-page range is the
+   reel's identity; `ReelTracker` settles and classifies it (see
+   [17-content-counter.md](17-content-counter.md) §2.3). `isPager` comes from
+   `pagerVerdict()` (EVO-024): `null` unless a platform of this package declares
+   a `pagerViewId` ([02](02-detection-config-schema.md) §1.3), else one
+   `event.source` read compared against the declared id. A
+   `Log.isLoggable`-gated line logs the raw fields (incl. `pager=`) for per-app
+   calibration.
+3. Applies its **own** per-package throttle (`lastCountEventByPackage`,
+   `COUNT_THROTTLE_MS = 400`; `TYPE_WINDOW_STATE_CHANGED` bypasses it).
 4. Reuses the read-only `matches()` walk — through the shared per-event
-   `matchesMemo`, so the block pass that follows never re-walks a detector this
-   pass already tested — against **reel** platforms only
+   `matchesMemo` when the check is deep, so the block pass that follows never
+   re-walks a detector this pass already tested; after a miss the next
+   `DFS_SKIP = 4` checks are shallow (stages 1–2, memo bypassed) — against
+   **reel** platforms only
    (`isReelPlatform`, which excludes `NON_REEL_PLATFORM_IDS`: `ig_feed`,
    `ig_stories`, `insta_pro_stories`, `insta_pro2_stories`, `snap_stories`,
    `wa_status`, `wab_status`). A hit → `onReelSurfaceSeen(pkg)`; actively
@@ -652,7 +681,9 @@ for UI affordances and Dart-side policy — the hot path itself runs in Kotlin.
 
 | Constant | Native value | Dart mirror (`EngineTimings`) | Purpose |
 |----------|--------------|-------------------------------|---------|
-| `THROTTLE_MS` | 150 ms | `eventThrottle = 150 ms` | Per-package event throttle. |
+| `THROTTLE_MS` | 150 ms | `eventThrottle = 150 ms` | Per-package event throttle (block path). |
+| `COUNT_THROTTLE_MS` | 400 ms | — | Counter surface-check cadence (own map; `WINDOW_STATE_CHANGED` bypasses). |
+| `DFS_SKIP` | 4 | — | Counting-pass checks that skip the stage-3 DFS after a miss (EVO-021); the block path never skips. |
 | `BLOCK_DEBOUNCE_MS` | 1200 ms | `blockDebounce = 1200 ms` | Min gap between block actions. |
 | `BACK_RATE_LIMIT_MS` | 1100 ms | `backRateLimit = 1100 ms` | Simulated-Back rate limit. |
 | `MAX_NODES` | 12000 | `maxNodeTraversal = 12000` | DFS node cap in `matches`. |
@@ -701,6 +732,7 @@ writes don't re-serialise it.
 
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/accessibility/DetoxoAccessibilityService.kt`
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/DetectionConfig.kt`
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/ReelTracker.kt` — `settledPage()`, shared with the One Reel gate; the counting rule itself is [17](17-content-counter.md)
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/ConfigStore.kt`
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/DateKeys.kt`
 - `android/app/src/main/res/values/strings.xml` — block toast (`toast_blocked`) + FGS notification strings

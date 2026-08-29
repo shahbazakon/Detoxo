@@ -28,21 +28,30 @@ class WidgetPreview extends StatelessWidget {
       WidgetTheme.dark => true,
       WidgetTheme.system => Theme.of(context).brightness == Brightness.dark,
     };
-    return SizedBox(
-      width: size,
-      height: size,
-      child: CustomPaint(
-        painter: _WidgetFacePainter(
-          style: style,
-          today: today,
-          total: total,
-          dark: dark,
+    // A CustomPaint has no semantics of its own; describe what the picture
+    // shows so a screen-reader user learns what the widget will look like.
+    return Semantics(
+      label: 'Home widget preview: $today reels today, $total all time',
+      excludeSemantics: true,
+      child: SizedBox(
+        width: size,
+        height: size,
+        child: CustomPaint(
+          painter: _WidgetFacePainter(
+            style: style,
+            today: today,
+            total: total,
+            dark: dark,
+          ),
         ),
       ),
     );
   }
 }
 
+/// MIRROR CONTRACT: every colour literal and size ratio below reproduces the
+/// native `WidgetBitmapRenderer` (`widget/WidgetBitmapRenderer.kt`) — the
+/// declared source of truth. Edit the Kotlin first, then mirror here.
 class _WidgetFacePainter extends CustomPainter {
   _WidgetFacePainter({
     required this.style,

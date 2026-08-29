@@ -90,8 +90,10 @@ dependencies:
   sleek_circular_slider: ^2.1.0
   showcaseview: ^5.1.0
 
-  # Home-screen reel counter widget (native widget control surface).
-  home_widget: ^0.7.0
+  # No home_widget: the reel-counter widget is pinned, rendered and refreshed
+  # over our own command channel (`pinContentWidget` / `refreshContentWidget`);
+  # the plugin leg wrote keys native never read and its pin() could not tell a
+  # launcher that can't pin from one that can.
   feedback: ^3.2.0
   flutter_email_sender: ^10.0.1
   # In-app browser for hosted legal pages (Privacy Policy / Terms), rendered in

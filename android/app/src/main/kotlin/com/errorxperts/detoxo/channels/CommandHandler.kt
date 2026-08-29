@@ -277,14 +277,18 @@ class CommandHandler(
                     ?: ContentCounterStore(context).snapshot(dateKey())
                 result.success(snap)
             }
+            // A missing/malformed flag is a no-op (like pushConfig), never a
+            // silent "on": the persisted value is the user's choice.
             "setContentCounterEnabled" -> {
-                val on = call.argument<Boolean>("enabled") ?: true
+                val on = call.argument<Boolean>("enabled")
+                    ?: return result.success(false)
                 ContentCounterStore(context).enabled = on
                 DetoxoAccessibilityService.instance?.contentCounter?.setEnabled(on)
                 result.success(true)
             }
             "setContentBubbleEnabled" -> {
-                val on = call.argument<Boolean>("enabled") ?: true
+                val on = call.argument<Boolean>("enabled")
+                    ?: return result.success(false)
                 ContentCounterStore(context).bubbleEnabled = on
                 DetoxoAccessibilityService.instance?.contentCounter?.setBubbleEnabled(on)
                 result.success(true)
@@ -297,17 +301,18 @@ class CommandHandler(
                 result.success(true)
             }
             "setCounterStyle" -> {
-                // Persist the changed surface(s), then live-re-render: the visible
-                // bubble via the service, and every pinned widget directly.
+                // Persist the changed surface(s), then live-re-render ONLY that
+                // surface: the visible bubble via the service, every pinned
+                // widget directly. A malformed surface is skipped, not a crash.
                 val store = ContentCounterStore(context)
-                call.argument<Map<String, Any?>>("bubble")?.let {
+                (call.argument<Any?>("bubble") as? Map<*, *>)?.let {
                     store.bubbleStyleJson = JSONObject(it).toString()
+                    DetoxoAccessibilityService.instance?.contentCounter?.onStyleChanged()
                 }
-                call.argument<Map<String, Any?>>("widget")?.let {
+                (call.argument<Any?>("widget") as? Map<*, *>)?.let {
                     store.widgetStyleJson = JSONObject(it).toString()
+                    ContentCounterWidgetProvider.pushUpdate(context, store.snapshot(dateKey()))
                 }
-                DetoxoAccessibilityService.instance?.contentCounter?.onStyleChanged()
-                ContentCounterWidgetProvider.pushUpdate(context, store.snapshot(dateKey()))
                 result.success(true)
             }
             "pinContentWidget" -> result.success(pinContentWidget())

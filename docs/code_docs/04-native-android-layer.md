@@ -80,7 +80,10 @@ On `onServiceConnected` the service sets its static `instance`, marks `ConfigSto
 - **Per-event detector-match memo** (`matchMemo: HashMap<DetectorRule, Boolean>`, cleared at the top of every event): the counting pass and the block pass test the same detectors against the same window — the second pass becomes map lookups instead of a second full tree walk. Events are delivered serially on the main thread, so no locking. (`ponytail:` the memo is keyed by detector only while each pass obtains its own root — sub-ms staleness accepted; upgrade path is threading one root through both passes.)
 - **Hot-path settings cache** — `masterOn` / `pausedUntil` / `activePlan` / `enabledPlatformIds` are `@Volatile` mirrors on the service (same pattern as the protected/blocked-app caches), refreshed in `reload()` — the event path reads **no SharedPreferences** for these ([03](03-detection-engine.md) §2.2).
 - **Conscious bank write batching** — the 1 Hz accountant used to do two prefs `.apply()` per tick (≈172k writes/day); the bank now lives in a `@Volatile` cache and `flushConsciousBank()` writes at most once per 5 s (`CONSCIOUS_FLUSH_MS`), forced on bank-empty / plan stop / `reload()` / unbind/destroy. The tick anchor is runtime-only (a restart re-anchors to now). Ceiling: ≤5 s of earned bank lost on a hard kill ([03](03-detection-engine.md) §5.2).
-- **Precomputed detector targets** — `matches()` builds its fully-qualified target-id list **once per call** instead of a `"$pkg$id"` concat per DFS node (up to 12000 nodes).
+- **Precomputed detector targets** — the fully-qualified target-id list is `DetectorRule.qualifiedIds`, built once at config parse, instead of a `"$pkg$id"` concat per DFS node (up to 12000 nodes) or per call.
+- **Counting-pass DFS back-off (EVO-021)** — after a miss the counting pass runs stages 1–2 only for the next `DFS_SKIP = 4` checks (memo bypassed, so the block pass still gets a full answer); a hit or a window change resets it. Feed browsing with blocking off went from a full walk every 400 ms to one every 2 s.
+- **Hot-path prefs + clock** — `ContentCounterStore.enabled` / `bubbleEnabled` are cached per instance (the service gates every event on `enabled`); `DateKeys.today()` is memoised per wall-clock minute; the bubble remembers a denied `canDrawOverlays` for 5 s instead of a binder round-trip per surface check; `ContentCounter` runs entirely on `uptimeMillis`.
+- **Counter surface-check cadence** — the counting pass checks the window at `COUNT_THROTTLE_MS = 400` (block path stays at 150 ms; `WINDOW_STATE_CHANGED` bypasses) because a stage-3 miss on a non-reel screen is a full DFS and nothing about a reel's dwell is anchored to the check — the reel's identity and timing come from the scroll event's own `fromIndex`/`toIndex`, settled and judged by `engine/ReelTracker.kt` on one Handler timer ([17](17-content-counter.md) §2.3).
 - **Node recycling below API 33** — `engine/NodeRecycling.kt` adds a `recycleSafe()` extension (no-op on 33+, where `recycle()` became a no-op; swallows double-recycle throws). Used in `matches()` tree walks and `BrowserUrlExtractor`; unrecycled nodes were a steady native-heap leak on the hottest path. All five `rootInActiveWindow` obtain sites (event loop, `countContent`, `handleBrowser`, and `performBackInternal`/`lockScreen` via the `activeWindowProtectedNow()` helper) recycle the root in `try/finally`.
 - **Batched usage-time writes** — `ContentCounter` accumulates foreground usage in memory (`pendingUsageMs`) and flushes to prefs at `USAGE_FLUSH_MS` (5 s), on app switch, on protected-app foreground, on every snapshot pull, and on dispose. Previously it wrote SharedPreferences once per accessibility event at scroll frequency. Ceiling: ≤5 s of usage time lost on a hard process kill.
 - **Shared day-key formatter** — `engine/DateKeys.kt`: one `ThreadLocal` `"dd-MM-yyyy"` `SimpleDateFormat` (thread-local because the widget provider / job service can run off the main thread), replacing the duplicated per-call allocations (service, `ContentCounter`, `CommandHandler`, widget provider — and the bubble's `dateKey()`, the last `SimpleDateFormat` holdout, now timezone-change correct). `today()` re-applies `TimeZone.getDefault()` on every call — the cached formatter would otherwise freeze the zone captured at first use, and the service process lives long enough for a timezone change (travel / auto-adjust) to roll days over at the old zone's midnight.
@@ -91,7 +94,7 @@ On `onServiceConnected` the service sets its static `instance`, marks `ConfigSto
 
 `DetoxoAccessibilityService.instance` (volatile, private-set) is the bridge everything else uses: `CommandHandler` reaches the live service through it (`instance?.reload()`, `instance?.contentCounter`, `instance?.consciousSnapshot()`, `instance?.armReelSession()`, `instance?.reelSessionSnapshot()`, etc.). `isRunning()` returns whether `instance != null`. Every call site null-checks, so commands degrade gracefully when the service is disabled.
 
-**One Reel / Unblock runtime state.** The `oneReel` plan (allow N reels, then block — algorithm in [03-detection-engine.md](03-detection-engine.md) §5.3) keeps its dwell state in `@Volatile` runtime fields on the service (`lastScrollAtMs`, `reelViewStartMs`, `reelViewCounted`, `lastReelCountMs`) that are meaningless across a restart, so `armReelSession()` zeroes them, `reload()`s, and emits fresh state. The consumed-count itself lives in `ConfigStore` (`reels_consumed`) and is **persisted**, so an OS-driven service restart keeps the user blocked until an explicit re-tap — the volatile timestamps self-correct from the persisted count. `reelSessionSnapshot()` (`{consumed, allowance, blocked, active}`) mirrors `consciousSnapshot()` and backs both the `reelSessionState` event and its pull query.
+**One Reel / Unblock runtime state.** The `oneReel` plan (allow N reels, then block — algorithm in [03-detection-engine.md](03-detection-engine.md) §5.3) keeps its dwell state in `@Volatile` runtime fields on the service (`lastScrollAtMs`, `oneReelPage`, `reelViewStartMs`, `reelViewCounted`, `lastReelCountMs`) that are meaningless across a restart, so `armReelSession()` zeroes them, `reload()`s, and emits fresh state. The consumed-count itself lives in `ConfigStore` (`reels_consumed`) and is **persisted**, so an OS-driven service restart keeps the user blocked until an explicit re-tap — the volatile timestamps self-correct from the persisted count. `reelSessionSnapshot()` (`{consumed, allowance, blocked, active}`) mirrors `consciousSnapshot()` and backs both the `reelSessionState` event and its pull query.
 
 Note the service is **never** started manually. An enabled AccessibilityService is bound (and re-bound after reboot) by the OS — and it cannot be rebound programmatically, which is why the boot-time hook only (re)arms the detect-and-notify watchdog rather than trying to restart anything (§5).
 
@@ -182,7 +185,11 @@ Event `type` values emitted by the native layer: `serviceStatus`, `blocked`, `we
 
 It intentionally does **not** restart the service. An enabled AccessibilityService is re-bound automatically by the OS after boot/update — and **cannot be rebound programmatically**, so after an OEM force-stop only the user can re-enable it. Detect + notify is therefore the ceiling (this matches EVO-013's Realme/ColorOS finding), and that is what the watchdog does. There is no date-changed receiver and no custom command broadcast — all commands arrive over the MethodChannel.
 
-`receivers/WatchdogJobService.kt` — a persisted periodic `JobScheduler` job:
+`receivers/WatchdogJobService.kt` — a persisted periodic `JobScheduler` job.
+Besides the liveness check, each run pushes the home-screen counter widget from
+the store (`ContentCounterWidgetProvider.pushUpdate`, a no-op when nothing is
+pinned) — the widget only re-renders on a count, so this is what turns its
+"today" over after midnight ([17](17-content-counter.md) §5.2):
 
 | Constant | Value |
 |---|---|
@@ -278,7 +285,7 @@ Above the four variants sits a **"reels left" override**: `setRemaining(Int?)` (
 - **Tap** → launches the app via a `PendingIntent` (`FLAG_UPDATE_CURRENT | FLAG_IMMUTABLE`).
 - **Pin request**: `CommandHandler.pinContentWidget()` calls `AppWidgetManager.requestPinAppWidget(...)` (API 26+, guarded by `isRequestPinAppWidgetSupported`).
 
-Provider metadata (`res/xml/content_counter_widget_info.xml`): `minWidth/minHeight 110dp`, `targetCell 2×2`, `updatePeriodMillis=0`, `resizeMode horizontal|vertical`, `widgetCategory home_screen`, initial + preview layouts. Note this is the **native** widget surface; the Dart side integrates via the `home_widget` package but the on-device render and reads are done here in Kotlin.
+Provider metadata (`res/xml/content_counter_widget_info.xml`): `minWidth/minHeight 110dp`, `targetCell 2×2`, `updatePeriodMillis=0`, `resizeMode horizontal|vertical`, `widgetCategory home_screen`, initial + preview layouts. This is the **only** widget surface: Dart pins and refreshes it through the `pinContentWidget` / `refreshContentWidget` commands, the render and all reads are done here in Kotlin, and the 15-min watchdog job re-pushes it so "today" rolls over after midnight (§5).
 
 ---
 
@@ -391,6 +398,7 @@ See §8.
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/channels/DetoxoEventStream.kt`
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/ServiceEventBus.kt`
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/ContentCounterStore.kt`
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/ReelTracker.kt` (counting rule; `settledPage` shared with the One Reel gate)
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/DateKeys.kt` (shared ThreadLocal day-key formatter)
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/AccessibilityCheck.kt` (shared enabled-in-Settings check)
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/NodeRecycling.kt` (`recycleSafe` extension)

@@ -21,15 +21,29 @@ class ContentCounterStore(context: Context) {
     private val prefs: SharedPreferences =
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
+    // The two flags are read on every accessibility event (the service gates
+    // the whole counting pass on `enabled`); cache them per instance so the
+    // hot path never takes the prefs lock. Every writer goes through the live
+    // service's instance too (CommandHandler calls ContentCounter.setEnabled /
+    // setBubbleEnabled after its own write), so the cache can't go stale.
+    private var enabledCache: Boolean? = null
+    private var bubbleCache: Boolean? = null
+
     /** Master on/off for the counter feature. Defaults on (awareness by default). */
     var enabled: Boolean
-        get() = prefs.getBoolean(KEY_ENABLED, true)
-        set(value) = prefs.edit().putBoolean(KEY_ENABLED, value).apply()
+        get() = enabledCache ?: prefs.getBoolean(KEY_ENABLED, true).also { enabledCache = it }
+        set(value) {
+            enabledCache = value
+            prefs.edit().putBoolean(KEY_ENABLED, value).apply()
+        }
 
     /** Whether the floating bubble overlay may be shown (gated separately). */
     var bubbleEnabled: Boolean
-        get() = prefs.getBoolean(KEY_BUBBLE, true)
-        set(value) = prefs.edit().putBoolean(KEY_BUBBLE, value).apply()
+        get() = bubbleCache ?: prefs.getBoolean(KEY_BUBBLE, true).also { bubbleCache = it }
+        set(value) {
+            bubbleCache = value
+            prefs.edit().putBoolean(KEY_BUBBLE, value).apply()
+        }
 
     /** Last bubble X position in px (−1 = unset → snaps to the default edge). */
     var bubbleX: Int
@@ -56,33 +70,39 @@ class ContentCounterStore(context: Context) {
         set(value) = prefs.edit().putString(KEY_WIDGET_STYLE, value).apply()
 
     /**
-     * Records one counted reel for [pkg]. Resets the today buckets first when the
-     * stored day differs from [dateKey] (midnight rollover), then increments the
-     * today + total totals and their per-app maps in a single edit.
+     * Records one counted reel for [pkg] plus any accumulated-but-unwritten
+     * usage time ([usageDeltaMs]) in ONE edit, and returns the resulting
+     * snapshot built from the maps it already parsed — a count used to cost
+     * three prefs writes and four JSON parses (usage flush + count + snapshot).
+     *
+     * Resets the today buckets first when the stored day differs from [dateKey]
+     * (midnight rollover). Shared-rollover invariant: `cc_date` gates BOTH the
+     * counts and the usage time, so whichever writer turns the day over must
+     * also zero the OTHER feature's today bucket — mirrored in [recordUsage].
      */
-    fun recordCount(pkg: String, dateKey: String) {
-        val storedDate = prefs.getString(KEY_DATE, "")
-        val rollover = storedDate != dateKey
+    fun recordCount(pkg: String, dateKey: String, usageDeltaMs: Long = 0L): Map<String, Any?> {
+        val rollover = prefs.getString(KEY_DATE, "") != dateKey
 
-        val todayTotal = if (rollover) 0 else prefs.getInt(KEY_TODAY, 0)
+        val today = (if (rollover) 0 else prefs.getInt(KEY_TODAY, 0)) + 1
+        val total = prefs.getInt(KEY_TOTAL, 0) + 1
         val perAppToday = if (rollover) JSONObject() else readMap(KEY_PER_APP_TODAY)
         val perAppTotal = readMap(KEY_PER_APP_TOTAL)
-
         perAppToday.put(pkg, perAppToday.optInt(pkg, 0) + 1)
         perAppTotal.put(pkg, perAppTotal.optInt(pkg, 0) + 1)
+        val delta = usageDeltaMs.coerceAtLeast(0L)
+        val timeToday = (if (rollover) 0L else prefs.getLong(KEY_TIME_TODAY, 0L)) + delta
+        val timeTotal = prefs.getLong(KEY_TIME_TOTAL, 0L) + delta
 
-        val editor = prefs.edit()
+        prefs.edit()
             .putString(KEY_DATE, dateKey)
-            .putInt(KEY_TODAY, todayTotal + 1)
-            .putInt(KEY_TOTAL, prefs.getInt(KEY_TOTAL, 0) + 1)
+            .putInt(KEY_TODAY, today)
+            .putInt(KEY_TOTAL, total)
             .putString(KEY_PER_APP_TODAY, perAppToday.toString())
             .putString(KEY_PER_APP_TOTAL, perAppTotal.toString())
-        // Shared-rollover invariant: cc_date gates BOTH counts and usage-time,
-        // so whichever writer turns the day over must also zero the OTHER
-        // feature's today bucket — else a same-day read after this write returns
-        // yesterday's value. Mirrored in [recordUsage].
-        if (rollover) editor.putLong(KEY_TIME_TODAY, 0L)
-        editor.apply()
+            .putLong(KEY_TIME_TODAY, timeToday)
+            .putLong(KEY_TIME_TOTAL, timeTotal)
+            .apply()
+        return snapshotOf(dateKey, today, total, perAppToday, perAppTotal, timeToday, timeTotal)
     }
 
     /**
@@ -116,24 +136,42 @@ class ContentCounterStore(context: Context) {
     fun snapshot(dateKey: String): Map<String, Any?> {
         val storedDate = prefs.getString(KEY_DATE, "") ?: ""
         val fresh = storedDate == dateKey
-        return mapOf(
-            "enabled" to enabled,
-            "bubbleEnabled" to bubbleEnabled,
-            "today" to if (fresh) prefs.getInt(KEY_TODAY, 0) else 0,
-            "total" to prefs.getInt(KEY_TOTAL, 0),
-            "date" to dateKey,
-            "perAppToday" to if (fresh) readMap(KEY_PER_APP_TODAY).toIntMap() else emptyMap(),
-            "perAppTotal" to readMap(KEY_PER_APP_TOTAL).toIntMap(),
-            // Whole-app foreground time (ms) in monitored social apps, today +
-            // all-time. Drives the dashboard screen-time ring and the bubble
-            // tap-to-reveal. Shares the same fresh/rollover gate as the counts.
-            "timeTodayMs" to if (fresh) prefs.getLong(KEY_TIME_TODAY, 0L) else 0L,
-            "timeTotalMs" to prefs.getLong(KEY_TIME_TOTAL, 0L),
-            // Persisted appearance (JSON strings); the Dart cubit hydrates from these.
-            "bubbleStyle" to bubbleStyleJson,
-            "widgetStyle" to widgetStyleJson,
+        return snapshotOf(
+            dateKey = dateKey,
+            today = if (fresh) prefs.getInt(KEY_TODAY, 0) else 0,
+            total = prefs.getInt(KEY_TOTAL, 0),
+            perAppToday = if (fresh) readMap(KEY_PER_APP_TODAY) else JSONObject(),
+            perAppTotal = readMap(KEY_PER_APP_TOTAL),
+            timeToday = if (fresh) prefs.getLong(KEY_TIME_TODAY, 0L) else 0L,
+            timeTotal = prefs.getLong(KEY_TIME_TOTAL, 0L),
         )
     }
+
+    private fun snapshotOf(
+        dateKey: String,
+        today: Int,
+        total: Int,
+        perAppToday: JSONObject,
+        perAppTotal: JSONObject,
+        timeToday: Long,
+        timeTotal: Long,
+    ): Map<String, Any?> = mapOf(
+        "enabled" to enabled,
+        "bubbleEnabled" to bubbleEnabled,
+        "today" to today,
+        "total" to total,
+        "date" to dateKey,
+        "perAppToday" to perAppToday.toIntMap(),
+        "perAppTotal" to perAppTotal.toIntMap(),
+        // Whole-app foreground time (ms) in monitored social apps, today +
+        // all-time. Drives the dashboard screen-time ring and the bubble
+        // tap-to-reveal. Shares the same fresh/rollover gate as the counts.
+        "timeTodayMs" to timeToday,
+        "timeTotalMs" to timeTotal,
+        // Persisted appearance (JSON strings); the Dart cubit hydrates from these.
+        "bubbleStyle" to bubbleStyleJson,
+        "widgetStyle" to widgetStyleJson,
+    )
 
     /** Today's running total for [dateKey] (0 after a rollover). Cheap path for the bubble. */
     fun todayCount(dateKey: String): Int =

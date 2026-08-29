@@ -1,4 +1,7 @@
-import 'package:detoxo/core/design_system/design_system.dart';
+import 'package:detoxo/core/design_system/foundations/motion.dart';
+import 'package:detoxo/core/design_system/theme/app_theme.dart';
+import 'package:detoxo/core/design_system/tokens/app_motion.dart';
+import 'package:detoxo/core/design_system/tokens/app_spacing.dart';
 import 'package:flutter/material.dart';
 
 /// One selectable option in a [VariantCarousel]: a short label, a mini preview,
@@ -18,9 +21,11 @@ class VariantOption {
   final VoidCallback onTap;
 }
 
-/// A compact, horizontally-scrolling picker of style variants — the same
-/// live-preview/selectable-card pattern as the Settings background carousel.
-/// The selected card gets an accent ring + check badge.
+/// A compact, horizontally-scrolling picker of style variants — a live preview
+/// per card with the label beneath; the selected card gets an accent ring +
+/// check badge. Used by the counter's bubble / widget editors. The Appearance
+/// background picker is the same shape with the name shown once below the row
+/// (`_BgCard` there) — the next picker of either kind should reuse this one.
 class VariantCarousel extends StatelessWidget {
   const VariantCarousel({
     required this.options,

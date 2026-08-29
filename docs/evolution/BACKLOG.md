@@ -25,3 +25,8 @@ forever — the settled-decisions memory). IDs are monotonic and never reused.
 | EVO-017 | Compile the 18+ list from a JSON source (scrape folded in) + block adult TLDs | web_blocker + native asset + tool | 2 | done | S | 2026-08-28 | 2026-08-28 |
 | EVO-018 | Count adult-list blocks without naming the host | web_blocker (native) | 2 | done | S | 2026-08-28 | 2026-08-28 |
 | EVO-019 | Escalate to HOME when BACK can't leave a blocked page | web_blocker (native) | 2 | proposed | S | 2026-08-28 | — |
+| EVO-020 | Reel identity from the settled pager page + 1 s dwell (counter) | content_counter (native) + One Reel gate | 2 | done | M | 2026-08-29 | 2026-08-29 |
+| EVO-021 | Back off the stage-3 DFS on counting-pass misses | content_counter (native) | 2 | done | S | 2026-08-29 | 2026-08-29 |
+| EVO-022 | Truthful counter states (bubble grant, counting off) | content_counter, appearance, dashboard | 2 | done | S | 2026-08-29 | 2026-08-29 |
+| EVO-023 | Run the native JVM tests in the precommit gate | tool | 2 | done | S | 2026-08-29 | 2026-08-29 |
+| EVO-024 | Per-platform pager view-id for reel identity | content_counter (native) + config schema | 2 | done (mechanism; per-app ids pending device calibration) | M | 2026-08-29 | 2026-08-29 |

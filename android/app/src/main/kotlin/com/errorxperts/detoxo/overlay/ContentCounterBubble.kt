@@ -15,6 +15,7 @@ import android.graphics.Typeface
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.view.GestureDetector
@@ -55,6 +56,7 @@ class ContentCounterBubble(private val context: Context) {
     private var params: WindowManager.LayoutParams? = null
     private var shown = false
     private var warnedNoOverlay = false
+    private var overlayDeniedAtMs = 0L
     private var snapAnimator: ValueAnimator? = null
 
     /** Last count shown — replayed when the view is rebuilt on a style change. */
@@ -84,7 +86,13 @@ class ContentCounterBubble(private val context: Context) {
             return@runOnMain
         }
         if (view != null) detach() // OS tore the window down — reset for re-add
+        // show() runs on every surface check; without the grant each one was a
+        // binder round-trip to AppOps. Remember a denial briefly — a fresh
+        // grant is picked up on the first check after OVERLAY_RECHECK_MS.
+        val t = SystemClock.uptimeMillis()
+        if (t - overlayDeniedAtMs < OVERLAY_RECHECK_MS) return@runOnMain
         if (!Settings.canDrawOverlays(context)) {
+            overlayDeniedAtMs = t
             // Once per process: a revoked overlay grant otherwise reads as "the
             // counter stopped" with zero trace (counting itself keeps running).
             if (!warnedNoOverlay) {
@@ -93,6 +101,7 @@ class ContentCounterBubble(private val context: Context) {
             }
             return@runOnMain
         }
+        overlayDeniedAtMs = 0L
         val spec = BubbleStyleSpec.fromJson(store.bubbleStyleJson)
         val bubbleShowTime = spec.showTime
         val v = BubbleView(context, spec).apply {
@@ -377,6 +386,9 @@ class ContentCounterBubble(private val context: Context) {
 
         /** How long a tap-revealed time stays up before reverting to the count. */
         const val REVEAL_MS = 3000L
+
+        /** After a denied overlay check, skip the binder re-check for this long. */
+        const val OVERLAY_RECHECK_MS = 5000L
     }
 }
 

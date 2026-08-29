@@ -5,9 +5,7 @@ import 'package:detoxo/features/analytics/domain/repositories/analytics_reposito
 import 'package:detoxo/features/analytics/presentation/analytics_cubit.dart';
 import 'package:detoxo/features/blocking/shared/domain/entities/engine_event.dart';
 import 'package:detoxo/features/blocking/shared/domain/repositories/blocking_repositories.dart';
-import 'package:detoxo/features/content_counter/content_counter_core/domain/repositories/content_counter_repository.dart';
-import 'package:detoxo/features/content_counter/content_counter_core/presentation/content_counter_cubit.dart';
-import 'package:detoxo/features/content_counter/content_counter_core/presentation/widgets/reel_counter_card.dart';
+import 'package:detoxo/features/content_counter/content_counter.dart';
 import 'package:detoxo/features/dashboard/presentation/widgets/menu_button.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -15,19 +13,13 @@ import 'package:intl/intl.dart';
 
 /// Live feed of block events. Reachable two ways that share one cubit + list and
 /// differ only in chrome: the second HomeShell tab ([AnalyticsTab]) and the
-/// pushed drawer route ([AnalyticsScreen]).
+/// pushed drawer route ([AnalyticsScreen]). The reel counter card reads the
+/// app-wide `ContentCounterCubit` (provided above the router in `main.dart`).
 Widget _withCubit({required Widget child}) {
-  return MultiBlocProvider(
-    providers: [
-      BlocProvider(
-        create: (_) =>
-            AnalyticsCubit(sl<AnalyticsRepository>(), sl<EngineRepository>())
-              ..load(),
-      ),
-      BlocProvider(
-        create: (_) => ContentCounterCubit(sl<ContentCounterRepository>()),
-      ),
-    ],
+  return BlocProvider(
+    create: (_) =>
+        AnalyticsCubit(sl<AnalyticsRepository>(), sl<EngineRepository>())
+          ..load(),
     child: child,
   );
 }

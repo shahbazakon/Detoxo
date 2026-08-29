@@ -87,6 +87,7 @@ the unit the engine iterates.
 | `showInDashboard` | `bool` `false` | Show on the dashboard. |
 | `showAlwaysInBlockList` | `bool` `false` | Pin into the block list regardless of install state. |
 | `premiumExclusive` | `bool` `false` | Premium-gated surface. |
+| `pagerViewId` | `String` (absent) | **Native-only, EVO-024.** The reel pager's view id (`":id/name"`, qualified with the app package at parse time, or a full `pkg:id/name`). When present, the awareness counter takes page indices only from scroll events whose *source* is this view, so a one-or-two-item inner list (single-comment sheet, one-item carousel) can never pass as a reel page. Absent = classify every indexed scroll (the pre-EVO-024 behaviour). Values come from device calibration (`adb logcat -s DetoxoService:D`, the `scroll … cls=` lines); none are shipped yet. Ignored by the Dart model. |
 
 ### 1.4 Detector level (`DetectorModel`)
 
@@ -231,8 +232,8 @@ The parser is deliberately lenient (`org.json`, `opt*` everywhere; any throw yie
 `DetectionConfig.EMPTY`). It flattens the schema into **`Map<String, List<PlatformRule>>` keyed by package**:
 
 - Iterate `featuredApps`; for each app take `packageName` (**falling back to the map key** if absent), skip apps with no `platforms` array.
-- For each platform build a `PlatformRule` { `platformId`, `detectionType`, `premiumExclusive`, `defaultStatus`, `detectors` }.
-- For each entry in `detectors`, the **map key becomes `viewDetector`** (`FINDBYID`, `VIEWID_RES_NAME`, …) and the value becomes a `DetectorRule` { `viewDetector`, `identifiers`, `supportedBlockModes`, `defaultBlockMode` (default `PRESS_BACK`), `priority` (default `0`), `haltOnDetect` (default `true`), `childNodeLimit` (default `-1`) }.
+- For each platform build a `PlatformRule` { `platformId`, `detectionType`, `premiumExclusive`, `defaultStatus`, `detectors`, `pagerViewId` (optional; `":id/x"` → `"<pkg>:id/x"`, a value with its own package verbatim, blank → `null`) }.
+- For each entry in `detectors`, the **map key becomes `viewDetector`** (`FINDBYID`, `VIEWID_RES_NAME`, …) and the value becomes a `DetectorRule` { `viewDetector`, `identifiers`, `supportedBlockModes`, `defaultBlockMode` (default `PRESS_BACK`), `priority` (default `0`), `haltOnDetect` (default `true`), `childNodeLimit` (default `-1`), `qualifiedIds` (the `identifiers` prefixed with the package for `FINDBYID`, verbatim for `VIEWID_RES_NAME` — precomputed here so `matches()` never concatenates on the hot path) }.
 - `detectors.sortBy { it.priority }` — ascending priority ordering is applied at parse time.
 
 Fields the native side **ignores** entirely: everything at the app level except
@@ -248,6 +249,7 @@ data class DetectorRule(
     val priority: Int,
     val haltOnDetect: Boolean,
     val childNodeLimit: Int,
+    val qualifiedIds: List<String>,  // precomputed "<pkg>:id/x" targets for matches()
 )
 data class PlatformRule(
     val platformId: String,
@@ -255,6 +257,7 @@ data class PlatformRule(
     val premiumExclusive: Boolean,
     val defaultStatus: Boolean,
     val detectors: List<DetectorRule>,
+    val pagerViewId: String?,        // EVO-024: the reel pager's qualified view id, or null
 )
 ```
 

@@ -23,7 +23,8 @@ AccessibilityService (main process, single thread)
    │     ├─ countContent(event, pkg)      ← runs FIRST, side-effect-free
    │     └─ (block logic, only if masterEnabled & not paused)
    ▼
-ContentCounter.kt          decides WHEN a distinct reel is counted (dwell)
+ContentCounter.kt          fan-out + bubble visibility; owns the one tracker timer
+   ├─ ReelTracker.kt           WHEN a distinct reel is counted (page identity + dwell; pure Kotlin, unit-tested)
    ├─ ContentCounterStore.kt   persists to SharedPreferences "detoxo_engine_prefs"
    ├─ ContentCounterBubble.kt  floating overlay (WindowManager)
    └─ ContentCounterWidgetProvider.kt + WidgetBitmapRenderer.kt  home widget
@@ -33,9 +34,10 @@ MethodChannel "com.errorxperts.detoxo/commands"     (pull / toggles / style)
 EventChannel  "com.errorxperts.detoxo/events"        contentCounted {...}
    ▼
 Dart feature lib/features/content_counter/**
+   ├─ content_counter.dart        public barrel (entities, contracts, cubits, card, previews)
    ├─ content_counter_core        ContentCount, cubits, live card, repos
    ├─ content_counter_bubble      BubbleStyle + bubble on/off + overlay perm
-   ├─ home_content_counter        WidgetStyle + pin/refresh (home_widget pkg)
+   ├─ home_content_counter        WidgetStyle + pin/refresh (command channel)
    └─ content_counter_appearance  Bubble-style + Home-widget editor screens
 ```
 
@@ -67,17 +69,38 @@ if (System.currentTimeMillis() < store.pauseUntil) return
 `countContent(...)` **never presses back and never reads or writes block state**.
 It reuses the same read-only 3-stage `matches()` view-id search the blocker uses,
 but only to answer "is a reel surface on screen right now?". It has its own
-per-package throttle (`lastCountEventByPackage`, `THROTTLE_MS = 150`) separate
-from the block path's throttle, so the extra tree walk stays cheap even for apps
-that are not enabled for blocking.
+per-package throttle (`lastCountEventByPackage`, `COUNT_THROTTLE_MS = 400`,
+slower than the block path's 150 ms because a stage-3 miss on a non-reel screen
+is a full DFS and nothing about a reel's dwell is anchored to this check;
+`TYPE_WINDOW_STATE_CHANGED` bypasses it so reel entry/exit is seen at once).
+Scroll events are forwarded **before** that throttle, with the pager's own
+`fromIndex` / `toIndex` / `scrollDeltaY` (API 28+) — the reel's identity (§2.3).
+Setting `adb shell setprop log.tag.DetoxoService DEBUG` logs the raw scroll
+fields per event for per-app calibration; the switch is read once per service
+bind (`scrollDebug`), so re-bind the service after setting the property.
 
-Foreground changes are forwarded separately from `TYPE_WINDOW_STATE_CHANGED`:
+**DFS back-off (EVO-021).** On a non-reel screen every check is a miss, and a
+miss used to end in the full stage-3 walk. The pass keeps a per-package
+consecutive-miss counter (`countMisses`, cycling `0..DFS_SKIP = 4`): the DFS
+runs only when it is 0, so on the feed it walks at most every 5th check (2 s)
+while stages 1–2 (`findAccessibilityNodeInfosByViewId` under
+`flagReportViewIds`) still run every check. A hit and every
+`TYPE_WINDOW_STATE_CHANGED` reset it. Shallow results are computed with
+`matches(..., deep = false)` and **bypass the per-event memo**, so the block
+pass — which never backs off — always gets a full answer.
+`ponytail:` a surface only the DFS finds (an id the app's own `Resources`
+can't resolve) is seen ≤ 2 s late.
+
+Foreground changes are forwarded separately from `TYPE_WINDOW_STATE_CHANGED`.
+The soft keyboard's window emits this event under the IME's own package
+(`Settings.Secure.DEFAULT_INPUT_METHOD`), which is **not** a foreground change to
+the counter — typing a comment must not suspend the reel:
 
 ```kotlin
-if (contentCounter.isEnabled) {
+if (contentCounter.isEnabled && !isImePackage(pkg)) {
     contentCounter.onForegroundChanged(
         pkg,
-        config.platformsFor(pkg).any { isReelPlatform(it) },
+        !pkgProtected && config.platformsFor(pkg).any { isReelPlatform(it) },
     )
 }
 ```
@@ -104,34 +127,76 @@ private val NON_REEL_PLATFORM_IDS = setOf(
 
 Everything else detectable in a supported app is treated as a reel/short.
 
-### 2.3 Distinct-reel heuristic (dwell + scroll)
+### 2.3 Distinct-reel rule (settled-page identity + dwell) — `ReelTracker.kt`
 
-The core decision lives in `ContentCounter.kt`. State mutates only on the
-service's single main thread; all timers post to the same main `Looper`, so no
-locks are needed. Signals from the service:
+The decision lives in `engine/ReelTracker.kt`, a pure-Kotlin state machine
+(no Android imports; every call takes a monotonic `now` — `SystemClock.uptimeMillis`
+in production: the Handler's own clock, which stops in deep sleep so a phone that
+slept mid-reel can't wake up owing a dwell; usage-time deltas use the same clock)
+driven by `ContentCounter.kt`, which owns the single `Handler`
+runnable (`tickRunnable`, re-armed by `syncTimer()` from `tracker.nextDueAtMs`)
+and the fan-out. State mutates only on the service's main thread. Signals:
 
-| Signal | Fired when | Effect |
+| Signal | Fired when | Tracker effect |
 | --- | --- | --- |
-| `onForegroundChanged(pkg, isReelApp)` | window-state change to a new package | ends the current reel; hides the bubble if leaving for a non-reel app; ignores our own package + `com.android.systemui` |
-| `onReelSurfaceSeen(pkg)` | a reel surface is detected on screen | refreshes `lastReelSurfaceAtMs`, shows the bubble, starts a dwell window |
-| `onNoReelSurface(pkg)` | a reel app's window was checked and had **no** reel surface (e.g. the feed) | ends the reel, schedules a graced bubble hide |
-| `onScroll(pkg)` | `TYPE_VIEW_SCROLLED` in a reel app | ends the current dwell (advances to the "next reel") |
+| `onForegroundChanged(pkg, isReelApp)` | window-state change to a new package (never the IME) | `suspend()` — keeps the session, freezes the dwell; a return within `AWAY_EXPIRY_MS = 60s` resumes the same reel, later = fresh session. Hides the bubble unless the new package **is** the session's own app — another reel-capable app's feed included (its non-reel screens are not leave-evidence, so this is the only hide on that path; `onReelSurfaceSeen` re-shows it) |
+| `onReelSurfaceSeen(pkg)` | a reel surface is detected on screen | `surfaceSeen()` — starts / resumes / continues the session; clears no-surface evidence; shows the bubble |
+| `onNoReelSurface(pkg)` | a monitored app's window was checked and had **no** reel surface (e.g. the feed) | Only for the **session's own app**: `noSurface(pkg)` stamps the reel's end; after `HIDE_GRACE_MS` one runnable hides the bubble **and** `leave()`s the session. Works with the bubble off. Another monitored app's window (a WhatsApp reply — `wa_status` makes WhatsApp a monitored package — or the YouTube feed) is a detour handled by `suspend`, and is ignored here so the return doesn't recount the reel |
+| `onScroll(pkg, fromIndex, toIndex, deltaY, isPager)` | `TYPE_VIEW_SCROLLED` in a reel app (pre-throttle) | `scroll()` records the latest snapshot; classified once the burst is quiet for `SCROLL_SETTLE_MS = 300`. `isPager` (EVO-024) is the platform's verdict on the scrolled view when it declares a `pagerViewId` — `false` makes the snapshot an inner scroll whatever its indices; `null` (no id declared, or no event source) classifies as usual |
+| `setEnabled(false)` | counter toggled off | `leave()` (the fan-out is gated, nothing lands) |
 
-A reel is **counted once** it satisfies the dwell rule:
+**Identity.** A reel is `(pkg, session, page)`. `page` comes from the fields a
+pager already puts on every scroll event (RecyclerView / ViewPager:
+`fromIndex..toIndex` = visible adapter positions), via `ReelTracker.settledPage`:
 
-- On the first `onReelSurfaceSeen`, `startReel()` posts `dwellRunnable` after
-  `MIN_VIEW_MS = 2000ms`.
-- When the timer fires (`onDwellElapsed`), the reel is counted **only if** the
-  surface is still fresh — `now − lastReelSurfaceAtMs ≤ REEL_SURFACE_STALE_MS
-  (2000ms)` — i.e. the user is still watching, not flicked past.
-- `reelCounted` guards against double-counting the same dwell window.
-- A **scroll ends the dwell** (`onScroll → endReel`); the next detected surface
-  starts a fresh window. So lingering on one reel counts it once; scrolling
-  through N reels (each dwelt on ≥2s) counts N.
+- `toIndex − fromIndex ≤ 1` → page = `fromIndex`. A pixel-exact pager reports
+  `(n, n)`, one with a 1 px peek reports `(n, n+1)` even at rest — both shift by
+  one per advance, so `fromIndex` is stable either way. A different page than the
+  current reel = **advance** (the dwell anchor is the scroll event time, not the
+  settle time); the same page (snap-back) is ignored.
+- `toIndex − fromIndex ≥ 2` → a multi-item list (comments, grids) → ignored.
+- `fromIndex = −1` (ScrollView / custom view) → ignored in an app whose pager has
+  reported pages (a caption expand); otherwise legacy any-scroll = advance,
+  debounced by the dwell (unindexed pagers, e.g. Snapchat).
+- The entry reel's page is unknown until the first settle: if that settle
+  finished moving backwards (`scrollDeltaY < 0`, a forward-peek snap-back) the
+  page is learned without advancing.
 
-This "watch ≥ ~2s" rule is the anti-inflation heuristic surfaced verbatim to the
-user in the counter screen's hint ("A video counts only after you've watched it
-for about 2 seconds — quick scrolls are ignored").
+The system keeps one pending scroll event per service and restarts its 100 ms
+timer on each new one, so a fling often delivers only its final snapshot — the
+last event of a burst *is* the settled state, and intermediate deltas are lossy
+(hence no delta-sum heuristics).
+
+**Counting.** A reel counts once it has been the current page for
+`MIN_VIEW_MS = 1000ms` with no leave-evidence — stopped on, not flicked past.
+Passive, event-quiet playback counts (there is no staleness check). At tick
+time, if `PowerManager.isInteractive` is false the dwell is *paused* (anchor
+zeroed, session kept) and resumes from the next `surfaceSeen` after unlock.
+Leave-evidence — the next settled page, the first `noSurface` stamp, an app
+switch, disable — ends the reel with a belt-and-braces count when it had earned
+its dwell (the end time is the first `noSurface` stamp, never the grace expiry).
+A per-session `countedPages` set stops a scroll back up from recounting; a
+scroll on the way out of reels can't start a countable reel because only a fresh
+`surfaceSeen` clears no-surface evidence.
+
+**Ceilings** (`ponytail:` in the file KDoc): a one-or-two-item inner list
+settles like a page — on platforms without a `pagerViewId` (EVO-024; with one
+declared, scrolls from any other view are ignored as page evidence — no ids are
+shipped until device calibration supplies them); unindexed pagers fall back to
+any-scroll + debounce; the entry page is guessed as `firstPage − 1`; holding a
+*backward* peek for a whole dwell reads as the previous page. Each ≤ 1
+phantom/miss per occurrence.
+
+The rule is surfaced to the user as "counts once you've stopped on it for about
+a second; flicks, half-swipes and scrolling the comments are ignored, and the
+same reel never counts twice" (FAQ, product overview, walkthroughs). The One
+Reel allowance keeps its own 2 s "watched" dwell in the service.
+
+Tests: `android/app/src/test/kotlin/com/errorxperts/detoxo/engine/ReelTrackerTest.kt`
+(plain JUnit4, 23 timeline scenarios incl. the monitored-detour and
+non-pager-scroll cases) —
+`cd android && ./gradlew :app:testDebugUnitTest --tests '*ReelTrackerTest*'`
+(also run by `bash tool/dev.sh precommit`).
 
 ### 2.4 Bubble visibility (positive-evidence hide)
 
@@ -141,7 +206,8 @@ never hides it. It is **hidden only on positive evidence** the user left reels:
 
 - `onNoReelSurface` (a checked window with no reel surface, e.g. the feed) → a
   single graced hide after `HIDE_GRACE_MS = 1500ms` (bridges between-reel
-  transitions without flicker), or
+  transitions without flicker); the same runnable ends the reel session, so the
+  grace also gates counting and runs whether or not the bubble is showing, or
 - `onForegroundChanged` to another real app → immediate hide.
 
 Our own overlay window and system UI are ignored (`TRANSIENT_PKGS`) so the bubble
@@ -149,15 +215,25 @@ can never self-toggle into a show/hide loop.
 
 ### 2.5 Fan-out on each count
 
-`count(pkg)` does five things:
+`count(pkg)` does four things:
 
-1. `flushUsage()` — settle the batched usage window first, so the event's
-   `timeTodayMs` includes the accumulated-but-unwritten time.
-2. `store.recordCount(pkg, dateKey())` — persist.
-3. Emit the `contentCounted` event on `ServiceEventBus` (see §4).
-4. `pushWidget(snapshot)` — throttled to `WIDGET_MIN_INTERVAL_MS = 1000ms` so a
-   burst of counts can't hammer the launcher.
-5. If the bubble is enabled and visible, `bubble.onCounted(today)` (springy pop).
+1. `store.recordCount(pkg, dateKey(), pendingUsageMs)` — **one** prefs edit
+   persists the count *and* the batched usage window (so the event's
+   `timeTodayMs` includes the accumulated-but-unwritten time) and returns the
+   snapshot built from the maps it already parsed. A count used to cost three
+   `apply()`s and four JSON parses (usage flush + count + snapshot).
+2. Emit the `contentCounted` event on `ServiceEventBus` (see §4).
+3. `pushWidget(snapshot)` — throttled to `WIDGET_MIN_INTERVAL_MS = 1000ms` with
+   a **trailing flush**: a push inside the window is deferred to the window's
+   end (`widgetRunnable`, fresh snapshot), never dropped. Two counts < 1 s apart
+   are routine (belt-and-braces at settle + the next dwell), and a dropped last
+   push left the widget one reel behind for hours.
+4. If the bubble is enabled and visible, `bubble.onCounted(today)` (springy pop).
+
+All timing in `ContentCounter` is `SystemClock.uptimeMillis` (`mono()`); the
+wall clock is only read through `DateKeys.today()`, which is memoised per
+wall-clock minute (a per-check zone lookup + format was the largest allocation
+on the surface-check path).
 
 The emitted `contentCounted` payload also carries `timeTodayMs` (§2.6, §4) and
 the real `enabled` / `bubbleEnabled` flags — Dart's stream mapper defaults
@@ -216,8 +292,11 @@ the widget all read one source of truth. Keys:
 | `cc_bubble_style` | JSON string | persisted `BubbleStyle` (see §6) |
 | `cc_widget_style` | JSON string | persisted `WidgetStyle` (see §6) |
 
-> `cc_today` / `cc_total` are also the two keys the Dart `home_widget` fallback
-> writes (§5.2) — the same names, so the two paths agree.
+> `cc_enabled` / `cc_bubble_enabled` are cached per `ContentCounterStore`
+> instance (the service gates every event on `enabled`, so the hot path never
+> takes the prefs lock). Safe because every writer also goes through the live
+> service's instance: `CommandHandler` writes its own store *and* calls
+> `contentCounter.setEnabled` / `setBubbleEnabled`.
 
 **Day rollover** is keyed off the **single shared `cc_date` marker** — the reel
 counts and the usage-time buckets roll over together — and is handled two ways:
@@ -251,10 +330,10 @@ Channels are defined in `lib/core/constants/channel_constants.dart` and wrapped 
 | Method | Dart wrapper | Native behavior |
 | --- | --- | --- |
 | `contentCounterSnapshot` | `contentCounterSnapshot()` | prefers the live service's in-memory snapshot; falls back to `ContentCounterStore(context).snapshot(...)` when the service is dead |
-| `setContentCounterEnabled` | `setContentCounterEnabled(enabled:)` | writes `store.enabled` **and** calls `contentCounter.setEnabled` on the live service |
-| `setContentBubbleEnabled` | `setContentBubbleEnabled(enabled:)` | writes `store.bubbleEnabled` **and** `contentCounter.setBubbleEnabled` |
+| `setContentCounterEnabled` | `setContentCounterEnabled(enabled:)` | writes `store.enabled` **and** calls `contentCounter.setEnabled` on the live service; a missing/malformed `enabled` is a no-op (`false`), never a silent "on" |
+| `setContentBubbleEnabled` | `setContentBubbleEnabled(enabled:)` | writes `store.bubbleEnabled` **and** `contentCounter.setBubbleEnabled`; same no-op rule |
 | `refreshContentWidget` | `refreshContentWidget()` | `ContentCounterWidgetProvider.pushUpdate(...)` from the store |
-| `setCounterStyle` | `setCounterStyle(bubble:, widget:)` | persists only the present style key(s), then live re-renders the visible bubble (`onStyleChanged`) and every pinned widget |
+| `setCounterStyle` | `setCounterStyle(bubble:, widget:)` | persists only the present style key(s) (`as? Map`, a malformed one is skipped) and live re-renders **only that surface**: `bubble` → `onStyleChanged`, `widget` → every pinned widget |
 | `pinContentWidget` | `pinContentWidget()` | `AppWidgetManager.requestPinAppWidget`; returns false if unsupported |
 
 `setCounterStyle` sends only the keys present (`{'bubble': ?bubble, 'widget': ?widget}`),
@@ -342,7 +421,10 @@ pull reply additionally carries `timeTotalMs`; no new method/event name was adde
 - 2×2 `AppWidgetProvider` (config `res/xml/content_counter_widget_info.xml`:
   `minWidth/Height 110dp`, `targetCellWidth/Height 2`, `resizeMode
   horizontal|vertical`, **`updatePeriodMillis="0"`** — no OS self-refresh; the
-  counter pushes updates).
+  counter pushes updates). The **midnight rollover** is repaired by the 15-min
+  `receivers/WatchdogJobService.kt` job, which also pushes the widget (no
+  wakeups of its own, a no-op when nothing is pinned) — `ponytail:` up to
+  15 min of stale "today" after midnight.
 - **Single source of truth is `ContentCounterStore`**, so the widget is correct
   even when Flutter is dead. `pushUpdate(context, snapshot)` re-renders every
   pinned instance (cheap no-op when none are pinned); called from the counting
@@ -356,12 +438,12 @@ pull reply additionally carries `timeTotalMs`; no new method/event name was adde
   `USAGE_TINT`; theme `SYSTEM` (resolved to device dark/light at draw time) /
   `LIGHT` / `DARK`; density `COZY` / `COMPACT`; optional `accentByUsage` tints the
   count via `UsageLadder`. Tapping launches the app via a `PendingIntent`.
-- Dart control is `HomeWidgetRepositoryImpl` (using the **`home_widget`**
-  package). `pin()` calls `HomeWidget.requestPinWidget`, falling back to the
-  native `pinContentWidget` command if the plugin/launcher refuses.
-  `pushSnapshot` writes `home_widget` keys **`cc_today` / `cc_total`** and then
-  calls `refreshContentWidget` — but the native bitmap render (from the store) is
-  the real source, so `home_widget` being unavailable never breaks the widget.
+- Dart control is `HomeWidgetRepositoryImpl`: `pin()` → the native
+  `pinContentWidget` command (truthfully `false` on launchers that can't pin, so
+  the editor's toast can tell the user to add it by hand), `refresh()` →
+  `refreshContentWidget`. There is **no `home_widget` plugin** any more — its
+  leg wrote keys native never read, rendered every pinned widget twice per push,
+  and its `pin()` could not tell a launcher that can't pin from one that can.
 
 ### 5.3 Shared usage ladder — `engine/UsageLadder.kt` ↔ `usage_ladder.dart`
 
@@ -376,7 +458,10 @@ in-app previews render the same color/emoji at the same count.
 
 ## 6. Dart feature (`lib/features/content_counter/**`)
 
-Four sub-modules, registered in `lib/core/di/injector.dart`. The bubble- and
+Four sub-modules, registered in `lib/core/di/injector.dart`, behind one public
+barrel `lib/features/content_counter/content_counter.dart` (entities, contracts,
+the two cubits, `ReelCounterCard`, `BubblePreview`, `WidgetPreview`) — the only
+import other features may use (`tool/check_boundaries.sh`). The bubble- and
 home-widget editors are routed at `/content-counter/bubble` and
 `/content-counter/widget` (`lib/core/navigation/routes.dart`); the counter's
 on/off toggles and the links into those editors now live on the shared
@@ -389,23 +474,39 @@ background, reached from the drawer and Settings. There is no longer a standalon
 
 - **Entities**: `ContentCount` (`today`, `total`, `enabled`, `bubbleEnabled`,
   `perAppToday`, `perAppTotal` — each list sorted desc — plus `timeToday`, a
-  `Duration` of today's whole-app usage parsed from `timeTodayMs`) with a safe
-  `ContentCount.empty()` for off-Android; `AppContentCount` (per-app tally
-  enriched with catalog `appName` / `displayName` / `iconUrl`). `timeToday` is
-  what the dashboard's screen-time ring reads (with the `DailyLimit` as the ring's
-  max — see [07-daily-limit-scheduler.md](07-daily-limit-scheduler.md)).
+  `Duration` of today's whole-app usage parsed from `timeTodayMs`, and
+  `overlayGranted: bool?` — the "Display over other apps" grant, tri-state like
+  the permission model: `null` = unread / unanswered, never rendered as denied;
+  `bubbleBlocked` = on but grant missing) with a safe `ContentCount.empty()`
+  for off-Android; `AppContentCount` (per-app tally enriched with catalog
+  `appName` / `displayName` / `iconUrl`). `timeToday` is what the dashboard's
+  screen-time ring reads (with the `DailyLimit` as the ring's max — see
+  [07-daily-limit-scheduler.md](07-daily-limit-scheduler.md)); with `enabled`
+  off the ring shows "Counting off — screen time not measured", the reels and
+  streak pills show "—", and the "days under your limit" streak is **not**
+  observed (usage accrual stops with the counter, so a zero there is
+  unmeasured, not earned; the stored streak is reconciled again when counting
+  resumes).
 - **Repository**: `ContentCounterRepositoryImpl` bridges the native snapshot to
   the domain and enriches each per-app entry with catalog metadata from
-  `ConfigRepository.loadBlockTargets()` (built once, cached). `watch()` yields an
-  initial pull then streams `contentCounted` events.
-- **Cubit**: `ContentCounterCubit` streams the live `ContentCount` into the UI
-  and exposes `setEnabled` and `refresh()` — a `refresh()` re-pulls the snapshot
-  so `timeToday` is fresh on demand (usage time advances between counted reels,
-  which the `contentCounted` stream doesn't emit; the dashboard hero calls it on
-  mount and on pull-to-refresh, and `AppResumeSync` calls it on **every app
-  resume** — the day-rollover repair for a dashboard kept in recents across
-  midnight). It is provided globally in `lib/main.dart` so the
-  dashboard ring can watch it.
+  `ConfigRepository.loadBlockTargets()` (built once, cached; a catalog failure
+  is logged and degrades to bare package names — it must never take the
+  counter with it). `watch()` yields an initial pull then streams
+  `contentCounted` events.
+- **Cubit**: `ContentCounterCubit(repo, bubble)` is the one source of truth for
+  every counter control surface. It streams the live `ContentCount` into the UI
+  (the subscription has an `onError` — one bad read must not kill the hero
+  count, breakdown and ring for the session), owns both switches
+  (`setEnabled`, `setBubbleEnabled` — optimistic emit, then native; switching
+  the bubble on without the grant opens the system screen), `requestOverlay()`,
+  and `refresh()` — which re-pulls the snapshot so `timeToday` is fresh on
+  demand **and re-reads the overlay grant** (usage time advances between
+  counted reels, which the `contentCounted` stream doesn't emit; the dashboard
+  hero calls it on mount and on pull-to-refresh, and `AppResumeSync` calls it on
+  **every app resume** — the day-rollover repair for a dashboard kept in
+  recents across midnight, and what clears a "needs permission" state after the
+  user returns from Settings). Provided once, globally, in `lib/main.dart`
+  (the Activity screen no longer creates a second instance).
 - **UI**: `ReelCounterCard` (hero count-up card with today / all-time toggle and
   an animated per-app breakdown; reduce-motion safe) — shown on the **Activity**
   screen (`analytics_screen.dart`). Per-app icons render via the shared
@@ -419,14 +520,25 @@ background, reached from the drawer and Settings. There is no longer a standalon
   `BubblePreview` / `WidgetPreview` you tap to open its editor. The bubble carries
   its own on/off (`bubbleEnabled`) on its card; the widget has **no** independent
   enable (a placed widget always updates), so its card is gated by the counting
-  master. The screen reads/writes the same `ContentCounterRepository` /
-  `BubbleRepository` / `CounterAppearanceRepository`.
+  master. The section is a plain reader of the two app-wide cubits
+  (`ContentCounterCubit` for switches / grant / figures,
+  `CounterAppearanceCubit` for the live styles) — no `sl<>` repos and no
+  `setState` mirrors of native state. When the bubble is on but the grant is
+  missing (`bubbleBlocked`) the card shows a warning row — *Needs "Display over
+  other apps" — tap to allow* — that opens the system screen (EVO-022). Each
+  preview is an `AppPressable` (announced as a button, disabled when the surface
+  is off). With counting off the Activity card's breakdown says so instead of
+  promising reels that can't be counted.
 - **Appearance carrier**: `CounterAppearance` (bubble + widget styles) with
   `CounterAppearanceCubit` — each setter emits immediately (so the preview tracks
   the slider with no lag) but **debounces the native push by 120ms** so dragging a
-  slider doesn't flood the command channel. `CounterAppearanceRepositoryImpl`
-  hydrates from the snapshot's `bubbleStyle` / `widgetStyle` JSON and pushes via
-  `setCounterStyle`.
+  slider doesn't flood the command channel. Provided once, app-wide, in
+  `lib/main.dart` (lazy — hydrated from native by the first screen that reads
+  it), so the Appearance hub and both editors share one state and an edit is
+  visible on return with no re-pull; per-surface dirty flags stop the hydrate
+  from overwriting an edit that beat it. `CounterAppearanceRepositoryImpl`
+  hydrates from the snapshot's `bubbleStyle` / `widgetStyle` JSON (a malformed
+  one is logged, then defaults) and pushes via `setCounterStyle`.
 - **Wire enums**: `counter_style_enums.dart` — `BubbleVariant`,
   `WidgetBackground`, `WidgetTheme`, `WidgetDensity`, each carrying its wire token
   (`GLASS_ORB`, `GLASS_DARK`, `SYSTEM`, `COZY`, …) with an order-independent
@@ -442,9 +554,11 @@ background, reached from the drawer and Settings. There is no longer a standalon
   bubble). `showTime` rides the existing `setCounterStyle` → `bubbleStyleJson`
   pipe; no new channel method.
 - `BubbleRepositoryImpl` gates the bubble on/off (`setContentBubbleEnabled`) and
-  reuses the existing overlay-permission channel methods (`canDrawOverlays` /
-  `requestOverlayPermission`) — no new permission plumbing. The bubble's actual
-  show/hide is native (driven by the foreground app); this only toggles the flag.
+  reuses the existing overlay-permission channel methods (`canDrawOverlays` —
+  read tri-state via `invokeBoolOrNull`, so an unanswered read is `null`, not
+  "denied" — / `requestOverlayPermission`) — no new permission plumbing. The
+  bubble's actual show/hide is native (driven by the foreground app); this only
+  toggles the flag.
 
 ### 6.3 `home_content_counter` — widget control + style
 
@@ -452,10 +566,9 @@ background, reached from the drawer and Settings. There is no longer a standalon
   `showLabel`, `showTotal`, `accentByUsage`). `fromWire` coerces an all-lines-off
   payload back to showing today's count so the widget is never blank (mirrored by
   `WidgetStyleSpec` natively).
-- `HomeWidgetRepositoryImpl` (`home_widget` package) — `pin` / `pushSnapshot`
-  (writes `cc_today` / `cc_total`) / `refresh`; guarded by
-  `PlatformCapabilities.supportsBlockingEngine` and try/caught so the plugin
-  failing never breaks counting.
+- `HomeWidgetRepositoryImpl` — `pin()` / `refresh()` straight over the command
+  channel (`pinContentWidget` / `refreshContentWidget`); the channel itself
+  no-ops off-Android. The splash calls `refresh()` on launch.
 
 ### 6.4 `content_counter_appearance` — editor screens
 
@@ -466,15 +579,21 @@ background, reached from the drawer and Settings. There is no longer a standalon
   via `BubblePreview(time: …)` (the preview mirror gained a `time` param +
   `formatBubbleClock`, matching native `formatMs`). A "Preview count" slider
   (0–500) scrubs the usage range so the color/emoji variants read even before
-  anything is watched.
-- `HomeWidgetScreen` — background carousel, theme/density segmented controls,
-  line toggles, `accentByUsage`, and an "Add to home screen" button
+  anything is watched. Every slider's value is formatted once for both the
+  visible label and the screen reader (`AdaptiveSlider.semanticFormatter`), so
+  TalkBack says "56 dp", not a bare percentage.
+- `HomeWidgetScreen` — background carousel, theme/density `GlassSegmented`
+  controls (explicit `_themes` / `_densities` order lists, not enum index
+  order), line toggles, `accentByUsage`, and an "Add to home screen" button
   (`pin` → `refresh`; the confirm / launcher-unsupported fallback message is a
   `GlassToast`, not a raw `SnackBar`).
-- Both drive `CounterAppearanceCubit`; the pinned Flutter previews
-  (`BubblePreview`, `WidgetPreview`, `VariantCarousel`) mirror the native render,
-  and — because the cubit's debounced push live re-renders native — any on-screen
-  bubble and pinned widget update as the user edits.
+- Both read the app-wide `CounterAppearanceCubit` and seed their preview
+  figures from the live `ContentCounterCubit` (no snapshot re-pull); the pinned
+  Flutter previews (`BubblePreview`, `WidgetPreview` — each carries a
+  `Semantics` label describing what it shows — and the design system's
+  `VariantCarousel`) mirror the native render, and — because the cubit's
+  debounced push live re-renders native — any on-screen bubble and pinned
+  widget update as the user edits.
 
 ---
 
@@ -497,9 +616,9 @@ background, reached from the drawer and Settings. There is no longer a standalon
   the store.
 - **Disposal.** `contentCounter.dispose()` (from the service's
   `onUnbind`/`onDestroy`) removes timers and hides the bubble.
-- **iOS / off-Android.** `EngineChannel` no-ops, snapshots resolve to
-  `ContentCount.empty()`, and `HomeWidgetRepositoryImpl` short-circuits on
-  `PlatformCapabilities.supportsBlockingEngine` — the feature is Android-only.
+- **iOS / off-Android.** `EngineChannel` no-ops (pins return `false`, refreshes
+  and the overlay read return nothing — `overlayGranted` stays `null`), and
+  snapshots resolve to `ContentCount.empty()` — the feature is Android-only.
 
 ---
 
@@ -507,20 +626,33 @@ background, reached from the drawer and Settings. There is no longer a standalon
 
 Native (Android, `android/app/src/main/kotlin/com/errorxperts/detoxo/…`):
 
-- `engine/ContentCounter.kt` — counting brain: dwell/scroll heuristic, bubble
+- `engine/ReelTracker.kt` — the counting decision: session + settled-page
+  identity + dwell state machine (pure Kotlin, no Android imports); shares
+  `settledPage()` with the One Reel gate. Tested by
+  `android/app/src/test/kotlin/com/errorxperts/detoxo/engine/ReelTrackerTest.kt`.
+- `engine/ContentCounter.kt` — drives the tracker (one Handler timer), bubble
   visibility, fan-out to store/bubble/widget/event; `setReelSessionRemaining`
   passthrough for the bubble's "reels left" display (gated on the counter toggle).
 - `engine/ContentCounterStore.kt` — SharedPreferences (`detoxo_engine_prefs`)
-  persistence, day rollover, snapshot.
+  persistence, day rollover, snapshot; `recordCount` folds the usage flush and
+  returns the snapshot; `enabled` / `bubbleEnabled` cached per instance.
+- `engine/DateKeys.kt` — the shared `dd-MM-yyyy` day key, memoised per minute.
+- `engine/DetectionConfig.kt` — `DetectorRule.qualifiedIds` (precomputed
+  target ids for `matches()`).
+- `receivers/WatchdogJobService.kt` — the 15-min job also pushes the widget
+  (midnight rollover repair).
 - `engine/UsageLadder.kt` — shared color-band + emoji ladders (native mirror).
 - `overlay/ContentCounterBubble.kt` — floating overlay + four `BubbleView`
   variants + drag/edge-snap; `setRemaining`/`lastRemaining` + the teal "reels
   left" unlock badge that overrides every variant during a reel session.
 - `widget/ContentCounterWidgetProvider.kt` — `AppWidgetProvider`, push/pin.
 - `widget/WidgetBitmapRenderer.kt` — Canvas bitmap render + `WidgetStyleSpec`.
-- `accessibility/DetoxoAccessibilityService.kt` — `countContent()` pass,
-  `isReelPlatform`, `NON_REEL_PLATFORM_IDS`, foreground/scroll forwarding, and
-  `syncReelBubble()` (drives the bubble's "reels left" display on arm/allow/revert).
+- `accessibility/DetoxoAccessibilityService.kt` — `countContent()` pass
+  (`COUNT_THROTTLE_MS`, scroll-field forwarding + calibration log, the
+  `countMisses` / `DFS_SKIP` stage-3 back-off), `matches(..., deep)`,
+  `isReelPlatform`, `NON_REEL_PLATFORM_IDS`, `isImePackage`, foreground
+  forwarding, and `syncReelBubble()` (drives the bubble's "reels left" display on
+  arm/allow/revert).
 - `channels/CommandHandler.kt` — `contentCounterSnapshot`,
   `setContentCounterEnabled`, `setContentBubbleEnabled`, `refreshContentWidget`,
   `setCounterStyle`, `pinContentWidget`.
@@ -533,7 +665,12 @@ Dart (`lib/…`):
 - `core/constants/channel_constants.dart`, `core/platform_channels/engine_channel.dart`
   — command/event names + counter channel wrappers.
 - `core/di/injector.dart`, `core/navigation/routes.dart`,
-  `core/navigation/app_router.dart` — DI + routes.
+  `core/navigation/app_router.dart` — DI + routes; `main.dart` provides the
+  two cubits app-wide.
+- `core/design_system/components/variant_carousel.dart` — the style-variant
+  picker (promoted from the feature; also the shape of the Appearance
+  background picker).
+- `features/content_counter/content_counter.dart` — the public barrel.
 - `features/content_counter/content_counter_core/domain/entities/content_count.dart`
 - `features/content_counter/content_counter_core/domain/entities/app_content_count.dart`
 - `features/content_counter/content_counter_core/domain/entities/counter_appearance.dart`
@@ -556,7 +693,11 @@ Dart (`lib/…`):
 - `features/content_counter/content_counter_appearance/presentation/home_widget_screen.dart`
 - `features/content_counter/content_counter_appearance/presentation/widgets/bubble_preview.dart`
 - `features/content_counter/content_counter_appearance/presentation/widgets/widget_preview.dart`
-- `features/content_counter/content_counter_appearance/presentation/widgets/variant_carousel.dart`
+
+Tests: `test/content_counter_test.dart` (snapshot mapping, catalog fallback,
+`watch()` filtering, cubit switch / grant paths, `formatBubbleClock` mirror),
+`test/counter_style_test.dart`, `test/usage_ladder_test.dart`, and the native
+`ReelTrackerTest` (run by `bash tool/dev.sh precommit` when a JDK 17 is present).
 
 Cross-feature (the migrated counter hub; theme + background live here too):
 

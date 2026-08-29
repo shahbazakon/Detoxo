@@ -1,33 +1,26 @@
-import 'dart:async';
-
 import 'package:detoxo/core/design_system/design_system.dart';
-import 'package:detoxo/core/di/injector.dart';
 import 'package:detoxo/core/widgets/common_widgets.dart';
 import 'package:detoxo/features/content_counter/content_counter_appearance/presentation/widgets/bubble_preview.dart';
-import 'package:detoxo/features/content_counter/content_counter_appearance/presentation/widgets/variant_carousel.dart';
 import 'package:detoxo/features/content_counter/content_counter_bubble/domain/entities/bubble_style.dart';
 import 'package:detoxo/features/content_counter/content_counter_core/domain/entities/counter_appearance.dart';
 import 'package:detoxo/features/content_counter/content_counter_core/domain/entities/counter_style_enums.dart';
-import 'package:detoxo/features/content_counter/content_counter_core/domain/repositories/content_counter_repository.dart';
-import 'package:detoxo/features/content_counter/content_counter_core/domain/repositories/counter_appearance_repository.dart';
+import 'package:detoxo/features/content_counter/content_counter_core/presentation/content_counter_cubit.dart';
 import 'package:detoxo/features/content_counter/content_counter_core/presentation/counter_appearance_cubit.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
 /// Live-preview customization for the floating counter bubble: pick a variant,
 /// then tune size / text / spacing / opacity — the pinned preview and (if the
-/// bubble is on screen) the real overlay update as you go.
+/// bubble is on screen) the real overlay update as you go. Reads the app-wide
+/// `CounterAppearanceCubit` (shared with the Appearance hub).
 class BubbleStyleScreen extends StatelessWidget {
   const BubbleStyleScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return BlocProvider(
-      create: (_) => CounterAppearanceCubit(sl<CounterAppearanceRepository>()),
-      child: const GlassScaffold(
-        appBar: GlassAppBar(title: Text('Bubble style')),
-        body: SafeArea(child: _Body()),
-      ),
+    return const GlassScaffold(
+      appBar: GlassAppBar(title: Text('Bubble style')),
+      body: SafeArea(child: _Body()),
     );
   }
 }
@@ -51,16 +44,10 @@ class _BodyState extends State<_Body> {
   @override
   void initState() {
     super.initState();
-    unawaited(_loadToday());
-  }
-
-  Future<void> _loadToday() async {
-    final count = await sl<ContentCounterRepository>().current();
-    if (!mounted) return;
-    setState(() {
-      if (count.today > 0) _previewCount = count.today.toDouble();
-      if (count.timeToday > Duration.zero) _previewTime = count.timeToday;
-    });
+    // Seed from the live count once; the slider owns the figure from here.
+    final count = context.read<ContentCounterCubit>().state;
+    if (count.today > 0) _previewCount = count.today.toDouble();
+    if (count.timeToday > Duration.zero) _previewTime = count.timeToday;
   }
 
   void _setStyle(BubbleStyle style) =>
@@ -88,7 +75,7 @@ class _BodyState extends State<_Body> {
               min: 0,
               max: 500,
               divisions: 10,
-              valueLabel: '$count reels',
+              format: (v) => '${v.round()} reels',
               onChanged: (v) => setState(() => _previewCount = v),
             ),
             const SizedBox(height: AppSpacing.md),
@@ -116,7 +103,7 @@ class _BodyState extends State<_Body> {
               min: BubbleStyle.sizeMin,
               max: BubbleStyle.sizeMax,
               divisions: 8,
-              valueLabel: '${style.size.round()} dp',
+              format: (v) => '${v.round()} dp',
               onChanged: (v) => _setStyle(style.copyWith(size: v)),
             ),
             _LabeledSlider(
@@ -125,7 +112,7 @@ class _BodyState extends State<_Body> {
               min: BubbleStyle.textScaleMin,
               max: BubbleStyle.textScaleMax,
               divisions: 6,
-              valueLabel: '${(style.textScale * 100).round()}%',
+              format: _percent,
               onChanged: (v) => _setStyle(style.copyWith(textScale: v)),
             ),
             if (style.variant == BubbleVariant.minimalPill)
@@ -135,7 +122,7 @@ class _BodyState extends State<_Body> {
                 min: BubbleStyle.spacingMin,
                 max: BubbleStyle.spacingMax,
                 divisions: 5,
-                valueLabel: '${(style.spacing * 100).round()}%',
+                format: _percent,
                 onChanged: (v) => _setStyle(style.copyWith(spacing: v)),
               ),
             _LabeledSlider(
@@ -144,7 +131,7 @@ class _BodyState extends State<_Body> {
               min: BubbleStyle.opacityMin,
               max: BubbleStyle.opacityMax,
               divisions: 5,
-              valueLabel: '${(style.opacity * 100).round()}%',
+              format: _percent,
               onChanged: (v) => _setStyle(style.copyWith(opacity: v)),
             ),
             const SizedBox(height: AppSpacing.xs),
@@ -174,6 +161,8 @@ class _BodyState extends State<_Body> {
     );
   }
 }
+
+String _percent(double v) => '${(v * 100).round()}%';
 
 class _PreviewStage extends StatelessWidget {
   const _PreviewStage({required this.style, required this.count});
@@ -254,7 +243,8 @@ String _variantLabel(BubbleVariant v) => switch (v) {
   BubbleVariant.minimalPill => 'Minimal pill',
 };
 
-/// A compact title + value row over an [AdaptiveSlider].
+/// A compact title + value row over an [AdaptiveSlider]. [format] renders the
+/// value both for the visible label and for screen readers, so they agree.
 class _LabeledSlider extends StatelessWidget {
   const _LabeledSlider({
     required this.label,
@@ -262,7 +252,7 @@ class _LabeledSlider extends StatelessWidget {
     required this.min,
     required this.max,
     required this.divisions,
-    required this.valueLabel,
+    required this.format,
     required this.onChanged,
   });
 
@@ -271,7 +261,7 @@ class _LabeledSlider extends StatelessWidget {
   final double min;
   final double max;
   final int divisions;
-  final String valueLabel;
+  final String Function(double value) format;
   final ValueChanged<double> onChanged;
 
   @override
@@ -291,19 +281,23 @@ class _LabeledSlider extends StatelessWidget {
                 ),
               ),
               Text(
-                valueLabel,
+                format(value),
                 style: text.bodySmall?.copyWith(
                   color: context.glass.onGlassMuted,
                 ),
               ),
             ],
           ),
-          AdaptiveSlider(
-            value: value.clamp(min, max),
-            min: min,
-            max: max,
-            divisions: divisions,
-            onChanged: onChanged,
+          Semantics(
+            label: label,
+            child: AdaptiveSlider(
+              value: value.clamp(min, max),
+              min: min,
+              max: max,
+              divisions: divisions,
+              semanticFormatter: format,
+              onChanged: onChanged,
+            ),
           ),
         ],
       ),
