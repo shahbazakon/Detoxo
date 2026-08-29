@@ -1,0 +1,223 @@
+import 'package:detoxo/core/theme/app_theme.dart';
+import 'package:detoxo/features/analytics/analytics.dart';
+import 'package:detoxo/features/analytics/insights/presentation/insights_cubit.dart';
+import 'package:detoxo/features/analytics/insights/presentation/widgets/insights_view.dart';
+import 'package:detoxo/features/blocking/shared/domain/repositories/blocking_repositories.dart';
+import 'package:detoxo/features/usage/usage.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:mocktail/mocktail.dart';
+
+class _MockEngine extends Mock implements EngineRepository {}
+
+/// An insights repository with a pinned answer.
+class _FakeRepo implements InsightsRepository {
+  _FakeRepo(this.result, {this.yesterday});
+
+  UsageQueryResult<DailyStats> result;
+  DailyStats? yesterday;
+
+  @override
+  Future<UsageQueryResult<DailyStats>> today() async => result;
+
+  @override
+  DailyStats? cached(String dayKey) => yesterday;
+}
+
+/// EVO-014 on a new surface: a missing grant and a failed read must each say so
+/// in their own words. A `0 m` here would be indistinguishable from a genuinely
+/// quiet day — a confident lie about the user's own behaviour.
+void main() {
+  late _MockEngine engine;
+
+  setUp(() {
+    engine = _MockEngine();
+    when(() => engine.installedApps()).thenAnswer((_) async => const []);
+  });
+
+  /// Mounts the view over a repository the caller keeps a handle on, so a
+  /// retry can be made to return something different the second time.
+  Future<void> pumpRepo(WidgetTester tester, _FakeRepo repo) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.dark(),
+        home: Scaffold(
+          body: BlocProvider(
+            create: (_) => InsightsCubit(
+              repo,
+              engine,
+              clock: () => DateTime(2026, 9, 2, 12),
+            )..load(),
+            child: const SingleChildScrollView(child: InsightsView()),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+  }
+
+  Future<void> pump(
+    WidgetTester tester,
+    UsageQueryResult<DailyStats> result, {
+    DailyStats? yesterday,
+  }) => pumpRepo(tester, _FakeRepo(result, yesterday: yesterday));
+
+  testWidgets('denied offers the grant and never prints a zero', (
+    tester,
+  ) async {
+    await pump(tester, const UsageDenied());
+
+    expect(find.text('Usage access'), findsOneWidget);
+    expect(find.text('Grant'), findsOneWidget);
+    expect(find.text('Checking…'), findsNothing);
+    expect(find.textContaining('0m'), findsNothing);
+    expect(find.textContaining('Screen time'), findsNothing);
+  });
+
+  testWidgets('unavailable renders the neutral state, not a denial', (
+    tester,
+  ) async {
+    await pump(tester, const UsageUnavailable());
+
+    expect(find.text('Checking…'), findsOneWidget);
+    expect(find.text('Grant'), findsNothing);
+    expect(find.textContaining('0m'), findsNothing);
+  });
+
+  testWidgets('unavailable offers a Retry that actually recomputes', (
+    tester,
+  ) async {
+    // The card used to advertise nothing at all here: PermissionCard drew the
+    // "Checking…" row and dropped the action, so a failed read was a dead end
+    // recoverable only by an undiscoverable pull-to-refresh.
+    final repo = _FakeRepo(const UsageUnavailable());
+    await pumpRepo(tester, repo);
+    expect(find.text('Retry'), findsOneWidget);
+
+    repo.result = UsageGranted(
+      DailyStats(
+        dayKey: '02-09-2026',
+        screenTimeMs: const Duration(hours: 1).inMilliseconds,
+      ),
+    );
+    await tester.tap(find.text('Retry'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('1h'), findsOneWidget);
+    expect(find.text('Retry'), findsNothing);
+  });
+
+  testWidgets('granted draws the real figures', (tester) async {
+    await pump(
+      tester,
+      UsageGranted(
+        DailyStats(
+          dayKey: '02-09-2026',
+          screenTimeMs: const Duration(hours: 3, minutes: 12).inMilliseconds,
+          distractionMs: const Duration(hours: 1, minutes: 48).inMilliseconds,
+          pickupCount: 84,
+          contextSwitches: 142,
+          distractionOpens: 37,
+          reelCount: 96,
+        ),
+      ),
+    );
+
+    expect(find.text('3h 12m'), findsOneWidget);
+    expect(find.textContaining('1h 48m distracting'), findsOneWidget);
+    expect(find.text('Usage access'), findsNothing);
+    // The honesty footnote is not optional.
+    expect(find.textContaining('Digital Wellbeing'), findsOneWidget);
+  });
+
+  testWidgets('a genuinely quiet day says so instead of nothing', (
+    tester,
+  ) async {
+    await pump(tester, const UsageGranted(DailyStats(dayKey: '02-09-2026')));
+
+    expect(find.text('0m'), findsOneWidget);
+    expect(find.text('Nothing recorded yet today'), findsOneWidget);
+    // Crucially, this is NOT the denied state.
+    expect(find.text('Grant'), findsNothing);
+  });
+
+  testWidgets('a top app is labelled, timed, and offers a limit', (
+    tester,
+  ) async {
+    await pump(
+      tester,
+      UsageGranted(
+        DailyStats(
+          dayKey: '02-09-2026',
+          screenTimeMs: const Duration(hours: 2).inMilliseconds,
+          topApps: const [
+            AppUsage(
+              package: 'com.instagram.android',
+              foregroundMillis: 4200000,
+            ),
+          ],
+        ),
+      ),
+    );
+
+    expect(find.text('Where it went'), findsOneWidget);
+    // No installed-app match, so it falls back to the package name.
+    expect(find.text('com.instagram.android'), findsOneWidget);
+    expect(find.text('1h 10m'), findsOneWidget);
+    // EVO-033: the row is the entry point to a limit, not just a readout.
+    expect(
+      tester.getSemantics(find.byType(InkWell).first),
+      matchesSemantics(
+        isButton: true,
+        isFocusable: true,
+        hasTapAction: true,
+        hasFocusAction: true,
+        label: 'com.instagram.android, 1h 10m. Set a daily limit',
+      ),
+    );
+  });
+
+  testWidgets('a complete yesterday is shown as a neutral reference', (
+    tester,
+  ) async {
+    await pump(
+      tester,
+      UsageGranted(
+        DailyStats(
+          dayKey: '02-09-2026',
+          screenTimeMs: const Duration(hours: 2).inMilliseconds,
+        ),
+      ),
+      yesterday: DailyStats(
+        dayKey: '01-09-2026',
+        screenTimeMs: const Duration(hours: 4).inMilliseconds,
+        complete: true,
+      ),
+    );
+
+    // Never a percentage while today is still running: a part-day against a
+    // whole one reads as a triumph every morning.
+    expect(find.text('Yesterday: 4h'), findsOneWidget);
+    expect(find.textContaining('than yesterday'), findsNothing);
+  });
+
+  testWidgets('an incomplete yesterday is not shown at all', (tester) async {
+    await pump(
+      tester,
+      UsageGranted(
+        DailyStats(
+          dayKey: '02-09-2026',
+          screenTimeMs: const Duration(hours: 2).inMilliseconds,
+        ),
+      ),
+      // complete: false — comparing against a part-day would flatter today.
+      yesterday: DailyStats(
+        dayKey: '01-09-2026',
+        screenTimeMs: const Duration(hours: 4).inMilliseconds,
+      ),
+    );
+
+    expect(find.textContaining('Yesterday'), findsNothing);
+  });
+}

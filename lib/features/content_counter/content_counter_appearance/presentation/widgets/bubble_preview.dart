@@ -30,20 +30,38 @@ class BubblePreview extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Center(
-      child: SizedBox(
-        width: area,
-        height: area,
-        child: CustomPaint(
-          painter: _BubblePainter(style: style, count: count, time: time),
+    final t = time;
+    // A CustomPaint has no semantics of its own; describe what the picture
+    // shows so a screen-reader user learns what the bubble will look like.
+    return Semantics(
+      label:
+          'Bubble preview, ${_variantName(style.variant)}: '
+          '${t != null ? '${formatBubbleClock(t)} today' : '$count reels'}',
+      excludeSemantics: true,
+      child: Center(
+        child: SizedBox(
+          width: area,
+          height: area,
+          child: CustomPaint(
+            painter: _BubblePainter(style: style, count: count, time: t),
+          ),
         ),
       ),
     );
   }
+
+  static String _variantName(BubbleVariant v) => switch (v) {
+    BubbleVariant.glassOrb => 'glass orb',
+    BubbleVariant.usageRing => 'usage ring',
+    BubbleVariant.emojiMood => 'emoji mood',
+    BubbleVariant.minimalPill => 'minimal pill',
+  };
 }
 
 /// Stopwatch label for the bubble's tap-revealed time — `45s` / `3:05` /
-/// `1:23:45` — mirroring native `ContentCounterBubble.formatMs`.
+/// `1:23:45`. MIRROR CONTRACT: must stay byte-for-byte equal to the native
+/// `BubbleView.formatMs` in `overlay/ContentCounterBubble.kt` (pinned by
+/// `test/counter_style_test.dart`); change both or neither.
 String formatBubbleClock(Duration d) {
   final totalSec = d.inSeconds;
   final h = totalSec ~/ 3600;
@@ -62,6 +80,9 @@ class _BubblePainter extends CustomPainter {
   final int count;
   final Duration? time;
 
+  // MIRROR CONTRACT: these literals and every geometry ratio below reproduce
+  // the native `BubbleView` (`overlay/ContentCounterBubble.kt`) — the declared
+  // source of truth. Edit the Kotlin first, then mirror here.
   static const int _fillTop = 0xF21C2544;
   static const int _fillBottom = 0xF20B1326;
   static const int _seed = 0xFF6D3BD7;

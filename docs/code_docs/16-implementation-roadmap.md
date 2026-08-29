@@ -23,36 +23,44 @@ required.
 | Reel/Short detection + block (AccessibilityService) | **Works on a real device** — 3-stage view-id detection, `PRESS_BACK`/`KILL_APP`/`LOCK_SCREEN`/`NONE` block modes, native throttle/debounce/rate-limit | [03-detection-engine.md](03-detection-engine.md), `DetoxoAccessibilityService.kt` |
 | Blocking plans (`blockAll` / `curious`=**Conscious** / `oneReel` / `paused`) + pause window | **Honored by the engine** — `activePlan` gate + `pauseUntil` clock window + Conscious time-bank accountant | [05-plans-pause-conscious.md](05-plans-pause-conscious.md) |
 | Web blocklist enforcement | **Wired natively** — `WebBlockEngine` reads the browser address bar in the hot path, matches wildcards, presses Back with per-host debounce, records stats | [06-app-and-web-blocker.md](06-app-and-web-blocker.md), `engine/WebBlockEngine.kt` |
-| Custom whole-app blocking | **Wired natively** — `pushAppBlocklist` → `ConfigStore.blockedAppPackages`; the service HOME-bounces a blocked app with toast + vibration, recorded to the shared block counter | [06-app-and-web-blocker.md](06-app-and-web-blocker.md), `DetoxoAccessibilityService.kt` (`onAppBlocked`) |
+| Custom whole-app blocking | **Wired natively** — `pushAppBlocklist` → `ConfigStore.blockedAppPackages`; the service HOME-bounces a blocked app with the block screen (toast fallback) + vibration, recorded to the shared block counter | [06-app-and-web-blocker.md](06-app-and-web-blocker.md), [25-block-screen.md](25-block-screen.md), `DetoxoAccessibilityService.kt` (`onAppBlocked`) |
+| Block screen (intervention wall) | **Shipped** — a native full-screen overlay at every block (reel, Conscious drain, app, website) with Go home / Open Detoxo / Back to the app; own on/off switch and style editor under Appearance | [25-block-screen.md](25-block-screen.md) |
+| Category catalog + usage signal | **Shipped as foundations** — `Catalog.bundled` (10 categories) and the pull-only `UsageStatsManager` layer; both now have consumers — the rule editor picks categories and `syncRules` / the native `LimitReconciler` meter rule limits against UsageStats ([27](27-rules-engine.md)), and the insights rollups read both ([28](28-insights.md)) | [26-catalog-and-usage-signal.md](26-catalog-and-usage-signal.md) |
+| Insights (real screen time) | **Shipped** — a pure daily fold over `UsageStatsManager` (screen time, distraction time + share, pickups, context switches, distracting opens, top apps) cached as a 90-day `usage_daily` rollup, shown as the default segment of the Activity tab. No new permission, no new channel method. Denied Usage access renders a grant card, never a `0 m` | [28-insights.md](28-insights.md) |
+| Soft nudge (advisory dwell reminder) | **Shipped** — Android-free `NudgeTracker` ticked from the accessibility event stream above the master switch; its own bottom-anchored, touch-passthrough card with a one-tap Leave. Never blocks, never presses BACK, off by default, no new permission | [30-soft-nudge.md](30-soft-nudge.md) |
+| Per-target unblock + locked rules | **Shipped** — a grant frees ONE target (`"Instagram for 15 minutes"`) with expiry enforced natively by the Android-free `UnblockRegistry` on a monotonic deadline, from the block screen or a blocklist row; a **locked** rule has no off switch at all and is lifted only by a rationed override that splits that rule's own windows. Strict rules never consult a grant — that absence is the guarantee | [31-locked-rules-and-unblock.md](31-locked-rules-and-unblock.md) |
 | Content counter (decoupled from blocking) + bubble + home-screen widget | **Works** — side-effect-free counting pass runs even when blocking is off; drives overlay bubble + `home_widget` | [17-content-counter.md](17-content-counter.md) |
 | Blocklist (data-driven) | **Works** — parsed from bundled `assets/config/platforms_config.json`; per-platform enable/disable persisted natively | [02-detection-config-schema.md](02-detection-config-schema.md) |
 | PIN lock + biometric/device-credential + retry-lockout ladder + Smart Auto Lock (resume re-lock, FLAG_SECURE Recents privacy) | **Works** — `local_auth` + `flutter_secure_storage`. **No recovery channel by design**; the `000000` dev backdoor was removed, not wired | [08-pin-lock-recovery.md](08-pin-lock-recovery.md) |
-| Analytics (block-event history) | **Works, local only** — capped in-memory/JSON block-event buffer (recent ~100); no cloud sink | [12-analytics-notifications-resilience.md](12-analytics-notifications-resilience.md) |
+| Analytics (block-event history) | **Works, local only** — capped in-memory/JSON block-event buffer (recent ~100); no cloud sink. Now the **Events** segment of the Activity tab, beside Insights | [12-analytics-notifications-resilience.md](12-analytics-notifications-resilience.md) |
 | Firebase telemetry | **Wired** — Analytics (screen views + usage events), Crashlytics, Performance; anonymised, collection on in every build | [19-firebase-telemetry.md](19-firebase-telemetry.md) |
 | Persistence | **Works, on-device only** — Dart `local_store` + native `detoxo_engine_prefs` + secure storage + widget keys `cc_today`/`cc_total` | [09-persistence-data-model.md](09-persistence-data-model.md) |
 | Config load | **Works, offline** — bundled JSON assets via `ConfigRepositoryImpl`; no live fetch | [10-networking-config-sync.md](10-networking-config-sync.md) |
 
 > Note vs. the top-level `README.md` status table: the README groups "app/web/usage native
 > enforcement" as a single follow-up. That is conservative — in the actual code the **web blocklist
-> path** and **full-app blocking** are already wired natively (`WebBlockEngine` plus the
-> `blockedApps` HOME-bounce branch in `onAccessibilityEvent`). What remains a follow-up is
-> **daily-limit / usage enforcement** (see §2).
+> path**, **full-app blocking**, **rules** (schedules / daily limits, [27](27-rules-engine.md)),
+> **insights** (real screen time, [28](28-insights.md)) and
+> the **Daily Limit** are all wired natively.
 
 ---
 
-## 2. Native enforcement scope — what is *not* enforced yet
+## 2. Native enforcement scope
 
-The native engine covers the **reel/short view-id path**, **web host blocking**, and **custom
-whole-app blocking**. One limit feature is still UI + persistence in Dart with **no native
-enforcement yet**:
+The native engine covers the **reel/short view-id path**, **web host blocking**, **custom
+whole-app blocking**, since M3 **rules** and the **Daily Limit**, and since M8 **per-target
+temporary unblocks**:
 
-| Feature | What exists | What's missing (follow-up) |
+| Feature | What exists | Ceiling / follow-up |
 |---|---|---|
-| **App blocker** (`lib/features/limits/app_blocker`) | **Natively enforced** — `syncAppBlocklist` pushes enabled packages via `pushAppBlocklist`; `ConfigStore.blockedAppPackages` persists them; the service HOME-bounces any blocked app on any event (toast + vibration, shared block counter, protected/self/launcher/systemui skips) | Per-entry `lockAction` / `dailyLimitMinutes` are still unused — every block acts as a HOME bounce |
-| **Daily limit** (`lib/features/limits/daily_limit`) | Full UI, quota math, reset logic, Dart persistence, unit-tested | `ConfigStore` has **no daily-limit/usage keys**; native does only permission checks (`hasUsageAccess`), no `UsageStats` polling or quota-triggered block. Needs: usage sampling + a native quota gate |
+| **App blocker** (`lib/features/limits/app_blocker`) | **Natively enforced** — `syncAppBlocklist` pushes enabled packages via `pushAppBlocklist`; `ConfigStore.blockedAppPackages` persists them; the service HOME-bounces any blocked app on any event (block screen with toast fallback + vibration, shared block counter, protected/self/launcher/systemui skips) | Per-entry `lockAction` / `dailyLimitMinutes` are still unused — every block acts as a HOME bounce |
+| **Rules** (`lib/features/limits/rules`) | **Natively enforced** — Dart resolves schedules to absolute windows and spent limits to today's window, pushes the snapshot via `pushRules`; `RuleEngine` enforces it below the Pause gate (package, host and reel-feed arms) | Time / open limits reconcile from UsageStats only while Dart runs (resume, edit, `ruleBoundary`), so a spent budget can enforce late; windows are pushed 7 days ahead. See [27](27-rules-engine.md) §4/§6 |
+| **Daily limit** (`lib/features/limits/daily_limit`) | **Natively enforced** — the rules snapshot carries a `daily_reel_limit` entry metered against `ContentCounter.timeTodayMs()`; reel feeds block at the limit until midnight with the wall's "Your daily limit is used up" | Needs the reel counter on (the screen says so when it is off) |
 
-See [06-app-and-web-blocker.md](06-app-and-web-blocker.md) and
-[07-daily-limit-scheduler.md](07-daily-limit-scheduler.md).
+| **Per-target unblock** (`lib/features/limits/unblock`) | **Natively enforced** — `syncTemporaryUnblocks` pushes only the live grants via `pushTemporaryUnblocks`; `UnblockRegistry` holds them behind one `@Volatile` snapshot and expires them on `elapsedRealtime`, so a grant ends on time with Detoxo force-stopped and re-anchors across a reboot from `reload()`. Consulted at four block sites — **never** the strict arm | Grants are unrationed: a lapsed one can be re-taken immediately. The override half is rationed; this half is not. See [31](31-locked-rules-and-unblock.md) |
+
+See [06-app-and-web-blocker.md](06-app-and-web-blocker.md),
+[07-daily-limit-scheduler.md](07-daily-limit-scheduler.md) and [27-rules-engine.md](27-rules-engine.md).
 
 ---
 
@@ -142,7 +150,7 @@ by where business rules live:
 | Blocking & limits | `web_blocker_test.dart`, `blocklist_install_filter_test.dart`, `streak_test.dart` |
 | Protected apps | `protected_apps_test.dart` (catalog, repo salvage/migration, cubit, fail-closed PIN gate, wire contract) |
 | Permissions | `permissions_restricted_settings_test.dart` (ECM / non-Play install path) |
-| Content counter | `counter_style_test.dart` |
+| Content counter | `content_counter_test.dart` (snapshot mapping, cubit switches + overlay grant, `formatBubbleClock` mirror), `counter_style_test.dart` (Dart) · `android/app/src/test/kotlin/…/engine/ReelTrackerTest.kt` (native counting rule, JVM — run by `precommit` when a JDK 17 is present, see [23-testing-runbook.md](23-testing-runbook.md)) |
 | Help & upgrade | `help_test.dart`, `app_upgrader_test.dart`, `legal_web_view_test.dart` |
 | Dashboard widgets | `blocker_tile_test.dart`, `mode_selector_test.dart` |
 | Feedback | `app_feedback_test.dart` |
@@ -223,7 +231,10 @@ feature's public barrel or `domain/`, never its `data/`/`presentation/`).
 **Fixed (Aug 2026).** The script used to grep a pre-rebrand package prefix, so it matched nothing
 and passed vacuously from the rename onward. It now greps `package:detoxo/` and genuinely enforces
 the rule. Repairing it surfaced 12 pre-existing violations, grandfathered in
-`tool/boundaries_baseline.txt`; anything new fails the build.
+`tool/boundaries_baseline.txt`; anything new fails the build. The baseline is **down to 8**
+(the `content_counter` barrel cleared four on 2026-08-29) and may only ever shrink — five of the
+remaining entries share one root cause, `blocking/shared/presentation/settings_cubit.dart` being
+reached into by five features.
 
 ### Native (Kotlin)
 - **No instrumented/unit tests are bundled** for the engine. The detection/block hot path is
@@ -254,12 +265,16 @@ release.
   short-form video and blocks it, "reads on-screen content only to find and block distracting
   feeds; it does not collect or transmit your screen content") and the permission funnel explains
   the grant. Keep the disclosure prominent, accurate, and shown **before** requesting the grant.
-- **No foreground service.** The service runs in the **main process** and posts a persistent
-  notification (channel `detoxo_protection_channel`, id `1125`) with
-  `NotificationManager.notify()`. It deliberately does **not** call `startForeground()`: an
-  accessibility service is already bound at foreground-service priority, so the only thing
-  `FOREGROUND_SERVICE_SPECIAL_USE` would add is a Play Console declaration and a manual review.
-  Same reasoning for `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` — the battery step opens the system
+- **Foreground service.** The accessibility service runs in the **main process** and *is* the
+  foreground service: `onServiceConnected` → `startAsForeground()` →
+  `startForeground(1125, notification, FOREGROUND_SERVICE_TYPE_SPECIAL_USE)` on API 34+, else the
+  two-arg form (`DetoxoAccessibilityService.kt:1117`), wrapped in try/catch and re-armed in
+  `onTaskRemoved`. Channel `detoxo_protection_channel` / `IMPORTANCE_LOW` / `PRIORITY_MIN` / no
+  badge. The manifest declares both `FOREGROUND_SERVICE` and `FOREGROUND_SERVICE_SPECIAL_USE`, so
+  the Play Console special-use declaration and its manual review apply — see
+  [22-play-release.md](22-play-release.md). (Docs 03/04/12 describe the same behavior; an earlier
+  revision of this section claimed the opposite and was wrong.)
+  `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` is separate: the battery step opens the system
   optimisation list instead of the policy-restricted one-tap dialog.
 - **Device admin.** `DetoxoDeviceAdminReceiver` (uninstall protection + `lockNow`) is subject to
   device-admin policy and OEM behavior; use it sparingly and disclose it.
@@ -308,7 +323,7 @@ release.
 - `README.md`
 - `pubspec.yaml`
 - `tool/check_boundaries.sh`
-- `test/domain_test.dart`, `test/app_settings_test.dart`, `test/plans_pause_curious_test.dart`, `test/usage_ladder_test.dart`, `test/access_protection_test.dart`, `test/web_blocker_test.dart`, `test/blocklist_install_filter_test.dart`, `test/counter_style_test.dart`, `test/app_feedback_test.dart`
+- `test/domain_test.dart`, `test/app_settings_test.dart`, `test/plans_pause_curious_test.dart`, `test/usage_ladder_test.dart`, `test/access_protection_test.dart`, `test/web_blocker_test.dart`, `test/blocklist_install_filter_test.dart`, `test/counter_style_test.dart`, `test/content_counter_test.dart`, `test/app_feedback_test.dart`
 - `lib/core/storage/local_store.dart`
 - `lib/features/blocking/shared/data/repositories/config_repository_impl.dart`
 - `lib/features/access_protection/data/repositories/pin_repository_impl.dart`

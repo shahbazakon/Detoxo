@@ -1,10 +1,10 @@
 # Platform Channel Contracts
 
 The Dart app and the native Android engine communicate over exactly **two Flutter
-platform channels**, plus **one out-of-band bridge** (the `home_widget` plugin)
-for the home-screen widget. This doc is the complete, source-derived contract:
-every command method (args + return) on the MethodChannel, every event `type` +
-payload shape on the EventChannel, and the widget bridge keys.
+platform channels** — the home-screen widget included (pinned and refreshed by
+two commands below; the former `home_widget` plugin bridge is gone). This doc is
+the complete, source-derived contract: every command method (args + return) on
+the MethodChannel and every event `type` + payload shape on the EventChannel.
 
 Channel names are defined once in `lib/core/constants/channel_constants.dart` and
 mirrored in the native `MainActivity`:
@@ -68,6 +68,11 @@ Method-name constants live in `ChannelMethods` (Dart) and are matched by string 
 | `pushWebBlocklist` | `{json: String}` | fail-safe like `pushProtectedApps`: null / non-JSON-array arg is a **no-op** (never a wipe; clearing needs an explicit `"[]"`), an **unchanged** payload (every Web Blocker screen entry re-pushes) skips everything, else `store.webBlocklistJson = json` + `service.refreshWebBlocklist()` (rule set only — no config re-parse) | `true` | `pushWebBlocklist(String json)` |
 | `pushProtectedApps` | `{packages: List<String>}` | set-if-changed: absent/malformed arg is a **no-op** (never a wipe), unchanged set skips everything, changed set → `store.protectedPackages` + `service.refreshProtectedPackages()` (no full `reload()`) | `true` | `pushProtectedApps(List<String> packages)` |
 | `pushAppBlocklist` | `{packages: List<String>}` | same contract as `pushProtectedApps`: absent/malformed arg = **no-op** (clearing needs an explicit empty list), unchanged set skips everything, changed set → `store.blockedAppPackages` + `service.refreshAppBlocklist()` | `true` | `pushAppBlocklist(List<String> packages)` |
+| `pushNudgeConfig` | `{enabled: Bool, packages: List<String>, thresholdStepMs: Long, dailyCap: Int}` | soft nudge ([30](30-soft-nudge.md)). Each field is **independently** fail-safe like `pushProtectedApps` — an absent one leaves the stored value alone. Writes `store.nudge{Enabled,Packages,StepMs,DailyCap}` (the two numbers clamped in the accessor) then `service.refreshNudgeConfig()`, which rebuilds the tracker and hides any standing card when the feature went off | `true` | `pushNudgeConfig({enabled, packages, thresholdStepMs, dailyCap})` |
+| `pushRules` | `{json: String, nextBoundaryMs: Long}` | `pushWebBlocklist`'s twin: absent / non-JSON-array `json` = **no-op** (clearing needs an explicit `"[]"`), unchanged `json` skips the prefs rewrite; `nextBoundaryMs` (read as `Number`, clamped to ≥ 0) is **always** written; then `service.refreshRules()` re-reads both into `RuleEngine` + the boundary mirror, re-parsing only on a changed snapshot string | `true` | `pushRules(String json, int nextBoundaryMs)` |
+| `pushTemporaryUnblocks` | `{json: String}` | M8's per-target grants — `[{targetType: "REEL" \| "APP" \| "WEBSITE", targetId, endMs}]`, the ACTIVE ones only. The `pushWebBlocklist` arm verbatim: absent / non-array `json` = **no-op** (clearing needs `"[]"`), unchanged skips the prefs write, then `service.refreshTemporaryUnblocks()`. `endMs` is an absolute wall stamp (it has to survive a reboot); `UnblockRegistry` converts it to an `elapsedRealtime` deadline **once per parse**, so moving the system clock back cannot hold a grant open (EVO-048's rule, inherited from the per-site pause this replaces) | `true` | `pushTemporaryUnblocks(String json)` |
+| `takeNativeGrants` | — | Reads **and clears** the grants taken on the wall itself (EVO-050), as the `pushTemporaryUnblocks` JSON array. Native has already enforced them; this is how Hive learns about them before its own push would overwrite them ([31](31-locked-rules-and-unblock.md) §5) | `String?` | `takeNativeGrants()` |
+| `takePendingUnblock` | — | Reads **and clears** the target of an "Allow for a while" tap on the wall, as `"TYPE\|id"` (stored with a stamp that never crosses the channel; a tap older than 2 min is dropped rather than replayed). A consumable prefs key rather than a replayed event: the tap also foregrounds Detoxo, and on a cold start the EventChannel sink does not exist when `blockScreenAction` is posted ([31](31-locked-rules-and-unblock.md) §5) | `String?` | `takePendingUnblock()` |
 
 **`pushConfig` payload** — `json` is the full `platforms_config.json` string
 (featuredApps → platforms → detectors), parsed natively by `DetectionConfig`.
@@ -89,13 +94,20 @@ Method-name constants live in `ChannelMethods` (Dart) and are matched by string 
 | `consciousMaxBankMs` | `Number` | read as `Long` |
 | `blockAdultWebsites` | `bool` | |
 | `blockWebsitesForBlockedApps` | `bool` | |
+| `suppressNotifications` | `bool` | Notification suppression on/off. Set-if-changed: on a real change native persists it **and** binds/unbinds the notification listener (`DetoxoNotificationListener.syncBinding`). That is only the responsive half of the "off ⇒ unbound" guarantee — the durable half is `onListenerConnected` re-reading the stored flag, since the OS rebinds on boot regardless ([29](29-notification-suppression.md) §5). Only the switch crosses the channel — the suppressed set is derived natively ([29](29-notification-suppression.md)). |
 
 **`pushWebBlocklist` payload** — `json` is a JSON-encoded array of
-`{pattern, matchType[, pausedUntil]}` rules. `matchType` is `WebMatchType.wire`:
-`DOMAIN` \| `EXACT` \| `WILDCARD` (native `WebBlockEngine` matches browser hosts
-against these). `pausedUntil` (optional, epoch ms — EVO-012) makes native skip
-the rule until that instant; expiry is enforced natively so a per-site pause
-re-arms even if the Flutter app never runs again.
+`{pattern, matchType}` rules. `matchType` is `WebMatchType.wire`:
+`DOMAIN` \| `WILDCARD` (native `WebBlockEngine` matches browser hosts
+against these).
+
+> **The plan's one wire-contract change (M8).** This payload used to carry an
+> optional per-entry `pausedUntil` (EVO-012/EVO-048). It is **gone**: a paused
+> site is now a `WEBSITE` grant on `pushTemporaryUnblocks`, so "this target is
+> dormant until T" is one mechanism for reels, apps and websites instead of two
+> ([31](31-locked-rules-and-unblock.md) §3). Native ignores the old key for
+> free — nothing reads it — so a downgrade cannot resurrect a stale pause, and a
+> stored live pause migrates once at bootstrap.
 
 **`pushProtectedApps` payload** — `packages` is a flat list of privacy-protected
 package names: the **entire bundled catalog** (always protected, installed or
@@ -105,6 +117,28 @@ minimal: app names and categories never cross the channel — native only needs
 "is this package protected". Pushed by `ProtectedAppsCubit` on every list change
 and by `syncProtectedAppsAtBoot` at splash.
 
+**`pushRules` payload** — `json` is the **resolved rules snapshot**, not the stored
+rules ([27](27-rules-engine.md) §5): a JSON array with one entry per rule —
+`{id, reason: "SCHEDULE" | "DAILY_LIMIT", mode: "BLOCK" | "ALL_EXCEPT", packages,
+domains, platformIds, windows: [[fromMs, untilMs], …], always, reelTimeLimitMs,
+strict, usageLimitMs, openLimitCount, spent}`.
+Categories are already flattened, windows are absolute epoch-ms resolved 7 days
+ahead in the device zone, `always` skips the window check and `reelTimeLimitMs > 0`
+is the daily reel limit's native meter. `strict` (EVO-030) makes the entry enforce
+**above** the pause gate — and a **locked** rule (M8) is emitted as `strict: true`,
+so this snapshot gains **no key** for locking: `locked` / `lockScope` stay
+Dart-side, and an active override is expressed by *splitting* that rule's own
+`windows` around the lift ([31](31-locked-rules-and-unblock.md) §4). `usageLimitMs` / `openLimitCount` carry the rule's own
+daily budget and `spent` says whether it has run out: an entry with a budget and
+`spent: false` is **PENDING** — native re-measures it at the watchdog tick
+(EVO-029) and never blocks on it until it flips. `nextBoundaryMs` is the earliest
+moment any window opens or closes, or an unspent budget is projected to run out
+(floored at 60 s), or local midnight when any limit exists; it is pushed even when
+no entry is blocking yet, and is clamped to ≥ 0 on the native side.
+Built by `syncRules` (`lib/features/limits/rules/domain/rule_sync.dart`) from
+persisted state; a failed load aborts the push. `refreshRules()` re-parses only
+when the snapshot string actually changed.
+
 **`pushAppBlocklist` payload** — `packages` is a flat list of the **enabled**
 custom whole-app-block package names, built by `syncAppBlocklist`
 (`lib/features/limits/app_blocker/domain/app_block_sync.dart`) from persisted
@@ -113,11 +147,24 @@ service HOME-bounces any event from one of these packages (see
 [06-app-and-web-blocker.md](06-app-and-web-blocker.md)). Pushed on every App
 Blocker mutation, at splash, and by the resume re-sync heavy leg.
 
+**`pushNudgeConfig` payload** — `packages` is the catalog's `distracting`
+behaviour, derived by `nudgePackages()`
+(`lib/features/blocking/shared/domain/nudge_sync.dart`) from `Catalog.bundled`,
+never curated and never persisted in Dart. **These apps are timed, not blocked**
+— it is the one flat package set in the engine that does not mean "intervene".
+`thresholdStepMs` is `AppSettings.nudgeThresholdMinutes` in ms. Pushed at splash
+and on the resume heavy leg (`syncEngineBlocklists`), and by `SettingsCubit`
+after any of the three nudge setters.
+
 ### Permission queries & launches
 
 Each `is*/has*/canDrawOverlays` returns a `Boolean`; each `open*/request*` launches
 a system settings/consent intent and returns a `Boolean` = *launch succeeded*
 (true if `startActivity` didn't throw — **not** whether the user granted it).
+The two usage-stats arms are the **only** ones in the handler that `result.error(...)`:
+an empty list would be indistinguishable from a quiet day (EVO-014), so a missing
+grant reaches Dart as `USAGE_ACCESS_DENIED`, and `EngineChannel.invokeOrThrow` is
+the one invoke that lets a `PlatformException` through.
 The boolean permission **queries** (`hasUsageAccess`,
 `isIgnoringBatteryOptimizations`, `isDeviceAdminActive`) have **no
 `EngineChannel` convenience wrapper** — the permission repository reads them
@@ -134,11 +181,15 @@ orphans).
 | `requestOverlayPermission` | — | `Boolean` | `requestOverlay()` |
 | `hasUsageAccess` | — | `Boolean` (`AppOpsManager` GET_USAGE_STATS) | *(none — read tri-state via `invokeBoolOrNull` from the permission repository)* |
 | `openUsageAccessSettings` | — | `Boolean` | `openUsageAccess()` |
+| `queryAppUsage` | `{startMillis: Long, endMillis: Long}` | `List<{package: String, foregroundMillis: Long}>` (`foregroundMillis > 0` only) — **throws** `PlatformException("BAD_ARGS")` on missing/inverted bounds and `("USAGE_ACCESS_DENIED")` without the grant; `("USAGE_QUERY_FAILED")` if the OS query throws. Off-thread on `ioExecutor`, posted back on the main looper | `queryAppUsage({startMillis, endMillis})` via `invokeOrThrow` — the usage repository maps the errors ([26](26-catalog-and-usage-signal.md)) |
+| `queryUsageEvents` | `{startMillis: Long, endMillis: Long}` | `List<{package: String, type: Int, timestampMillis: Long}>`, ascending, `type ∈ {1, 18}` only; same errors as `queryAppUsage` | `queryUsageEvents({startMillis, endMillis})` |
 | `isIgnoringBatteryOptimizations` | — | `Boolean` | *(none — read tri-state via `invokeBoolOrNull` from the permission repository)* |
 | `requestIgnoreBatteryOptimizations` | — | `Boolean` (launches `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` with the package Uri — the one-tap exemption dialog; the manifest holds `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`) | `requestIgnoreBattery()` |
 | `isDeviceAdminActive` | — | `Boolean` | *(none — read tri-state via `invokeBoolOrNull` from the permission repository)* |
 | `requestDeviceAdmin` | — | `Boolean` (launches `ACTION_ADD_DEVICE_ADMIN`) | `requestDeviceAdmin()` |
 | `removeDeviceAdmin` | — | `true` (removes active admin; swallows errors) | `removeDeviceAdmin()` |
+| `isNotificationListenerEnabled` | — | `Boolean` (`NotificationListenerCheck`: the `enabled_notification_listeners` `Settings.Secure` string, matching both flattened component forms) | *(none — read tri-state via `invokeBoolOrNull` from the permission repository)* |
+| `openNotificationListenerSettings` | — | `Boolean` (launches `ACTION_NOTIFICATION_LISTENER_SETTINGS`) | `openNotificationListenerSettings()` |
 
 > **Not on this channel, on purpose.** The restricted-settings / ECM recovery flow
 > ([13-onboarding-permissions.md](13-onboarding-permissions.md) §3.4) needs the
@@ -164,6 +215,23 @@ Direct engine actions, routed to the live `DetoxoAccessibilityService.instance`
 | `performBack` | — | `service.performBackPublic()` | `true` | `performBack()` |
 | `killApp` | `{package: String}` | `service.killApp(pkg)` (no-op if pkg null) | `true` | `killApp(String pkg)` |
 | `lockScreen` | — | `service.lockScreen()` (device-admin `lockNow`) | `true` | `lockScreen()` |
+
+### Block screen (the intervention wall)
+
+The wall is raised in-process by the service's four trigger sites
+([25](25-block-screen.md) §3); these arms exist for the Dart-driven cases (the
+style editor's "Try it" preview, the style itself). Unlike the block actions above
+they do **not** route through the service instance — `BlockScreenOverlay` is an
+`object` that needs only a `Context`, so a preview works with the service dead.
+
+| Method | Args | Native effect | Returns | Dart wrapper |
+|---|---|---|---|---|
+| `showBlockScreen` | the `BlockScreenPayload.toWire()` map (`referenceType`, `referenceId`, `displayName`, `appLabel`, `packageName`, `blockReason`, `plan`, `allowance`, `todayCount`, `allowanceLeft`, `bankMs`, `opensToday`, `offersOpenApp`, `offersUnblock`) | `BlockScreenOverlay.show(context, payload.sanitised(), {ourPackage}, preview = true)` | `Boolean` — `false` when the wall is switched off, the overlay grant is missing, the payload lacks `referenceType`/`blockReason`, or the add failed | `showBlockScreen(Map)` |
+| `hideBlockScreen` | — | `BlockScreenOverlay.hide()` | `true` | `hideBlockScreen()` |
+| `isBlockScreenShowing` | — | `BlockScreenOverlay.isShowing()` | `Boolean` | `isBlockScreenShowing()` |
+| `goHome` | — | `ACTION_MAIN` + `CATEGORY_HOME` + `NEW_TASK` | `true` | `goHome()` |
+| `setBlockScreenStyle` | `{style: Map}` (`BlockScreenStyle.toWire()`: `enabled`, `theme`, `background`, `showCount`, `showOpens`, `accentByUsage`, `backDelaySec` 0–60) | persists `ConfigStore.blockScreenStyleJson`, rebuilds a showing wall | `true` (malformed → skipped, still `true`) | `setBlockScreenStyle(Map)` |
+| `blockScreenStyle` | — | parses the persisted JSON | the style as a `Map` (`{}` when never saved / malformed) | `blockScreenStyle()` |
 
 ### PIN lock / Smart Auto Lock
 
@@ -218,6 +286,7 @@ setting the plan to `CURIOUS`.
 | `deviceInfo` | — | `{brand, manufacturer, model, sdkInt}` | *(no Dart wrapper)* |
 | `installedPackages` | — | `List<String>` of launchable packages, or `null` on failure | `installedPackages() → Set<String>?` |
 | `installedApps` | — | `List<{package: String, label: String, icon: ByteArray?}>` (icon = 96px PNG), or `null` on failure | `installedApps() → List<InstalledApp>?` |
+| `unsupportedBrowsers` | — | `List<{packageName: String, label: String}>` — installed browsers **outside** `KNOWN_BROWSERS`, sorted by label; `[]` when all covered, `null` on failure | `unsupportedBrowsers() → List<String>?` (labels) |
 
 Notes:
 - **`consciousState`** prefers the live service snapshot; if the service is dead it
@@ -238,16 +307,29 @@ Notes:
   try/catch) instead of failing the list. Dart caches the result process-wide
   in `EngineRepositoryImpl` — the payload (~1–3 MB with icons) crosses the
   channel once per launch, not per picker open.
+- **`unsupportedBrowsers`** (EVO-047) resolves `ACTION_VIEW` for `http`/`https` —
+  the definitive "is a browser" test — and subtracts
+  `BrowserUrlExtractor.isBrowser`, i.e. everything the web blocker can actually
+  read. The manifest already declares both `<queries>` intents for browser
+  visibility, so no `QUERY_ALL_PACKAGES` is involved. Off-thread like its two
+  neighbours. `[]` and `null` mean different things and are not collapsed:
+  `[]` is "every browser you have is covered", `null` is "couldn't ask" — the
+  Website blocker renders a notice only for a **non-empty** list, so an
+  unanswered query never invents a warning.
 
 ### Content-counter controls
 
 | Method | Args | Native effect | Returns | Dart wrapper |
 |---|---|---|---|---|
-| `setContentCounterEnabled` | `{enabled: Bool}` (default `true`) | `store.enabled`; `service.contentCounter.setEnabled` | `true` | `setContentCounterEnabled({enabled})` |
-| `setContentBubbleEnabled` | `{enabled: Bool}` (default `true`) | `store.bubbleEnabled`; `service.contentCounter.setBubbleEnabled` | `true` | `setContentBubbleEnabled({enabled})` |
+| `setContentCounterEnabled` | `{enabled: Bool}` (missing → no-op) | `store.enabled`; `service.contentCounter.setEnabled` | `true`; `false` when `enabled` is absent/malformed (nothing written) | `setContentCounterEnabled({enabled})` |
+| `setContentBubbleEnabled` | `{enabled: Bool}` (missing → no-op) | `store.bubbleEnabled`; `service.contentCounter.setBubbleEnabled` | `true`; `false` when `enabled` is absent/malformed | `setContentBubbleEnabled({enabled})` |
 | `pinContentWidget` | — | `AppWidgetManager.requestPinAppWidget(ContentCounterWidgetProvider)` | `Boolean` (false if launcher can't pin / < API 26) | `pinContentWidget()` |
 | `refreshContentWidget` | — | `ContentCounterWidgetProvider.pushUpdate(store.snapshot)` | `true` | `refreshContentWidget()` |
-| `setCounterStyle` | `{bubble?: Map, widget?: Map}` | persists changed surface(s), live-re-renders bubble + all pinned widgets | `true` | `setCounterStyle({bubble, widget})` |
+| `setCounterStyle` | `{bubble?: Map, widget?: Map}` | persists each present surface (`as? Map` — a malformed one is skipped) and live-re-renders **only that surface**: `bubble` → the visible bubble, `widget` → all pinned widgets | `true` | `setCounterStyle({bubble, widget})` |
+
+The bubble's `BubbleRepository.canShow()` reads `canDrawOverlays` **tri-state**
+(`invokeBoolOrNull`): `null` = the call didn't answer, rendered as unknown —
+never as denied ([17](17-content-counter.md) §6.1).
 
 **`setCounterStyle` payload** — each sub-map is a style *wire map*; only the keys
 present are updated (the Dart wrapper uses null-aware spread `{'bubble': ?bubble,
@@ -300,11 +382,14 @@ Every payload carries `type` plus the fields below.
 | `type` | Emitted by | Payload (beyond `type`) | Dart consumer |
 |---|---|---|---|
 | `serviceStatus` | `DetoxoAccessibilityService` (connect / interrupt / unbind) | `{running: Bool}` | `engine_repository_impl.dart` |
-| `blocked` | `DetoxoAccessibilityService.onDetected` / `onAppBlocked` | `{package: String, platformId: String, mode: String, today: Int, total: Int}` | `engine_repository_impl.dart` (status + block history) |
+| `blocked` | `DetoxoAccessibilityService.onDetected` / `onAppBlocked` | `{package: String, platformId: String, mode: String, today: Int, total: Int, reason: "PLAN" \| "APP_BLOCK" \| "SCHEDULE" \| "DAILY_LIMIT"}` — `platformId` is `"rule"` for a rule's HOME bounce, `"app_block"` for an App Blocker lock | `engine_repository_impl.dart` (status + block history; `reason` is not read) |
 | `webBlocked` | `DetoxoAccessibilityService.handleBrowser` | `{source: "RULE" \| "ADULT", mode: "PRESS_BACK", today: Int, total: Int, host?: String}` — `host` only for `RULE` hits; adult-list blocks are counted, never named (EVO-018) | `web_block_stats_repository_impl.dart` |
 | `consciousState` | `DetoxoAccessibilityService` (1 Hz accountant) | `{bankMs: Long, maxBankMs: Long, watching: Bool, blocked: Bool, active: Bool}` | `engine_repository_impl.dart` |
 | `reelSessionState` | `DetoxoAccessibilityService` (One Reel / Unblock allow/block/arm) | `{consumed: Int, allowance: Int, blocked: Bool, active: Bool}` | `engine_repository_impl.dart` |
 | `contentCounted` | `ContentCounter.count` | `{package: String, today: Int, total: Int, perAppToday: Map<String,Int>, perAppTotal: Map<String,Int>, timeTodayMs: Long, enabled: Bool, bubbleEnabled: Bool}` | `content_counter_repository_impl.dart` |
+| `blockScreenAction` | `BlockScreenOverlay` (a button on the wall) | `{action: "GO_HOME" \| "OPEN_APP" \| "DISMISS" \| "UNBLOCK", referenceType: String, referenceId: String, preview: Bool}` — `preview` is true for the editor's "Try it" wall. `UNBLOCK` fires since M8, but the flow it starts does **not** ride this event — the target is handed over by `takePendingUnblock`, which survives the cold start this event does not ([31](31-locked-rules-and-unblock.md) §5) | `native_event_reporter.dart` (analytics only — `referenceId` is never forwarded; no Dart navigation, see [25](25-block-screen.md) §8) |
+| `ruleBoundary` | `DetoxoAccessibilityService.checkRuleBoundary` (every `WINDOW_STATE_CHANGED`) / `WatchdogJobService` (15-min tick) | `{atMs: Long}` — the pushed `nextBoundaryMs` has passed (a rule window opened or closed); posted **once**, then the boundary is zeroed until the next `pushRules` | `engine_repository_impl.dart` → `RulesCubit.resync()` re-resolves and re-pushes ([27](27-rules-engine.md) §5) |
+| `nudgeShown` | `DetoxoAccessibilityService.showNudge` (only after the card actually attached) | `{package: String, elapsedMs: Long, thresholdMs: Long}` — `elapsedMs` is the real time in the app, `thresholdMs` the multiple that was crossed | `native_event_reporter.dart` → Firebase `nudge_shown` with **`duration_min` only**; `package` never leaves the device ([30](30-soft-nudge.md) §7) |
 
 `mode` on `blocked` is the resolved block mode: `PRESS_BACK` \| `KILL_APP` \|
 `LOCK_SCREEN` \| `NONE` — or `HOME` with `platformId: "app_block"` for a custom
@@ -321,24 +406,17 @@ ever posted them and no Dart consumer read them.
 
 ---
 
-## Home-widget bridge (out of band)
+## Home-screen widget (over the command channel)
 
-The home-screen reel-counter widget is **not** driven over the two channels above.
-It uses the `home_widget` plugin as a side bridge, in
-`lib/features/content_counter/home_content_counter/data/repositories/home_widget_repository_impl.dart`:
-
-- **Data keys** (`HomeWidget.saveWidgetData<int>`): `cc_today`, `cc_total`.
-- **Provider**: `ContentCounterWidgetProvider` — `name`/`androidName`
-  `"ContentCounterWidgetProvider"`, qualified
-  `"com.errorxperts.detoxo.widget.ContentCounterWidgetProvider"`.
-- **Update**: `HomeWidget.updateWidget(...)` re-renders the provider.
-- **Pin**: `HomeWidget.requestPinWidget(...)`; on failure (plugin unavailable /
-  launcher refused) it falls back to the native `pinContentWidget` command.
-
-The native provider renders from `ContentCounterStore` (the **native store is the
-source of truth**), so these `home_widget` calls only trigger a refresh/pin — a
-`home_widget` failure never breaks counting. Every `pushSnapshot` also calls
-`refreshContentWidget` on the command channel as the authoritative render path.
+The home-screen reel-counter widget is driven by exactly two commands above —
+`pinContentWidget` and `refreshContentWidget` — through
+`lib/features/content_counter/home_content_counter/data/repositories/home_widget_repository_impl.dart`
+(`pin()` / `refresh()`). The native provider renders from `ContentCounterStore`
+(the **native store is the source of truth**); nothing is written from Dart.
+The former `home_widget` plugin side-bridge was removed: its `saveWidgetData`
+keys were never read natively, it rendered every pinned widget twice per push,
+and its `requestPinWidget` never threw, so the launcher-can't-pin case was
+misreported as success.
 
 ---
 
@@ -351,10 +429,15 @@ source of truth**), so these `home_widget` calls only trigger a refresh/pin — 
   (`lastScreenOff`), a map (stats/snapshots/deviceInfo/`monotonicNow`), or
   a `List`/`null` (installedPackages). Every declared constant has a native
   arm; unknown methods → `notImplemented`.
-- **Events**: 6 live types multiplexed by `type`; every declared constant has
-  a native emitter.
-- **Widget**: separate `home_widget` bridge, keys `cc_today`/`cc_total`, provider
-  `ContentCounterWidgetProvider`, native store is source of truth.
+- **Events**: 9 live types multiplexed by `type`; every declared constant has
+  a native emitter. M8 deliberately added none — a grant's expiry is enforced
+  natively and the countdown is cleared by a one-shot Dart timer
+  ([31](31-locked-rules-and-unblock.md) §6).
+- **Errors**: only `queryAppUsage` / `queryUsageEvents` ever `result.error(...)`
+  (`BAD_ARGS`, `USAGE_ACCESS_DENIED`, `USAGE_QUERY_FAILED`); every other arm is
+  fail-safe (`success` or `notImplemented`).
+- **Widget**: `pinContentWidget` / `refreshContentWidget` on the command channel;
+  provider `ContentCounterWidgetProvider`, native store is source of truth.
 
 See also [03-detection-engine.md](03-detection-engine.md) for how `blocked` is
 produced, and the content-counter engine doc for `contentCounted`
@@ -368,11 +451,20 @@ and the bubble/widget surfaces.
 - `lib/features/blocking/shared/data/repositories/engine_repository_impl.dart`
 - `lib/features/blocking/shared/domain/entities/enums.dart`
 - `lib/features/limits/web_blocker/data/repositories/web_block_stats_repository_impl.dart`
+- `lib/features/limits/rules/domain/rule_sync.dart`, `lib/features/limits/rules/domain/entities/rule_snapshot.dart` (the `pushRules` payload — [27](27-rules-engine.md))
+- `lib/features/limits/unblock/domain/unblock_sync.dart`, `.../domain/entities/temporary_unblock.dart` (the `pushTemporaryUnblocks` payload — [31](31-locked-rules-and-unblock.md))
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/UnblockRegistry.kt`
 - `lib/features/content_counter/content_counter_core/data/repositories/content_counter_repository_impl.dart`
 - `lib/features/content_counter/content_counter_core/data/repositories/counter_appearance_repository_impl.dart`
 - `lib/features/content_counter/content_counter_bubble/domain/entities/bubble_style.dart`
 - `lib/features/content_counter/home_content_counter/domain/entities/widget_style.dart`
 - `lib/features/content_counter/home_content_counter/data/repositories/home_widget_repository_impl.dart`
+- `lib/features/blocking/block_screen/data/repositories/block_screen_repository_impl.dart`
+- `lib/features/blocking/block_screen/domain/entities/{block_screen_payload,block_screen_style}.dart`
+- `lib/features/usage/data/repositories/usage_repository_impl.dart`
+- `lib/core/services/firebase/analytics/native_event_reporter.dart`
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/overlay/BlockScreenOverlay.kt`, `BlockScreenRenderer.kt`
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/UsageQuery.kt`
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/MainActivity.kt`
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/channels/CommandHandler.kt`
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/channels/DetoxoEventStream.kt`

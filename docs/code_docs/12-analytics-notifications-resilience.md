@@ -21,6 +21,12 @@ The `analytics` feature is a thin, local **block-event buffer** plus a read-only
 "Activity" feed. It records one record per native `blocked` event and shows the
 recent history; there is no aggregation, upload, or dashboard beyond a list.
 
+> The same feature also hosts **`insights/`** — the day rollups over real
+> `UsageStatsManager` screen time, which share the Activity tab behind a
+> segmented control but share no storage, no cubit and no repository with this
+> buffer. They are documented separately in [28-insights.md](28-insights.md);
+> everything in §1 below is the block-event buffer only.
+
 ### 1.1 Feature layout & boundary
 
 ```
@@ -117,9 +123,10 @@ Two responsibilities:
 ### 1.5 Presentation — one cubit, two entry points
 
 `analytics_screen.dart` exposes the same feed two ways that differ only in
-chrome, both wired through `_withCubit(...)`, which provides an `AnalyticsCubit`
-(`sl<AnalyticsRepository>()`, `sl<EngineRepository>()`) already `..load()`-ed
-plus a `ContentCounterCubit`:
+chrome, both wired through `_withCubit(...)` — a `MultiBlocProvider` supplying an
+`AnalyticsCubit` (`sl<AnalyticsRepository>()`, `sl<EngineRepository>()`) and an
+`InsightsCubit` (`sl<InsightsRepository>()`, `sl<EngineRepository>()`), both
+already `..load()`-ed; the `ContentCounterCubit` comes from `main.dart`:
 
 - **`AnalyticsScreen`** — full-screen drawer route ("Activity") with a
   `GlassAppBar` + back button.
@@ -127,12 +134,30 @@ plus a `ContentCounterCubit`:
   feedback button, and a drawer menu button, wired to the floating nav bar's
   scroll controller for hide-on-scroll.
 
-The body (`_ActivityBody`) is always a scrollable `ListView` that leads with the
+The body (`_ActivityBody`) is a stateful, always-scrollable `ListView` inside a
+`RefreshIndicator`, led by a `GlassSegmented` **Insights | Events** control.
+Insights is the default segment and renders `InsightsView` ([28](28-insights.md));
+pull-to-refresh recomputes it. The **Events** segment is this buffer: the
 always-visible `ReelCounterCard` (from the content-counter feature), then either
 an `EmptyState` ("Nothing blocked yet" / "Block events will show up here as they
 happen.") or one `_EventTile` per event. A tile renders a red "ban" `IconBadge`,
 `platformId` as the title, `packageName · mode.wire` as the subtitle, and a
 `DateFormat('MMM d, HH:mm')` timestamp.
+
+### 1.5a Lifetime and write safety
+
+`AnalyticsCubit` holds its `blockStream()` subscription and cancels it in
+`close()`. It is constructed per `_ActivityBody` mount and `AnalyticsScreen` is
+a pushed drawer route, so without the cancel every visit left a permanent
+listener behind — and each one ran its own read-modify-write of the same Hive
+key on every block, so the user's own block events could be lost to the race.
+
+`AnalyticsRepositoryImpl.logBlock` additionally serialises appends through a
+future chain, which is what actually makes concurrent writers safe. It
+deliberately re-reads rather than caching the list in memory: the repo is a lazy
+singleton and "Reset app data" (`LocalStore.clearAll`) wipes the box underneath
+it, so a buffer would write the wiped events straight back. Pinned by
+`test/analytics_buffer_test.dart`.
 
 ### 1.6 Dependency injection
 
@@ -413,6 +438,7 @@ resolution.
 | Firebase Analytics / Crashlytics / Performance (off-device telemetry) | **Shipped** — see [19-firebase-telemetry.md](19-firebase-telemetry.md) |
 | FCM push | **Not bundled** |
 | Cloud sink for the local `AnalyticsRepository` buffer | **Not wired** — the buffer stays on-device |
+| Notification suppression (`DetoxoNotificationListener` cancels notifications from apps blocked right now) | Shipped, optional/opt-in and **off by default** — see [29](29-notification-suppression.md). The only notification surface Detoxo *consumes* rather than posts; it unbinds itself whenever it connects with the toggle off, reads a notification's package name, key, user and category only, lets messages and calls through (EVO-038), and never touches Detoxo's own `1125` / `1127` notifications. |
 | `LOCK_SCREEN` block mode UI | Retained on the wire, removed from the picker |
 
 ---

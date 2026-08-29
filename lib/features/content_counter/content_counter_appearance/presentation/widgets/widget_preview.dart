@@ -1,3 +1,4 @@
+import 'package:detoxo/features/content_counter/content_counter_appearance/presentation/widgets/widget_palette.dart';
 import 'package:detoxo/features/content_counter/content_counter_core/domain/entities/counter_style_enums.dart';
 import 'package:detoxo/features/content_counter/content_counter_core/domain/usage_ladder.dart';
 import 'package:detoxo/features/content_counter/home_content_counter/domain/entities/widget_style.dart';
@@ -28,21 +29,31 @@ class WidgetPreview extends StatelessWidget {
       WidgetTheme.dark => true,
       WidgetTheme.system => Theme.of(context).brightness == Brightness.dark,
     };
-    return SizedBox(
-      width: size,
-      height: size,
-      child: CustomPaint(
-        painter: _WidgetFacePainter(
-          style: style,
-          today: today,
-          total: total,
-          dark: dark,
+    // A CustomPaint has no semantics of its own; describe what the picture
+    // shows so a screen-reader user learns what the widget will look like.
+    return Semantics(
+      label: 'Home widget preview: $today reels today, $total all time',
+      excludeSemantics: true,
+      child: SizedBox(
+        width: size,
+        height: size,
+        child: CustomPaint(
+          painter: _WidgetFacePainter(
+            style: style,
+            today: today,
+            total: total,
+            dark: dark,
+          ),
         ),
       ),
     );
   }
 }
 
+/// MIRROR CONTRACT: every size ratio below reproduces the native
+/// `WidgetBitmapRenderer` (`widget/WidgetBitmapRenderer.kt`) — the declared
+/// source of truth; the colours come from the shared [widgetPaletteFor]. Edit
+/// the Kotlin first, then mirror here.
 class _WidgetFacePainter extends CustomPainter {
   _WidgetFacePainter({
     required this.style,
@@ -68,7 +79,7 @@ class _WidgetFacePainter extends CustomPainter {
       size.height - strokeW / 2,
     );
     final rrect = RRect.fromRectAndRadius(rect, Radius.circular(corner));
-    final p = _palette();
+    final p = widgetPaletteFor(style.background, dark: dark, today: today);
 
     canvas
       ..drawRRect(
@@ -91,7 +102,7 @@ class _WidgetFacePainter extends CustomPainter {
     _drawLines(canvas, size, unit, p);
   }
 
-  void _drawLines(Canvas canvas, Size size, double unit, _Palette p) {
+  void _drawLines(Canvas canvas, Size size, double unit, WidgetPalette p) {
     final cozy = style.density != WidgetDensity.compact;
     final todayColor = style.accentByUsage ? bandColorFor(today) : p.today;
     final painters = <TextPainter>[];
@@ -158,77 +169,10 @@ class _WidgetFacePainter extends CustomPainter {
     )..layout();
   }
 
-  _Palette _palette() {
-    final textPrimary = dark
-        ? const Color(0xFFFFFFFF)
-        : const Color(0xFF14151A);
-    final textAccent = dark ? const Color(0xFF44E2CD) : const Color(0xFF12A594);
-    final textMuted = dark ? const Color(0xFFB8C0D9) : const Color(0xFF5A6072);
-    final band = bandColorFor(today);
-
-    switch (style.background) {
-      case WidgetBackground.glassBrand:
-        return _Palette(
-          bgTop: dark ? const Color(0xFF2E2470) : const Color(0xFFEDE7FF),
-          bgBottom: dark ? const Color(0xFF10233A) : const Color(0xFFDFF6F1),
-          stroke: const Color(0x5544E2CD),
-          today: textPrimary,
-          label: textAccent,
-          total: textMuted,
-        );
-      case WidgetBackground.solid:
-        return _Palette(
-          bgTop: dark ? const Color(0xFF141B2E) : const Color(0xFFF3F5FC),
-          bgBottom: dark ? const Color(0xFF141B2E) : const Color(0xFFF3F5FC),
-          stroke: dark ? const Color(0x1FFFFFFF) : const Color(0x1A101012),
-          today: textPrimary,
-          label: textAccent,
-          total: textMuted,
-        );
-      case WidgetBackground.usageTint:
-        final base = dark ? const Color(0xFF0B1326) : const Color(0xFFFFFFFF);
-        return _Palette(
-          bgTop: Color.lerp(base, band, dark ? 0.30 : 0.20)!,
-          bgBottom: Color.lerp(base, band, dark ? 0.14 : 0.34)!,
-          stroke: band.withValues(alpha: 0.4),
-          today: textPrimary,
-          label: textAccent,
-          total: textMuted,
-        );
-      case WidgetBackground.glassDark:
-        return _Palette(
-          bgTop: dark ? const Color(0xFF171F33) : const Color(0xFFFFFFFF),
-          bgBottom: dark ? const Color(0xFF0B1326) : const Color(0xFFEDF0FA),
-          stroke: dark ? const Color(0x33FFFFFF) : const Color(0x22101012),
-          today: textPrimary,
-          label: textAccent,
-          total: textMuted,
-        );
-    }
-  }
-
   @override
   bool shouldRepaint(_WidgetFacePainter old) =>
       old.style != style ||
       old.today != today ||
       old.total != total ||
       old.dark != dark;
-}
-
-class _Palette {
-  const _Palette({
-    required this.bgTop,
-    required this.bgBottom,
-    required this.stroke,
-    required this.today,
-    required this.label,
-    required this.total,
-  });
-
-  final Color bgTop;
-  final Color bgBottom;
-  final Color stroke;
-  final Color today;
-  final Color label;
-  final Color total;
 }

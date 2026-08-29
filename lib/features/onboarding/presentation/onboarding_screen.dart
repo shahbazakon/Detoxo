@@ -1,274 +1,288 @@
 import 'package:detoxo/core/design_system/design_system.dart';
 import 'package:detoxo/core/di/injector.dart';
 import 'package:detoxo/core/navigation/routes.dart';
-import 'package:detoxo/features/blocking/shared/domain/repositories/blocking_repositories.dart';
-import 'package:detoxo/features/limits/daily_limit/presentation/daily_limit_cubit.dart';
+import 'package:detoxo/core/services/firebase/firebase.dart';
+import 'package:detoxo/features/blocking/blocking.dart';
+import 'package:detoxo/features/limits/limits.dart';
+import 'package:detoxo/features/onboarding/domain/entities/onboarding_progress.dart';
+import 'package:detoxo/features/onboarding/domain/repositories/onboarding_repository.dart';
+import 'package:detoxo/features/onboarding/domain/starter_rule.dart';
+import 'package:detoxo/features/onboarding/presentation/onboarding_cubit.dart';
+import 'package:detoxo/features/onboarding/presentation/steps/projection_step.dart';
+import 'package:detoxo/features/onboarding/presentation/steps/selection_step.dart';
+import 'package:detoxo/features/onboarding/presentation/steps/survey_step.dart';
 import 'package:detoxo/features/onboarding/presentation/widgets/caught_hero.dart';
 import 'package:detoxo/features/onboarding/presentation/widgets/commitment_hero.dart';
-import 'package:detoxo/features/onboarding/presentation/widgets/plan_preview.dart';
 import 'package:detoxo/features/onboarding/presentation/widgets/screen_time_dial.dart';
-import 'package:detoxo/gen/assets.gen.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
 
-/// Which hero a page renders. Each maps to a coded illustration built from the
-/// design system (no bespoke assets) — the limit step keeps its own dial.
-enum _HeroKind { welcome, caught, plans, limit, stick }
-
-class _Page {
-  const _Page({
-    required this.accent,
-    required this.kind,
-    required this.title,
-    required this.body,
-  });
-
-  final Color accent;
-  final _HeroKind kind;
-
-  /// Headline.
-  final String title;
-
-  /// Description — carries the problem→solution beat in one breath.
-  final String body;
-
-  bool get isLimitStep => kind == _HeroKind.limit;
-}
-
-/// A value-first intro funnel over the ambient gradient. Five problem→solution
-/// beats, ending by marking the user onboarded, seeding the daily limit and
-/// moving on to the permission flow. Deep per-feature teaching is deferred to
-/// the in-context dashboard showcase.
-class OnboardingScreen extends StatefulWidget {
+/// The first run: a linear, persisted step machine over the ambient gradient.
+///
+/// The machine itself is [OnboardingCubit]; this screen is the walker that
+/// renders whatever step the cubit is on. Because every step lives inside this
+/// one route, resuming is a single read — there is no partial navigation stack
+/// to rebuild, and a kill at any point comes back exactly where it left off.
+///
+/// The last step hands off to the real [Routes.permissions] screen rather than
+/// re-implementing it: that screen already owns the Play prominent-disclosure
+/// dialogs, the restricted-settings recovery sheet and the unknown-state
+/// handling. The starter rule is written later still, by `StarterRuleSync`,
+/// when accessibility is actually granted.
+class OnboardingScreen extends StatelessWidget {
   const OnboardingScreen({super.key});
 
   @override
-  State<OnboardingScreen> createState() => _OnboardingScreenState();
+  Widget build(BuildContext context) {
+    return BlocProvider(
+      create: (_) => OnboardingCubit(
+        sl<OnboardingRepository>(),
+        onStep: (step, direction) => sl<AnalyticsService>().logOnboardingStep(
+          step.wire,
+          direction: direction.wire,
+        ),
+      )..load(),
+      child: const _OnboardingWalker(),
+    );
+  }
 }
 
-class _OnboardingScreenState extends State<OnboardingScreen> {
-  final _controller = PageController();
-  int _index = 0;
+class _OnboardingWalker extends StatelessWidget {
+  const _OnboardingWalker();
 
-  /// The user's picked daily limit (null until they drag → default is used).
-  Duration? _draftLimit;
+  /// Accent per step — the existing three-colour arc, kept.
+  static Color _accent(OnboardingStepId step) => switch (step) {
+    OnboardingStepId.welcome || OnboardingStepId.survey => AppColors.seed,
+    OnboardingStepId.projection ||
+    OnboardingStepId.selection => AppColors.onbTeal,
+    _ => AppColors.onbViolet,
+  };
 
-  /// Seeds the ring's daily max; the user drags the dial from here. Tunable
-  /// later in the Daily-limit screen.
-  static const _defaultLimit = Duration(minutes: 90);
+  /// Whether Next is available. Only two steps gate: the survey needs its
+  /// required answers, and the selection needs at least one feed — unless there
+  /// is nothing to pick, which must not be a dead end (a device with none of
+  /// the supported apps installed could otherwise never finish onboarding, and
+  /// so could never leave this screen on any future launch either).
+  static bool _canAdvance(OnboardingProgress p, TargetsState targets) =>
+      switch (p.step) {
+        OnboardingStepId.survey => SurveyStep.isComplete(p),
+        OnboardingStepId.selection =>
+          p.platforms.isNotEmpty || SelectionStep.nothingToPick(targets),
+        _ => true,
+      };
 
-  static final List<_Page> _pages = [
-    const _Page(
-      accent: AppColors.seed,
-      kind: _HeroKind.welcome,
-      title: 'Take your time back',
-      body:
-          'Short-form video is built to never end. Detoxo is built to help you step out — gently, in the moment.',
-    ),
-    const _Page(
-      accent: AppColors.seed,
-      kind: _HeroKind.caught,
-      title: 'Caught the moment it starts',
-      body:
-          'You didn’t decide to watch 80 reels — the feed did. Detoxo spots them the second they play and pulls you back out, right inside the apps you already use.',
-    ),
-    const _Page(
-      accent: AppColors.onbTeal,
-      kind: _HeroKind.plans,
-      title: 'Not all-or-nothing',
-      body:
-          'Hard blocks feel like punishment — so you cave. Detoxo gives you five ways to change, so it fits how you actually want to.',
-    ),
-    const _Page(
-      accent: AppColors.onbTeal,
-      kind: _HeroKind.limit,
-      title: 'See the number, set the line',
-      body:
-          'Detoxo counts every reel live, on your device — then fills toward the daily limit you set. Change it anytime.',
-    ),
-    const _Page(
-      accent: AppColors.onbViolet,
-      kind: _HeroKind.stick,
-      title: 'Make it stick',
-      body:
-          'The urge comes back at 11pm — willpower alone won’t hold. A PIN, uninstall protection and an always-on guard keep future-you honest.',
-    ),
-  ];
+  /// Skip jumps to the selection — the first step that produces something.
+  /// It disappears from there on: neither the picks nor the permissions are
+  /// skippable, because without them onboarding has protected nothing.
+  static bool _canSkip(OnboardingStepId step) =>
+      step.index < OnboardingStepId.selection.index;
 
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
+  Future<void> _next(BuildContext context, OnboardingProgress p) async {
+    final cubit = context.read<OnboardingCubit>();
+    AppHaptics.selection();
 
-  Future<void> _finish() async {
-    final settings = sl<SettingsRepository>();
-    // Seed the dashboard ring's daily limit from the quick-pick (or the default
-    // if the step was skipped) through the app-wide cubit, so the dashboard
-    // reflects it live — setLimit persists + emits on the shared instance.
-    final dailyLimit = context.read<DailyLimitCubit>();
-    AppHaptics.success();
-    await settings.save((await settings.load()).copyWith(onboarded: true));
-    await dailyLimit.setLimit(_draftLimit ?? _defaultLimit);
-
-    // Back through the SPLASH, not straight to /permissions.
-    //
-    // The write above goes through SettingsRepository rather than SettingsCubit
-    // because tool/check_boundaries.sh forbids a feature importing another
-    // feature's presentation/ — and the cubit lives in blocking/shared. But a
-    // raw repository write leaves SettingsCubit.state stale at
-    // `onboarded: false`, and `_commit` is emit → save → pushSettings with no
-    // repo→cubit feedback: the next commit from ANY setter (the dashboard
-    // showcase Skip, picking a mode, flipping a switch) does
-    // `state.copyWith(...)` carrying that stale false and writes it back over
-    // Hive — walking the user through onboarding again on the next cold launch.
-    //
-    // Re-entering the splash re-runs SettingsCubit.bootstrap(), which reloads
-    // the flag we just persisted, so nothing can clobber it. The splash gate
-    // then routes on to /permissions by itself — and, unlike the old direct
-    // jump, correctly honours the PIN gate on the way.
-    if (mounted) context.go(Routes.splash);
-  }
-
-  void _next() {
-    if (_index == _pages.length - 1) {
-      _finish();
-    } else {
-      _controller.nextPage(
-        duration: AppDurations.medium,
-        curve: AppCurves.standard,
-      );
+    // Leaving the selection: push the picks into the real enabled set so the
+    // native engine enforces exactly what the user just chose.
+    if (p.step == OnboardingStepId.selection) {
+      await context.read<SettingsCubit>().setEnabledPlatforms(p.platforms);
     }
+
+    // `permissions` is where the walker ends. Reaching it — or RESUMING onto it
+    // after a crash between `advance` and `setOnboarded` — means re-running the
+    // hand-off. Without this the resumed state renders an enabled button that
+    // does nothing, on a screen the user cannot tell they already passed.
+    if (p.step.index >= OnboardingStepId.permissions.index ||
+        cubit.nextStep == OnboardingStepId.permissions) {
+      if (context.mounted) await _handOff(context, p);
+      return;
+    }
+    final next = cubit.nextStep;
+    if (next == null) return;
+    await cubit.advance(next);
   }
 
-  void _back() {
-    if (_index == 0) return;
-    _controller.previousPage(
-      duration: AppDurations.medium,
-      curve: AppCurves.standard,
-    );
+  /// The commitment → permissions hand-off, in an order that matters.
+  ///
+  /// `onboarded` flips HERE, not at grant time: a user who quits on the
+  /// permission screen has already answered everything, and making them replay
+  /// the whole funnel to get back to a system settings toggle is the worst
+  /// version of this flow. The progress record keeps `step: permissions`, which
+  /// is what still arms the starter rule for the moment accessibility is
+  /// granted.
+  ///
+  /// So the record is advanced BEFORE the flag: flipping `onboarded` notifies
+  /// `AppGate` and the router redirects away on the spot, and a crash in the
+  /// gap must leave an armed record rather than a user who is onboarded with
+  /// nothing waiting to be created.
+  Future<void> _handOff(BuildContext context, OnboardingProgress p) async {
+    final cubit = context.read<OnboardingCubit>();
+    final settings = context.read<SettingsCubit>();
+    final dailyLimit = context.read<DailyLimitCubit>();
+    final router = GoRouter.of(context);
+    AppHaptics.success();
+    await dailyLimit.setLimit(Duration(minutes: p.dailyLimitMinutes));
+    await cubit.advance(OnboardingStepId.permissions);
+    // Through the cubit, not the repository: the barrel now exports it, so the
+    // old raw-repo write (and the splash round-trip that stopped a stale cubit
+    // state from clobbering the flag on the next commit) is gone.
+    await settings.setOnboarded(value: true);
+    // Belt and braces: the gate's redirect lands on the same place by itself,
+    // but this keeps the hand-off working on its own if the listener is ever
+    // rewired.
+    router.go(Routes.permissions);
   }
 
   @override
   Widget build(BuildContext context) {
-    final isLast = _index == _pages.length - 1;
-    return GlassScaffold(
-      safeArea: false,
-      body: Stack(
-        children: [
-          PageView.builder(
-            controller: _controller,
-            itemCount: _pages.length,
-            // The limit step owns its drag gestures (the dial), so suspend the
-            // horizontal page swipe there — Back/Next still navigate.
-            physics: _pages[_index].isLimitStep
-                ? const NeverScrollableScrollPhysics()
-                : null,
-            onPageChanged: (i) {
-              setState(() => _index = i);
-              AppHaptics.selection();
-            },
-            itemBuilder: (context, i) {
-              final page = _pages[i];
-              return switch (page.kind) {
-                _HeroKind.limit => _LimitStep(
-                  page: page,
-                  value: _draftLimit ?? _defaultLimit,
-                  onChanged: (d) => setState(() => _draftLimit = d),
+    return BlocBuilder<OnboardingCubit, OnboardingProgress>(
+      builder: (context, p) {
+        final cubit = context.read<OnboardingCubit>();
+        final accent = _accent(p.step);
+        final back = cubit.previousStep;
+        // Watched, not read: the selection step's Next unlocks when the target
+        // scan comes back empty, so the CTA has to rebuild when it lands.
+        final targets = context.watch<TargetsCubit>().state;
+        final isLast = p.step.index >= OnboardingStepId.commitment.index;
+        return PopScope(
+          // Back at the first step must not drop the user out of the app
+          // mid-onboarding; elsewhere it walks the machine backwards.
+          canPop: false,
+          onPopInvokedWithResult: (didPop, _) {
+            if (!didPop && back != null) cubit.advance(back);
+          },
+          child: GlassScaffold(
+            safeArea: false,
+            body: Stack(
+              children: [
+                AnimatedSwitcher(
+                  duration: AppDurations.normal,
+                  switchInCurve: AppCurves.decelerate,
+                  child: KeyedSubtree(
+                    key: ValueKey(p.step),
+                    child: _step(p, accent),
+                  ),
                 ),
-                _HeroKind.plans => _PlansPage(page: page),
-                _ => _PageView(page: page, controller: _controller, index: i),
-              };
-            },
-          ),
-          // Skip — fades out on the last page.
-          SafeArea(
-            child: Align(
-              alignment: Alignment.topRight,
-              child: AnimatedOpacity(
-                duration: AppDurations.fast,
-                opacity: isLast ? 0 : 1,
-                child: GhostButton(
-                  label: 'Skip',
-                  onPressed: isLast ? null : _finish,
-                ),
-              ),
-            ),
-          ),
-          // Back — appears from the second page onward (screen readers can't use
-          // the PageView swipe to go back).
-          SafeArea(
-            child: Align(
-              alignment: Alignment.topLeft,
-              child: AnimatedOpacity(
-                duration: AppDurations.fast,
-                opacity: _index == 0 ? 0 : 1,
-                child: GhostButton(
-                  label: 'Back',
-                  onPressed: _index == 0 ? null : _back,
-                ),
-              ),
-            ),
-          ),
-          // Progress + primary CTA, overlaid at the bottom.
-          SafeArea(
-            child: Align(
-              alignment: Alignment.bottomCenter,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(
-                  AppSpacing.xl,
-                  0,
-                  AppSpacing.xl,
-                  AppSpacing.xl,
-                ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    _ProgressBar(
-                      count: _pages.length,
-                      index: _index,
-                      accent: _pages[_index].accent,
+                SafeArea(
+                  child: Align(
+                    alignment: Alignment.topRight,
+                    child: AnimatedOpacity(
+                      duration: AppDurations.fast,
+                      opacity: _canSkip(p.step) ? 1 : 0,
+                      child: GhostButton(
+                        label: 'Skip',
+                        onPressed: _canSkip(p.step)
+                            ? () => cubit.advance(OnboardingStepId.selection)
+                            : null,
+                      ),
                     ),
-                    const SizedBox(height: AppSpacing.lg),
-                    PrimaryButton(
-                      label: isLast ? 'Get started' : 'Next',
-                      tint: _pages[_index].accent,
-                      expand: true,
-                      onPressed: _next,
-                    ),
-                  ],
+                  ),
                 ),
-              ),
+                SafeArea(
+                  child: Align(
+                    alignment: Alignment.topLeft,
+                    child: AnimatedOpacity(
+                      duration: AppDurations.fast,
+                      opacity: back == null ? 0 : 1,
+                      child: GhostButton(
+                        label: 'Back',
+                        onPressed: back == null
+                            ? null
+                            : () => cubit.advance(back),
+                      ),
+                    ),
+                  ),
+                ),
+                SafeArea(
+                  child: Align(
+                    alignment: Alignment.bottomCenter,
+                    child: Padding(
+                      padding: const EdgeInsets.fromLTRB(
+                        AppSpacing.xl,
+                        0,
+                        AppSpacing.xl,
+                        AppSpacing.xl,
+                      ),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          _ProgressBar(step: p.step, accent: accent),
+                          const SizedBox(height: AppSpacing.lg),
+                          PrimaryButton(
+                            label: isLast ? 'Get started' : 'Next',
+                            tint: accent,
+                            expand: true,
+                            onPressed: _canAdvance(p, targets)
+                                ? () => _next(context, p)
+                                : null,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
           ),
-        ],
-      ),
+        );
+      },
     );
   }
+
+  Widget _step(OnboardingProgress p, Color accent) => switch (p.step) {
+    OnboardingStepId.welcome => _HeroStep(
+      accent: accent,
+      hero: CaughtHero(accent: accent),
+      title: 'Take your time back',
+      body:
+          'You didn’t decide to watch 80 reels — the feed did. Detoxo spots '
+          'them the second they play and pulls you back out, right inside the '
+          'apps you already use.',
+      footer: const Padding(
+        padding: EdgeInsets.only(top: AppSpacing.lg),
+        child: Center(
+          child: Pill(
+            label: 'Blocks the reels, not the app',
+            tone: AppTone.accent,
+          ),
+        ),
+      ),
+    ),
+    OnboardingStepId.survey => SurveyStep(progress: p),
+    OnboardingStepId.projection => ProjectionStep(progress: p, accent: accent),
+    OnboardingStepId.selection => SelectionStep(progress: p),
+    // `permissions` and `completed` are hand-off states, not screens — but the
+    // record advances to `permissions` a beat before the redirect fires, so
+    // holding the last real step here keeps that beat from flashing blank.
+    _ => _CommitmentStep(progress: p, accent: accent),
+  };
 }
 
-/// Segmented filling progress bar — clearer completion cue than dots. Each
-/// segment fills with the current accent as the user advances.
+/// Segmented filling progress bar — clearer completion cue than dots.
 class _ProgressBar extends StatelessWidget {
-  const _ProgressBar({
-    required this.count,
-    required this.index,
-    required this.accent,
-  });
+  const _ProgressBar({required this.step, required this.accent});
 
-  final int count;
-  final int index;
+  final OnboardingStepId step;
   final Color accent;
 
   @override
   Widget build(BuildContext context) {
+    // The permissions step is walked on its own screen, so the bar counts the
+    // steps this walker actually renders.
+    const steps = OnboardingStepId.visible;
+    final count = steps.length - 1;
+    // `permissions` is walked on its own screen and `completed` is terminal;
+    // both mean "the last rendered step". `indexOf(completed)` is -1, which a
+    // bare clamp would report as "Step 1 of 5" while the last step is on screen.
+    final index = switch (step) {
+      OnboardingStepId.permissions || OnboardingStepId.completed => count - 1,
+      _ => steps.indexOf(step).clamp(0, count - 1),
+    };
     return Semantics(
       container: true,
       label: 'Step ${index + 1} of $count',
       child: Row(
         children: List.generate(count, (i) {
-          final filled = i <= index;
           return Expanded(
             child: Padding(
               padding: EdgeInsets.only(
@@ -279,7 +293,7 @@ class _ProgressBar extends StatelessWidget {
                 curve: AppCurves.standard,
                 height: 6,
                 decoration: BoxDecoration(
-                  color: filled ? accent : context.glass.border,
+                  color: i <= index ? accent : context.glass.border,
                   borderRadius: BorderRadius.circular(3),
                 ),
               ),
@@ -291,18 +305,21 @@ class _ProgressBar extends StatelessWidget {
   }
 }
 
-/// Welcome / caught / stick pages: a coded hero, headline, body and an optional
-/// footer, with the hero drifting slower than the swipe (parallax).
-class _PageView extends StatelessWidget {
-  const _PageView({
-    required this.page,
-    required this.controller,
-    required this.index,
+/// A coded hero, headline and body — the shape the informational steps share.
+class _HeroStep extends StatelessWidget {
+  const _HeroStep({
+    required this.accent,
+    required this.hero,
+    required this.title,
+    required this.body,
+    this.footer,
   });
 
-  final _Page page;
-  final PageController controller;
-  final int index;
+  final Color accent;
+  final Widget hero;
+  final String title;
+  final String body;
+  final Widget? footer;
 
   @override
   Widget build(BuildContext context) {
@@ -310,267 +327,91 @@ class _PageView extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.fromLTRB(AppSpacing.xl, 96, AppSpacing.xl, 168),
       child: ListView(
-        // mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          // Parallax: the illustration drifts slower than the swipe.
-          AnimatedBuilder(
-            animation: controller,
-            builder: (context, child) {
-              final page = controller.positions.isEmpty
-                  ? index.toDouble()
-                  : (controller.page ?? 0);
-              final delta = (page - index) * 60;
-              return Transform.translate(
-                offset: Offset(delta, 0),
-                child: child,
-              );
-            },
-            child: _hero(),
-          ),
+          hero,
           const SizedBox(height: AppSpacing.xxl),
           Text(
-                page.title,
-                textAlign: TextAlign.center,
-                style: text.headlineSmall?.copyWith(
-                  fontWeight: FontWeight.w800,
-                ),
-              )
-              .animate(key: ValueKey('t$index'))
-              .fadeIn(delay: 80.ms)
-              .slideY(begin: 0.15, end: 0),
+            title,
+            textAlign: TextAlign.center,
+            style: text.headlineSmall?.copyWith(fontWeight: FontWeight.w800),
+          ).animate().fadeIn(delay: 80.ms).slideY(begin: 0.15, end: 0),
           const SizedBox(height: AppSpacing.md),
           Text(
-                page.body,
-                textAlign: TextAlign.center,
-                style: text.bodyLarge?.copyWith(color: context.glass.onGlass),
-              )
-              .animate(key: ValueKey('b$index'))
-              .fadeIn(delay: 160.ms)
-              .slideY(begin: 0.15, end: 0),
-          ?_footer(context),
+            body,
+            textAlign: TextAlign.center,
+            style: text.bodyLarge?.copyWith(color: context.glass.onGlass),
+          ).animate().fadeIn(delay: 160.ms).slideY(begin: 0.15, end: 0),
+          ?footer,
         ],
       ),
     );
   }
-
-  Widget _hero() => switch (page.kind) {
-    _HeroKind.welcome => _WelcomeHero(accent: page.accent),
-    _HeroKind.caught => CaughtHero(accent: page.accent),
-    _HeroKind.stick => CommitmentHero(accent: page.accent),
-    _ => const SizedBox.shrink(),
-  };
-
-  Widget? _footer(BuildContext context) => switch (page.kind) {
-    _HeroKind.caught => const Padding(
-      padding: EdgeInsets.only(top: AppSpacing.lg),
-      child: Pill(label: 'Blocks the reels, not the app', tone: AppTone.accent),
-    ),
-    _HeroKind.stick => const Padding(
-      padding: EdgeInsets.only(top: AppSpacing.xl),
-      child: EntranceList(
-        children: [
-          _Benefit(Icons.pin_rounded, 'PIN lock, with fingerprint or face'),
-          _Benefit(Icons.shield_moon_outlined, 'Optional uninstall protection'),
-          _Benefit(Icons.bolt_rounded, 'Always on — even after a restart'),
-        ],
-      ),
-    ),
-    _ => null,
-  };
 }
 
-/// The welcome hero: the brand mark in a soft accent halo, breathing slowly.
-class _WelcomeHero extends StatelessWidget {
-  const _WelcomeHero({required this.accent});
+/// The last walked step: what the user is committing to, in their own terms,
+/// plus the daily-limit dial (kept from the old page-four step).
+class _CommitmentStep extends StatelessWidget {
+  const _CommitmentStep({required this.progress, required this.accent});
 
+  final OnboardingProgress progress;
   final Color accent;
 
-  @override
-  Widget build(BuildContext context) {
-    final reduceMotion = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
-    Widget logo = SizedBox(
-      height: 150,
-      child: Assets.images.detoxLogoNoBg.image(fit: BoxFit.contain),
-    );
-    if (!reduceMotion) {
-      logo = logo
-          .animate(onPlay: (c) => c.repeat(reverse: true))
-          .scaleXY(
-            begin: 1,
-            end: 1.04,
-            duration: AppDurations.slow,
-            curve: AppCurves.gentle,
-          );
+  /// The promise, rendered FROM the preset that `starterRule` will actually
+  /// stamp — not restated in prose. The hours already live in `RulePreset`, and
+  /// `starter_rule.dart` exists precisely so there is one copy of them; writing
+  /// "22:00" here again would be a third, in the one place no test asserts it.
+  String get _promise {
+    final template = starterPreset(progress.mattersMost).template;
+    final schedule = template.schedule;
+    if (schedule == null) {
+      final minutes = template.thresholdMs ~/ 60000;
+      return '$minutes minutes of feed a day. After that the feeds you picked '
+          'stop opening until tomorrow.';
     }
-    return Container(
-      height: 220,
-      width: 220,
-      alignment: Alignment.center,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        gradient: RadialGradient(
-          colors: [accent.withValues(alpha: 0.35), accent.withValues(alpha: 0)],
-        ),
-      ),
-      child: logo,
-    );
+    final when = schedule.days.length == 7 ? 'Every day' : 'Weekdays';
+    return '$when from ${RuleSchedule.formatHHmm(schedule.startMin)}, the '
+        'feeds you picked stop opening — until '
+        '${RuleSchedule.formatHHmm(schedule.endMin)}.';
   }
-}
-
-/// A single benefit row on the "make it stick" page.
-class _Benefit extends StatelessWidget {
-  const _Benefit(this.icon, this.label);
-
-  final IconData icon;
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          IconBadge(
-            icon: icon,
-            size: 32,
-            color: AppColors.onbViolet,
-            fillAlpha: 0.18,
-          ),
-          const SizedBox(width: AppSpacing.sm),
-          Flexible(
-            child: Text(
-              label,
-              style: Theme.of(
-                context,
-              ).textTheme.bodyMedium?.copyWith(color: context.glass.onGlass),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// The flexible-plans page: headline, body and the interactive [PlanPreview].
-class _PlansPage extends StatelessWidget {
-  const _PlansPage({required this.page});
-
-  final _Page page;
 
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 96, AppSpacing.lg, 168),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Text(
-            page.title,
-            textAlign: TextAlign.center,
-            style: text.headlineSmall?.copyWith(fontWeight: FontWeight.w800),
-          ),
-          const SizedBox(height: AppSpacing.sm),
-          Text(
-            page.body,
-            textAlign: TextAlign.center,
-            style: text.bodyMedium?.copyWith(color: context.glass.onGlass),
-          ),
-          const SizedBox(height: AppSpacing.xl),
-          PlanPreview(accent: page.accent),
-        ],
-      ),
-    );
-  }
-}
-
-/// The one interactive value step: a live reel count-up (the on-device counter,
-/// made tangible) above the [ScreenTimeDial] the user drags to set a daily
-/// short-form limit. The value seeds the dashboard ring's max in
-/// [_OnboardingScreenState._finish].
-class _LimitStep extends StatelessWidget {
-  const _LimitStep({
-    required this.page,
-    required this.value,
-    required this.onChanged,
-  });
-
-  final _Page page;
-  final Duration value;
-  final ValueChanged<Duration> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    final text = Theme.of(context).textTheme;
+    final name = progress.name;
     return Padding(
       padding: const EdgeInsets.fromLTRB(AppSpacing.lg, 72, AppSpacing.lg, 158),
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
+      child: ListView(
         children: [
+          CommitmentHero(accent: accent),
+          const SizedBox(height: AppSpacing.xl),
           Text(
-            page.title,
+            name == null ? 'Here’s the deal' : 'Here’s the deal, $name',
             textAlign: TextAlign.center,
             style: text.headlineSmall?.copyWith(fontWeight: FontWeight.w800),
           ),
           const SizedBox(height: AppSpacing.sm),
           Text(
-            page.body,
+            _promise,
             textAlign: TextAlign.center,
             style: text.bodyMedium?.copyWith(color: context.glass.onGlass),
           ),
           const SizedBox(height: AppSpacing.lg),
-          const _ReelCountUp(),
-          const SizedBox(height: AppSpacing.lg),
-          ScreenTimeDial(
-            value: value,
-            onChanged: onChanged,
-            accent: page.accent,
+          Text(
+            'And a daily ceiling for everything else:',
+            textAlign: TextAlign.center,
+            style: text.bodySmall?.copyWith(color: context.glass.onGlassMuted),
+          ),
+          const SizedBox(height: AppSpacing.md),
+          Center(
+            child: ScreenTimeDial(
+              value: Duration(minutes: progress.dailyLimitMinutes),
+              onChanged: context.read<OnboardingCubit>().setDailyLimit,
+              accent: accent,
+              size: 220,
+            ),
           ),
         ],
       ),
-    );
-  }
-}
-
-/// A small "reels today" ticker that counts up once — surfacing the on-device
-/// counter/bubble/widget as a tangible number. Respects reduce-motion.
-class _ReelCountUp extends StatelessWidget {
-  const _ReelCountUp();
-
-  static const _sample = 84; // an illustrative daily average, not live data
-
-  @override
-  Widget build(BuildContext context) {
-    final text = Theme.of(context).textTheme;
-    final reduceMotion = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        const IconBadge(icon: Icons.blur_circular, size: 34),
-        const SizedBox(width: AppSpacing.sm),
-        TweenAnimationBuilder<int>(
-          tween: IntTween(begin: reduceMotion ? _sample : 0, end: _sample),
-          duration: AppDurations.slow,
-          curve: AppCurves.standard,
-          builder: (context, v, _) => ShaderMask(
-            shaderCallback: (b) => context.metricGradient.createShader(b),
-            blendMode: BlendMode.srcIn,
-            child: Text(
-              '$v',
-              style: text.headlineMedium?.copyWith(
-                fontWeight: FontWeight.w800,
-                color: Colors.white,
-              ),
-            ),
-          ),
-        ),
-        const SizedBox(width: AppSpacing.xs),
-        Text(
-          'reels a day, typically',
-          style: text.bodySmall?.copyWith(color: context.glass.onGlassMuted),
-        ),
-      ],
     );
   }
 }

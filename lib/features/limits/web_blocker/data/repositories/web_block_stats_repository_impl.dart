@@ -45,6 +45,7 @@ class WebBlockStatsRepositoryImpl implements WebBlockStatsRepository {
       data['today'] = e['today'] as int? ?? ((data['today'] as int? ?? 0) + 1);
       data['total'] = e['total'] as int? ?? ((data['total'] as int? ?? 0) + 1);
 
+      data['hosts'] = _trimHosts(data['hosts'] as Map<String, dynamic>);
       await _store.write(StoreKeys.webBlockStats, jsonEncode(data));
       yield _toStats(data);
     }
@@ -57,7 +58,10 @@ class WebBlockStatsRepositoryImpl implements WebBlockStatsRepository {
       // to a fresh day (stats are advisory; the native counters self-heal it).
       try {
         final map = jsonDecode(raw) as Map<String, dynamic>;
-        map['hosts'] ??= <String, dynamic>{};
+        // `hosts` is re-typed HERE, not at the use site: watch() reads this
+        // inside an `await for`, so a bad cast downstream would end the stats
+        // stream for the rest of the session instead of failing recoverably.
+        map['hosts'] = _sanitiseHosts(map['hosts']);
         return map;
       } on Object {
         // fall through to the fresh blob
@@ -69,6 +73,38 @@ class WebBlockStatsRepositoryImpl implements WebBlockStatsRepository {
       'total': 0,
       'hosts': <String, dynamic>{},
     };
+  }
+
+  /// Coerces a stored `hosts` value into a `{host: count}` map, dropping any
+  /// pair that is not a host string against a positive int. A blob whose
+  /// `hosts` is a scalar, a list or a map of doubles reads back as an empty
+  /// tally rather than throwing.
+  static Map<String, dynamic> _sanitiseHosts(Object? raw) {
+    if (raw is! Map) return <String, dynamic>{};
+    final out = <String, dynamic>{};
+    raw.forEach((key, value) {
+      if (key is String && key.isNotEmpty && value is int && value > 0) {
+        out[key] = value;
+      }
+    });
+    return out;
+  }
+
+  /// EVO-049: how many hosts the tally keeps. Matching is suffix-based and
+  /// native reports the OBSERVED host, so one `google.com` rule would otherwise
+  /// accrue a key per subdomain visited, forever — an unbounded browsing
+  /// residue, re-encoded on every block. The tally exists to answer "most
+  /// blocked"; the tail below the cap cannot be the answer.
+  static const _maxTrackedHosts = 50;
+
+  /// Keeps the [_maxTrackedHosts] highest counts, dropping the rest.
+  static Map<String, dynamic> _trimHosts(Map<String, dynamic> hosts) {
+    if (hosts.length <= _maxTrackedHosts) return hosts;
+    final ranked = hosts.entries.toList()
+      ..sort(
+        (a, b) => ((b.value as int?) ?? 0).compareTo((a.value as int?) ?? 0),
+      );
+    return {for (final e in ranked.take(_maxTrackedHosts)) e.key: e.value};
   }
 
   /// Resets the day counter when the stored date is no longer today.

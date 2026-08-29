@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:detoxo/core/design_system/design_system.dart';
+import 'package:detoxo/core/utils/duration_format.dart';
 import 'package:detoxo/core/widgets/common_widgets.dart';
 import 'package:detoxo/features/additional_feature/showcase_view/showcase_view.dart';
 import 'package:detoxo/features/blocking/engine/presentation/service_cubit.dart';
@@ -178,26 +179,39 @@ class _HeroState extends State<_Hero> {
 
     // Screen-time ring: today's usage in monitored social apps vs the user's
     // daily limit (set during onboarding). No limit → an unfilled gauge.
+    // "Count short videos" off also stops usage-time accrual, so the ring is
+    // unmeasured then — shown as such, never as a reassuring "0m". Before the
+    // first native snapshot (`loaded == false`) `enabled` is only a
+    // placeholder: render the ring normally, but commit nothing on it.
+    final loaded = counter.loaded;
+    final measured = counter.enabled;
     final spent = counter.timeToday;
     final limit = daily.limit;
     final hasLimit = limit > Duration.zero;
-    final progress = hasLimit
+    final progress = hasLimit && measured
         ? (spent.inSeconds / limit.inSeconds).clamp(0.0, 1.0)
         : 0.0;
-    final overLimit = hasLimit && spent >= limit;
+    final overLimit = measured && hasLimit && spent >= limit;
     // Advance the "days under your daily limit" streak once today's under/over
-    // status is known — post-frame so we don't emit during build.
+    // status is known — post-frame so we don't emit during build. Nothing
+    // measured (counting off, or the counter / the limit not read yet) =
+    // nothing to observe: an unmeasured day must not count as a day under the
+    // limit, and an unloaded limit (`dateSignature` empty — `load()` always
+    // stamps today's) reads as "no limit" and would mark today failed.
     final underLimit = hasLimit && !overLimit;
+    final limitLoaded = daily.dateSignature.isNotEmpty;
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) {
+      if (mounted && loaded && limitLoaded && measured) {
         context.read<StreakCubit>().observe(now: now, underLimit: underLimit);
       }
     });
-    final limitLabel = !hasLimit
+    final limitLabel = loaded && !measured
+        ? 'Counting off — screen time not measured'
+        : !hasLimit
         ? 'No daily limit set'
         : overLimit
-        ? '${_formatHm(spent - limit)} over your ${_formatHm(limit)} limit'
-        : 'of ${_formatHm(limit)}';
+        ? '${formatHm(spent - limit)} over your ${formatHm(limit)} limit'
+        : 'of ${formatHm(limit)}';
 
     SessionCountdown? countdown;
     if (pauseLive) {
@@ -237,14 +251,17 @@ class _HeroState extends State<_Hero> {
       );
     }
 
+    final off = loaded && !measured;
     return CommandCenterCard(
-      timeToday: _formatHm(spent),
+      timeToday: off ? '—' : formatHm(spent),
       progress: progress,
       limitLabel: limitLabel,
       overLimit: overLimit,
       statusLabel: _statusLabel(settings, pauseLive: pauseLive),
-      streakValue: '${streak.count}',
-      reelsValue: '${counter.today}',
+      // The stored streak isn't reconciled while counting is off (a resumed
+      // gap resets it), so its provisional count would go stale — dash it.
+      streakValue: off ? '—' : '${streak.count}',
+      reelsValue: off ? '—' : '${counter.today}',
       countdown: countdown,
     );
   }
@@ -316,21 +333,10 @@ DashboardMode _dashMode(AppSettings s, {required bool pauseLive}) {
 
 String _statusLabel(AppSettings settings, {required bool pauseLive}) {
   if (pauseLive) return 'PAUSED';
-  return switch (settings.activePlan) {
-    BlockingPlan.blockAll => 'BLOCK ALL',
-    BlockingPlan.curious => 'CONSCIOUS',
-    BlockingPlan.oneReel =>
-      settings.reelAllowance <= 1 ? 'ONE REEL' : 'UNBLOCK',
-    BlockingPlan.paused => 'PAUSED',
-  };
-}
-
-/// "Xh Ym" (or "Ym" under an hour) for the screen-time value + limit sub-line.
-String _formatHm(Duration d) {
-  final total = d.inMinutes;
-  final h = total ~/ 60;
-  final m = total % 60;
-  return h == 0 ? '${m}m' : '${h}h ${m}m';
+  return planLabel(
+    settings.activePlan,
+    allowance: settings.reelAllowance,
+  ).toUpperCase();
 }
 
 /// Shown beneath the hero while a Pause or Curious contract is live. Owns a

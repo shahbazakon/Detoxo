@@ -110,9 +110,9 @@ const List<FaqEntry> kFaqEntries = [
     category: FaqCategory.counter,
     question: 'When does a video actually count?',
     answer:
-        'Only after you’ve watched it for about 2 seconds. Quick '
-        'flick-throughs are ignored, so the count reflects real watching rather '
-        'than accidental scrolls.',
+        'Once you’ve stopped on it for about a second. Flicks, half-swipes and '
+        'scrolling the comments are ignored, and the same reel never counts '
+        'twice — so the number reflects the reels you actually saw.',
   ),
   FaqEntry(
     category: FaqCategory.counter,

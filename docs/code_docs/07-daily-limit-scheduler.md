@@ -9,17 +9,15 @@ a lazy date-reset only**. There is no live consumption path and no gating; those
 are follow-ups.
 
 > **Status at a glance.** The quota can be set, saved, displayed, and reset at
-> midnight. The `limit` value is now **seeded during onboarding** (the daily-scroll
+> midnight. The `limit` value is **seeded during onboarding** (the daily-scroll
 > quick-pick — see [13-onboarding-permissions.md](13-onboarding-permissions.md))
 > and **read by the dashboard's screen-time ring** as that ring's max. Editing the
-> limit now propagates **live** to that ring (one shared cubit), and the
-> limit-vs-usage comparison also drives a new **day-streak** stat (§8). But nothing
-> in the shipped app — neither Dart nor the native AccessibilityService — ever
-> increments `consumed`, and nothing reads `isExceeded` / `remaining` to actually
-> block anything. The dashboard ring fills from **native usage time**
-> (`ContentCount.timeToday`), **not** from `DailyLimit.consumed`. The in-app banner
-> that claims native enforcement is **aspirational** (see
-> [Enforcement status](#enforcement-status-read-this)).
+> limit propagates **live** to that ring (one shared cubit), and the
+> limit-vs-usage comparison also drives the **day-streak** stat (§8). **Since M3 the
+> limit is enforced natively** (§6): the rules snapshot carries a `daily_reel_limit`
+> entry metered against native's own reel-time counter, so reel feeds block at the
+> limit until midnight. The meter is `ContentCount.timeToday` — the same number the
+> ring fills from — **not** `DailyLimit.consumed`, which still has no producer (§7).
 
 ---
 
@@ -134,11 +132,11 @@ string under one key in `LocalStore` (the app's simple Dart key-value store —
   is absent — i.e. a fresh install starts with no limit and no history.
 - `save()` writes `jsonEncode(limit.toJson())`.
 
-This state is **Dart-side only**. It is not mirrored into the native
-`SharedPreferences` file `detoxo_engine_prefs`, and it is **not** included in the
-`pushSettings` / `pushConfig` payloads sent over the command channel. The native
-engine has no knowledge of the daily limit (grep of `android/` for
-`dailyLimit` / `consumedMs` / `dateSignature` / `daily_limit` returns nothing).
+This record is **Dart-side**: it is not mirrored into `detoxo_engine_prefs` and
+it is not part of `pushSettings` / `pushConfig`. What native sees is the
+**derived** `daily_reel_limit` entry in the rules snapshot (`pushRules`, §6) —
+`syncRules` reads `DailyLimitRepository.load().limit` and appends the entry when
+the limit is set ([27](27-rules-engine.md) §3).
 
 ### DI wiring
 
@@ -230,15 +228,19 @@ injectable `clock` (§4). Three methods:
 
 `setLimit` stamps today's signature so a freshly-set limit belongs to the current
 day. Note the deliberate asymmetry: only `refreshed()` (a new day) clears
-`consumed`; `setLimit` preserves it.
+`consumed`; `setLimit` preserves it. A saved limit also re-pushes the rules
+snapshot: `main.dart` wraps the tree in a `BlocListener<DailyLimitCubit,
+DailyLimit>` that calls `RulesCubit.resync()` whenever `limit` changes.
 
 ### `DailyLimitScreen`
 
 - Uses the **app-wide** `DailyLimitCubit` (provided in `lib/main.dart`); it no
   longer builds its own `BlocProvider`, so an edit re-emits to the dashboard live.
-- **Today card** — shows `"$consumed of ${limit} min used"` (or `"No daily limit
+- **Today card** — shows `"$used of ${limit} min used"` (or `"No daily limit
   set"` when `limit == zero`) plus a `LinearProgressIndicator` of
-  `consumed / limit` clamped to `[0,1]`.
+  `used / limit` clamped to `[0,1]`, where `used` is
+  **`ContentCounterCubit.state.timeToday`** — the native reel-time meter that
+  enforces the limit — not `DailyLimit.consumed`.
 - **Set-your-limit card** — a `Slider` from **0 to 180 minutes**, `divisions: 36`
   (→ **5-minute steps**), with a draft (`_draftMinutes`) held in local
   `setState` until the user taps **Save limit**, which calls
@@ -253,67 +255,67 @@ and the **app drawer** (`app_drawer.dart`). Route:
 
 ---
 
-## 6. Enforcement status — READ THIS
+## 6. Enforcement — through the rules snapshot (M3)
 
-The screen renders this banner:
+The Daily Limit is enforced **natively**, without a new command, ticker or
+permission, by riding the rules engine ([27-rules-engine.md](27-rules-engine.md)):
 
-> *"Usage counting is enforced by the native service on a real device with usage
-> access granted."*
+1. `syncRules` (`lib/features/limits/rules/domain/rule_sync.dart`) reads
+   `DailyLimitRepository.load().limit`; when it is non-zero, `resolveSnapshot`
+   appends one synthetic entry **last** in the pushed snapshot:
+   `{id: "daily_reel_limit", reason: "DAILY_LIMIT", platformIds: ["*"], always:
+   true, reelTimeLimitMs: <limit>}`.
+2. Native `RuleEngine.blockingForPlatform(platformId, now, reelTimeTodayMs)` treats
+   an entry with `reelTimeLimitMs > 0` as a **meter**: it blocks every reel feed
+   (`"*"`) once `ContentCounter.timeTodayMs()` — the counter's own day-keyed reel
+   time, the number the dashboard ring fills from — has reached the limit. The
+   read happens only after a detector match, never per raw event.
+3. The detector loop asks the rules engine **before** the plan's allow checks, so
+   the limit trips even under One Reel / Unblock / Conscious allowance:
+   `onDetected(..., ruleReason = "DAILY_LIMIT")` bounces the reel and raises the
+   wall with **"Your daily limit is used up"** ([25](25-block-screen.md)). The
+   `blocked` event carries `reason: "DAILY_LIMIT"`.
+4. Midnight needs no Dart: the counter's `timeTodayMs` rolls with its day key, so
+   the meter reads zero again and the block lifts. `main.dart` re-syncs the
+   snapshot whenever the limit changes (a `BlocListener<DailyLimitCubit>`), and
+   the rules screen pins a **Daily reel limit** row showing "used / limit".
 
-**This is aspirational and does not reflect the shipped code.** As of this
-writing:
+**Semantics.** The limit is a reel-time limit — it blocks reel *feeds* (every
+platform Detoxo detects), not whole apps, which is exactly what the ring
+measures. It sits below the Pause gate like every rule: a Pause lifts it. It
+depends on the reel counter: with counting **off**, `timeTodayMs` does not
+accrue and the limit cannot trip — the screen's banner says so
+(`ContentCount.enabled == false` → "Reel counter is off").
 
-- The native `DetoxoAccessibilityService` and its engine have **zero** references
-  to the daily limit (no read of the quota, no write of `consumed`).
-- The **UsageStats / `UsageStatsManager`** API is **not** used to feed
-  consumption. The only usage-access touchpoint in the app is the *permission*
-  itself — `hasUsageAccess` (command channel) and the `usageAccess` permission
-  entry, which is `required: false` and labeled "Powers app usage limits." That
-  permission is requested/checked but **nothing consumes its data** for this
-  feature.
-- The only writer of `consumed` is `DailyLimitCubit.addConsumed`, which is
-  annotated `@visibleForTesting` and has **no production call site**.
-- No code anywhere reads `isExceeded` or `remaining` to trigger a back-press,
-  overlay, kill, or lock. Blocking is driven entirely by the plans/detection
-  engine (see [05-plans-pause-conscious.md](05-plans-pause-conscious.md) and
-  [06-app-and-web-blocker.md](06-app-and-web-blocker.md)), which is independent of
-  this quota.
+The screen's banner now reads: *"When today's reel time reaches the limit,
+Detoxo blocks every reel feed until midnight. A Pause lifts it like any other
+block."*
 
-**What *is* now wired (display only):** the `limit` field is seeded during
-onboarding and read by the dashboard's screen-time ring as its max. That is a
-*read of `limit` for display*, not a gate — the ring fills from native usage time
-(`ContentCount.timeToday`, [17-content-counter.md](17-content-counter.md)), and it
-does not call `isExceeded` / `remaining` or ask the engine to block. So the limit
-is now visible and meaningful on the dashboard, but still purely informational.
+### The daily limit and a per-target unblock (M8)
 
-**Net effect:** a user can set and see a daily limit (and it visually reflects on
-the dashboard ring and resets each day), but the limit **does not currently gate
-or block anything**, and the `consumed` bar will always read `0` in production.
+The synthetic meter entry is `always: true` with `platformIds: ["*"]` and is
+**not** strict, so a `REEL` grant on one feed lifts it — **for that feed only**,
+for the length of the grant. That is the right reading of the gesture: "let me
+into Instagram Reels for 15 minutes" should mean what it says even on a day
+whose budget is spent, and every other feed stays blocked until midnight.
 
-### Planned / swap-in / follow-up
+Nothing else about the limit changes. The grant expires natively, the meter
+keeps accruing throughout (the awareness counter runs above the whole block
+branch, so a granted reel is still counted), and the limit re-arms on its own.
+Full mechanism in [31-locked-rules-and-unblock.md](31-locked-rules-and-unblock.md) §2.
 
-To make this feature live, the missing wiring (all "planned") would be roughly:
-
-1. A **consumption source** — either the native service reporting content/watch
-   time (a new command/event, or `contentCounted`-style feed) or a Dart-side
-   `UsageStatsManager` bridge — calling into the daily-limit state (the
-   `addConsumed` seam already exists).
-2. A **background/periodic tick** to accrue `consumed` and to apply the midnight
-   reset without needing the screen to be opened (today's reset is lazy, §4).
-3. A **gate consumer** that reads `isExceeded` / `remaining` and asks the engine
-   to block (e.g. via the plan/command pipeline) once the quota is spent.
-4. Correcting the info banner copy once (1)–(3) exist.
-
-Until then, document this feature as **modeled, persisted, and reset-capable, but
-not enforced.**
+**Still true:** `DailyLimit.consumed` has no producer — `addConsumed` remains
+`@visibleForTesting` with no production caller — and `isExceeded` / `remaining`
+have no reader. The entity's `consumed` field is legacy shape, not the meter;
+a cleanup that drops it is a schema touch and deliberately out of scope here.
 
 ---
 
 ## 7. Quick verification notes
 
-- Native reference check: `grep -rn "dailyLimit\|consumedMs\|dateSignature\|daily_limit" android/` → **no matches**.
-- Consumption writers: only `DailyLimitCubit.addConsumed` (`@visibleForTesting`); no external caller (`grep addConsumed lib/ android/` → only the definition).
-- Gate readers: no reader of `isExceeded` / `remaining` outside the entity and its test. (The dashboard ring reads the raw `limit` field for display, not these gate getters.)
+- Native reference check: `grep -rn "dailyLimit\|consumedMs\|dateSignature\|daily_limit" android/` → **no matches** — native knows the limit only as the `daily_reel_limit` entry's `reelTimeLimitMs` in the pushed rules snapshot (`grep -rn reelTimeLimitMs android/` → `RuleEngine.kt`).
+- Consumption writers: only `DailyLimitCubit.addConsumed` (`@visibleForTesting`); no external caller (`grep addConsumed lib/ android/` → only the definition). The enforcement meter is the content counter's `timeTodayMs`, not `consumed`.
+- Gate readers: no reader of `isExceeded` / `remaining` outside the entity and its test. (The dashboard ring reads the raw `limit` field for display; the gate is native — §6.)
 - Seeding / display: `limit` is seeded by `onboarding_screen.dart` via the shared `DailyLimitCubit.setLimit` (routed through the global provider so onboarding's pick shows on the dashboard live), and read by `dashboard_tab.dart` from that same instance.
 - Test coverage: `test/domain_test.dart` exercises `refreshed()` (day rollover clears `consumed`, preserves `limit`). No test drives an end-to-end enforcement path (there is none).
 
@@ -354,8 +356,18 @@ A **global** `StreakCubit(sl<StreakRepository>())..load()` is registered in
 `lib/main.dart`. The dashboard hero (`dashboard_tab.dart`) — which already computes
 `underLimit = hasLimit && spent < limit` for the ring — calls
 `observe(now, underLimit)` in a post-frame callback each build (bloc skips equal
-states, so re-observes are cheap no-ops). The pure transition
-(`StreakCubit.advance`, `@visibleForTesting`) is:
+states, so re-observes are cheap no-ops), but **only once every input is real**:
+the counter snapshot has landed (`ContentCount.loaded`), the limit has loaded
+(`DailyLimit.dateSignature` non-empty — `load()` always stamps today's), and
+counting is on (`ContentCount.enabled`; with it off usage-time isn't measured,
+so a zero must not earn a day — and the streak pill shows "—", since the stored
+streak isn't reconciled until counting resumes, when a skipped gap resets it).
+`StreakCubit.observe` additionally ignores calls until its own `load()` has
+emitted. Before these guards the hero's first build
+observed the unloaded defaults — no limit → "today failed", and the empty
+`Streak()` advanced and **persisted** over the real one — which wiped or froze
+the streak on cold starts. The pure transition (`StreakCubit.advance`,
+`@visibleForTesting`) is:
 
 - **same day** → a failure is sticky (`todayFailed |= !underLimit`);
 - **consecutive day** → carry yesterday's committed streak forward if it qualified,
@@ -377,13 +389,20 @@ date-rollover used for the limit itself (§4). Like the limit, it is a
 
 ---
 
+> **Cap note.** The synthetic daily-reel-limit entry is appended *after* the user's rules in the
+> pushed snapshot, so the native parser caps at `MAX_ENTRIES = 51` (`maxRules` + 1). Capping at 50
+> truncated exactly this entry at the 50-rule cap and silently stopped enforcing the Daily Limit
+> while its UI still showed it set ([27](27-rules-engine.md) §5).
+
 ## Source files
 
 - `lib/features/limits/daily_limit/domain/entities/daily_limit.dart`
 - `lib/features/limits/daily_limit/domain/repositories/daily_limit_repository.dart`
 - `lib/features/limits/daily_limit/data/repositories/daily_limit_repository_impl.dart`
 - `lib/features/limits/daily_limit/presentation/daily_limit_cubit.dart`
-- `lib/features/limits/daily_limit/presentation/daily_limit_screen.dart` (uses the app-wide cubit; no inline provider)
+- `lib/features/limits/daily_limit/presentation/daily_limit_screen.dart` (uses the app-wide cubit; no inline provider; "used" from `ContentCounterCubit.timeToday`)
+- `lib/features/limits/rules/domain/rule_sync.dart`, `lib/features/limits/rules/domain/usecases/resolve_snapshot.dart` (the `daily_reel_limit` snapshot entry — §6)
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/RuleEngine.kt`, `ContentCounter.kt` (`timeTodayMs`) — the native meter (§6)
 - `lib/features/limits/streak/domain/entities/streak.dart` (§8)
 - `lib/features/limits/streak/domain/repositories/streak_repository.dart`
 - `lib/features/limits/streak/data/repositories/streak_repository_impl.dart`

@@ -10,7 +10,6 @@ import 'package:detoxo/features/limits/app_blocker/domain/entities/app_block_ent
 import 'package:detoxo/features/limits/app_blocker/domain/repositories/app_block_repository.dart';
 import 'package:detoxo/features/limits/web_blocker/data/repositories/web_block_repository_impl.dart';
 import 'package:detoxo/features/limits/web_blocker/data/repositories/web_block_stats_repository_impl.dart';
-import 'package:detoxo/features/limits/web_blocker/domain/entities/app_domain_catalog.dart';
 import 'package:detoxo/features/limits/web_blocker/domain/entities/popular_site.dart';
 import 'package:detoxo/features/limits/web_blocker/domain/entities/web_block_entry.dart';
 import 'package:detoxo/features/limits/web_blocker/domain/entities/web_block_source.dart';
@@ -95,7 +94,7 @@ void main() {
     });
   });
 
-  group('PopularSites & AppDomainCatalog', () {
+  group('PopularSites', () {
     test('byPrimaryDomain and aliasesFor resolve the catalogue', () {
       final yt = PopularSites.byPrimaryDomain('youtube.com');
       expect(yt?.name, 'YouTube');
@@ -103,28 +102,19 @@ void main() {
       expect(PopularSites.aliasesFor('reddit.com'), isEmpty);
       expect(PopularSites.byPrimaryDomain('nope.com'), isNull);
     });
-
-    test('app package maps to its content domains', () {
-      expect(
-        AppDomainCatalog.domainsFor('com.google.android.youtube'),
-        contains('youtube.com'),
-      );
-      expect(AppDomainCatalog.domainsFor('com.unknown.app'), isEmpty);
-    });
+    // App package → content domains now lives in the category catalog; see
+    // test/catalog_test.dart ("legacy app→domain pairs").
   });
 
-  group('WebBlockEntry.isActiveAt', () {
-    test('pause window holds until expiry, then re-arms', () {
-      final now = DateTime(2026, 8, 17, 12);
-      final e = WebBlockEntry(
-        pattern: 'x.com',
-        pausedUntil: now.add(const Duration(minutes: 5)),
-      );
-      expect(e.isActiveAt(now), isFalse);
-      expect(e.isPausedAt(now), isTrue);
-      expect(e.isActiveAt(now.add(const Duration(minutes: 6))), isTrue);
+  group('WebBlockEntry.isActive', () {
+    test('an entry is active exactly while it is enabled', () {
+      // M8: the pause window moved OUT of this entity and into
+      // `TemporaryUnblock` — one mechanism for "dormant until T" across reels,
+      // apps and websites. See test/temporary_unblock_test.dart for the window
+      // behaviour this test used to cover.
+      expect(const WebBlockEntry(pattern: 'x.com').isActive, isTrue);
       expect(
-        const WebBlockEntry(pattern: 'x.com', enabled: false).isActiveAt(now),
+        const WebBlockEntry(pattern: 'x.com', enabled: false).isActive,
         isFalse,
       );
     });
@@ -252,19 +242,29 @@ void main() {
       },
     );
 
-    test('a paused enabled entry stays in the wire with its expiry', () async {
-      final until = DateTime.now().add(const Duration(minutes: 10));
-      when(() => webRepo.load()).thenAnswer(
-        (_) async => [
-          WebBlockEntry(pattern: 'example.com', pausedUntil: until),
-          const WebBlockEntry(pattern: 'off.com', enabled: false),
-        ],
-      );
-      final pushed = await run();
-      final example = pushed.singleWhere((m) => m['pattern'] == 'example.com');
-      expect(example['pausedUntil'], until.millisecondsSinceEpoch);
-      expect(pushed.map((m) => m['pattern']), isNot(contains('off.com')));
-    });
+    test(
+      'the wire carries pattern + matchType only (M8 dropped the pause)',
+      () async {
+        when(() => webRepo.load()).thenAnswer(
+          (_) async => const [
+            WebBlockEntry(pattern: 'example.com'),
+            WebBlockEntry(pattern: 'off.com', enabled: false),
+          ],
+        );
+        final pushed = await run();
+        final example = pushed.singleWhere(
+          (m) => m['pattern'] == 'example.com',
+        );
+        expect(
+          example.keys,
+          unorderedEquals(<String>['pattern', 'matchType']),
+          reason:
+              "pausedUntil was M8's one wire-contract change: an unblocked "
+              'site is a grant in UnblockRegistry now, not a field on the entry',
+        );
+        expect(pushed.map((m) => m['pattern']), isNot(contains('off.com')));
+      },
+    );
 
     test(
       'an explicit entry wins the dedupe against a derived domain',
@@ -323,6 +323,8 @@ void main() {
       ).thenAnswer((_) => const Stream<WebBlockStats>.empty());
       when(() => engine.pushWebBlocklist(any())).thenAnswer((_) async {});
       when(() => engine.pushSettings(any())).thenAnswer((_) async {});
+      // EVO-047: default to "couldn't ask", the quiet case.
+      when(() => engine.unsupportedBrowsers()).thenAnswer((_) async => null);
     });
 
     WebBlockCubit build() =>
@@ -459,17 +461,15 @@ void main() {
     );
 
     blocTest<WebBlockCubit, WebBlockState>(
-      'pauseEntry keeps the entry in the wire with pausedUntil; resume clears',
+      'toggling an entry off drops it from the wire and back on restores it',
       build: build,
       act: (c) async {
         await c.addCustom('example.com');
-        await c.pauseEntry(c.state.entries.single, const Duration(minutes: 15));
+        await c.toggleEntry(c.state.entries.single, enabled: false);
       },
       verify: (c) {
-        expect(c.state.entries.single.pausedUntil, isNotNull);
-        final pushed = lastPushed().single;
-        expect(pushed['pattern'], 'example.com');
-        expect(pushed['pausedUntil'], isA<int>());
+        expect(c.state.entries.single.enabled, isFalse);
+        expect(lastPushed(), isEmpty);
       },
     );
 
@@ -562,6 +562,38 @@ void main() {
         verifyNever(() => engine.pushWebBlocklist(any()));
       },
     );
+
+    // EVO-047: name the browsers the engine cannot read.
+    test('load surfaces unsupported browsers when native answers', () async {
+      when(
+        () => engine.unsupportedBrowsers(),
+      ).thenAnswer((_) async => ['Firefox Focus', 'Jio Web']);
+      final cubit = build();
+      await cubit.load();
+      await pumpEventQueue();
+      expect(cubit.state.unsupportedBrowsers, ['Firefox Focus', 'Jio Web']);
+    });
+
+    test('an empty answer means every installed browser is covered', () async {
+      when(
+        () => engine.unsupportedBrowsers(),
+      ).thenAnswer((_) async => <String>[]);
+      final cubit = build();
+      await cubit.load();
+      await pumpEventQueue();
+      expect(cubit.state.unsupportedBrowsers, isEmpty);
+    });
+
+    test('a failed query stays silent and never fails the load', () async {
+      when(() => engine.unsupportedBrowsers()).thenThrow(Exception('boom'));
+      final cubit = build();
+      await cubit.load();
+      await pumpEventQueue();
+      // The blocklist still rendered; only the notice is missing.
+      expect(cubit.state.isLoading, isFalse);
+      expect(cubit.state.loadFailed, isFalse);
+      expect(cubit.state.unsupportedBrowsers, isEmpty);
+    });
   });
 
   group('WebBlockRepositoryImpl', () {
@@ -644,5 +676,54 @@ void main() {
       expect(stats.mostBlockedHost, isNull);
       expect((jsonDecode(blob!) as Map)['hosts'], isEmpty);
     });
+
+    // EVO-049: suffix matching means one rule can accrue a key per subdomain
+    // visited, forever. The tally answers "most blocked", so the tail is
+    // droppable — but the winner never is.
+    test('the host tally is capped, keeping the most-blocked', () async {
+      final store = _MockStore();
+      // 60 hosts, ascending counts: h0=1 … h59=60. Cap is 50.
+      final crowded = {for (var i = 0; i < 60; i++) 'h$i.com': i + 1};
+      String? blob = jsonEncode({
+        'date': _todayKey(),
+        'today': 0,
+        'total': 0,
+        'hosts': crowded,
+      });
+      when(() => store.read(StoreKeys.webBlockStats)).thenAnswer((_) => blob);
+      when(
+        () => store.write(StoreKeys.webBlockStats, any()),
+      ).thenAnswer((inv) async => blob = inv.positionalArguments[1] as String);
+      final channel = _MockChannel();
+      when(channel.events).thenAnswer(
+        (_) => Stream.value(<String, dynamic>{
+          'type': ChannelEvents.webBlocked,
+          'source': 'RULE',
+          'host': 'h59.com',
+          'today': 1,
+          'total': 1,
+        }),
+      );
+
+      final stats = await WebBlockStatsRepositoryImpl(
+        channel,
+        store,
+      ).watch().first;
+
+      final hosts = (jsonDecode(blob!) as Map)['hosts'] as Map;
+      expect(hosts.length, 50);
+      // The busiest survive; the quietest are evicted.
+      expect(hosts.containsKey('h59.com'), isTrue);
+      expect(hosts.containsKey('h0.com'), isFalse);
+      expect(stats.mostBlockedHost, 'h59.com');
+    });
   });
+}
+
+/// Local-midnight day key in the repository's own `yyyy-MM-dd` shape.
+String _todayKey() {
+  final now = DateTime.now();
+  final m = now.month.toString().padLeft(2, '0');
+  final d = now.day.toString().padLeft(2, '0');
+  return '${now.year}-$m-$d';
 }

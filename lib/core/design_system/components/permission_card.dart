@@ -31,6 +31,10 @@ class PermissionCard extends StatelessWidget {
   /// The status read didn't answer (channel hiccup) and there is no granted
   /// history to fall back on — render a neutral "Checking…" row, not a red
   /// denied state. Ignored when [granted] is true.
+  ///
+  /// Pass [actionLabel] alongside this to offer a way out (e.g. "Retry");
+  /// without it the row is informational, which is right for the permission
+  /// funnel where the next status read fixes itself.
   final bool unknown;
 
   /// When true the OS won't prompt again, so the action label becomes
@@ -111,6 +115,18 @@ class PermissionCard extends StatelessWidget {
                           color: Theme.of(context).colorScheme.onSurfaceVariant,
                         ),
                       ),
+                      // An unknown state with no way out is a dead end: the
+                      // permission funnel re-reads on its own, but a screen
+                      // whose data failed to load needs the user to ask again.
+                      // Opt-in via [actionLabel] so the funnel's rows, which
+                      // recover by themselves, stay button-free.
+                      if (actionLabel != null) ...[
+                        const Spacer(),
+                        SecondaryButton(
+                          label: actionLabel!,
+                          onPressed: onGrant,
+                        ),
+                      ],
                     ],
                   )
                 else

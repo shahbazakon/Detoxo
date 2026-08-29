@@ -2,20 +2,24 @@ import 'dart:typed_data';
 
 import 'package:detoxo/core/design_system/design_system.dart';
 import 'package:detoxo/core/di/injector.dart';
+import 'package:detoxo/core/navigation/routes.dart';
+import 'package:detoxo/core/utils/clock_format.dart';
 import 'package:detoxo/core/widgets/app_picker_sheet.dart';
 import 'package:detoxo/core/widgets/common_widgets.dart';
 import 'package:detoxo/features/blocking/blocking.dart';
-import 'package:detoxo/features/blocking/blocklist/presentation/targets_cubit.dart';
-import 'package:detoxo/features/blocking/blocklist/presentation/widgets/block_app_tile.dart';
-import 'package:detoxo/features/blocking/shared/presentation/settings_cubit.dart';
 import 'package:detoxo/features/limits/app_blocker/domain/app_block_sync.dart';
 import 'package:detoxo/features/limits/app_blocker/domain/entities/app_block_entry.dart';
 import 'package:detoxo/features/limits/app_blocker/domain/repositories/app_block_repository.dart';
 import 'package:detoxo/features/limits/app_blocker/presentation/app_block_cubit.dart';
+import 'package:detoxo/features/limits/rules/domain/usecases/rule_summary.dart';
+import 'package:detoxo/features/limits/unblock/domain/entities/temporary_unblock.dart';
+import 'package:detoxo/features/limits/unblock/presentation/unblock_cubit.dart';
+import 'package:detoxo/features/limits/unblock/presentation/widgets/unblock_duration_sheet.dart';
 import 'package:detoxo/features/limits/web_blocker/domain/web_block_sync.dart';
 import 'package:detoxo/features/protected_apps/protected_apps.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:go_router/go_router.dart';
 
 /// One place to manage blocking: the curated catalog of built-in feeds/surfaces
 /// (install-aware, from [TargetsCubit]/[SettingsCubit]) and custom whole-app
@@ -109,6 +113,7 @@ class _AppBlockViewState extends State<_AppBlockView> {
                 // entry point, and an empty hint would just push the catalog down.
                 if (custom.isNotEmpty) ...[
                   ..._customSection(context, custom),
+                  _SuppressionHint(anyEnabled: custom.any((e) => e.enabled)),
                   const SizedBox(height: AppSpacing.lg),
                 ],
                 ..._curatedSection(context, targets, enabledIds),
@@ -128,35 +133,127 @@ class _AppBlockViewState extends State<_AppBlockView> {
     return [
       const SectionHeader('Custom apps'),
       for (var i = 0; i < custom.length; i++)
-        Padding(
-          padding: const EdgeInsets.only(bottom: AppSpacing.sm),
-          child: AppCard(
-            leading: AppIconAvatar(
-              iconUrl: '',
-              iconBytes: _appIcons?[custom[i].packageName],
-              appName: custom[i].appName,
-            ),
-            title: custom[i].appName,
-            subtitle: custom[i].packageName,
-            trailing: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                AppToggle(
-                  value: custom[i].enabled,
-                  semanticLabel: 'Block ${custom[i].appName}',
-                  onChanged: (v) =>
-                      context.read<AppBlockCubit>().toggle(i, enabled: v),
+        Builder(
+          builder: (context) {
+            final entry = custom[i];
+            // M8: a live grant on this package. Selected off the cubit's
+            // DERIVED `active` list, so the row actually rebuilds when the
+            // grant lapses instead of holding a dead countdown.
+            //
+            // The clock is read INSIDE the selector, not hoisted above the
+            // loop: provider re-runs this closure on every cubit emit, and a
+            // captured build-time `nowMs` sits before the `startMs` of any
+            // grant made afterwards — so `isActiveAt` stayed false forever and
+            // the pill never appeared. The web-blocker row has the same shape.
+            final grant = context.select<UnblockCubit, TemporaryUnblock?>(
+              (c) => c.state.activeFor(
+                UnblockTargetType.app,
+                entry.packageName,
+                DateTime.now().millisecondsSinceEpoch,
+              ),
+            );
+            return Padding(
+              padding: const EdgeInsets.only(bottom: AppSpacing.sm),
+              child: AppCard(
+                leading: AppIconAvatar(
+                  iconUrl: '',
+                  iconBytes: _appIcons?[entry.packageName],
+                  appName: entry.appName,
                 ),
-                IconButton(
-                  icon: const Icon(Icons.delete_outline),
-                  tooltip: 'Remove ${custom[i].appName}',
-                  onPressed: () => context.read<AppBlockCubit>().removeAt(i),
+                title: entry.appName,
+                subtitle: entry.packageName,
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    // "Let me in for 15 minutes" — the headline of M8, and the
+                    // reason a whole-app lock no longer has to be all or
+                    // nothing. Only offered while the lock is actually on.
+                    if (entry.enabled)
+                      IconButton(
+                        icon: Icon(
+                          grant != null
+                              ? Icons.play_arrow
+                              : Icons.timer_outlined,
+                        ),
+                        // Allow / Resume, the same pair the website rows use —
+                        // one vocabulary for one mechanism.
+                        tooltip: grant != null
+                            ? 'Resume blocking ${entry.appName}'
+                            : 'Allow ${entry.appName} for a while',
+                        onPressed: () => grant != null
+                            ? context.read<UnblockCubit>().endEarly(
+                                UnblockTargetType.app,
+                                entry.packageName,
+                              )
+                            : _showAllowSheet(context, entry),
+                      ),
+                    AppToggle(
+                      value: entry.enabled,
+                      semanticLabel: 'Block ${entry.appName}',
+                      onChanged: (v) =>
+                          context.read<AppBlockCubit>().toggle(i, enabled: v),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.delete_outline),
+                      tooltip: 'Remove ${entry.appName}',
+                      onPressed: () =>
+                          context.read<AppBlockCubit>().removeAt(i),
+                    ),
+                  ],
                 ),
-              ],
-            ),
-          ),
+                child: grant == null
+                    ? null
+                    : Row(
+                        children: [
+                          Pill(
+                            // "Until 10:30 PM", not "Allowed until 10:30 PM":
+                            // Pill caps itself at 0.4x screen width, so the
+                            // longer label ellipsised away the one datum it
+                            // carries — at 1.0x text scale, not just large.
+                            // The icon and the tone already say "allowed".
+                            label:
+                                'Until ${RuleSummary.clock(grant.endMs, DateTime.now(), time: (m) => formatLocalTime(context, m))}',
+                            tone: AppTone.warning,
+                            icon: Icons.timer_outlined,
+                          ),
+                        ],
+                      ),
+              ),
+            );
+          },
         ),
     ];
+  }
+
+  /// The same chips the website rows and the block screen use.
+  Future<void> _showAllowSheet(
+    BuildContext context,
+    AppBlockEntry entry,
+  ) async {
+    final unblock = context.read<UnblockCubit>();
+    final window = await showUnblockDurationSheet(
+      context,
+      label: entry.appName,
+      remaining: unblock.state.grantsLeft,
+    );
+    if (window == null) return;
+    final ok = await unblock.grant(
+      UnblockTargetType.app,
+      entry.packageName,
+      window,
+      source: UnblockSource.blocklistRow,
+    );
+    // Only on success. A failed write reverts the grant and emits `error`,
+    // which `PendingUnblockListener` toasts app-wide — announcing "allowed for
+    // 15 min" over an app that is still blocked is the one thing this must not
+    // do.
+    if (ok && context.mounted) {
+      GlassToast.show(
+        context,
+        '${entry.appName} allowed for ${window.inMinutes} min',
+        tone: AppTone.success,
+      );
+    }
   }
 
   // ── Curated, install-aware feeds & surfaces ───────────────────────────────
@@ -297,5 +394,38 @@ class _AppBlockViewState extends State<_AppBlockView> {
       _ => 'That doesn’t look like a package id.',
     };
     GlassToast.show(context, message, tone: AppTone.warning);
+  }
+}
+
+/// EVO-037 — Notification silence, offered where the intent forms.
+///
+/// Locking an app stops the user walking into it; it does not stop the app
+/// calling them back out. That gap is invisible from Settings → Privacy, which
+/// is the only other place the switch exists — so a user who locks Instagram
+/// here has no reason to suspect a cure for its notifications is one screen
+/// away. Shown only once at least one lock is live, and only while the feature
+/// is off, so it disappears the moment it has done its job.
+class _SuppressionHint extends StatelessWidget {
+  const _SuppressionHint({required this.anyEnabled});
+
+  final bool anyEnabled;
+
+  @override
+  Widget build(BuildContext context) {
+    final on = context.watch<SettingsCubit>().state.suppressNotifications;
+    if (!anyEnabled || on) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: AppSpacing.xs),
+      child: GlassListTile(
+        leading: Icon(
+          Icons.notifications_off_outlined,
+          color: Theme.of(context).colorScheme.secondary,
+        ),
+        title: 'Locked apps can still notify you',
+        subtitle: 'Turn on Notification silence in Settings → Privacy',
+        trailing: const Icon(Icons.chevron_right),
+        onTap: () => context.push(Routes.settings),
+      ),
+    );
   }
 }

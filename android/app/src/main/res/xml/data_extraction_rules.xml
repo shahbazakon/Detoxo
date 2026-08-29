@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Android 12+ (API 31+) backup and device-transfer rules. Nothing leaves the
+  device. `android:allowBackup="false"` covers cloud backup on every API level;
+  from 31 the device-to-device transfer channel is governed here instead, so
+  both are stated explicitly rather than left to a default.
+
+  What this protects: the Hive box `detoxo` holds the manually protected app
+  list (the inventory of someone's banking / UPI / password apps) and, since the
+  onboarding step machine, their first name, self-reported screen-time band and
+  the social feeds they use. `detoxo_engine_prefs` mirrors the protected
+  packages natively. `docs/code_docs/24-protected-apps.md` §6 promises the
+  protected list "never leaves the device"; the platform default
+  (`allowBackup=true`) made that claim false.
+
+  Why everything rather than a path list: Detoxo is offline-first with no
+  account, so a restore carries nothing the user would miss beyond local
+  settings — and an exclusion keyed to a Hive file path would fail silently and
+  invisibly if path_provider's directory ever moved. Excluding wholesale is the
+  version that cannot quietly stop working.
+
+  Accepted cost: after a restore or a device transfer the user re-does
+  onboarding and re-adds any manual protections. Catalog-derived protection is
+  computed, not stored, so it is unaffected.
+-->
+<data-extraction-rules>
+    <cloud-backup>
+        <exclude domain="root" path="." />
+    </cloud-backup>
+    <device-transfer>
+        <exclude domain="root" path="." />
+    </device-transfer>
+</data-extraction-rules>

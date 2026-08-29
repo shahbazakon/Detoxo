@@ -24,7 +24,7 @@ class PinRepositoryImpl implements PinRepository {
   Future<PinConfig> load() async {
     // A throw here (secure storage failing to decrypt after a Keystore
     // invalidation / backup restore, or a corrupted blob hitting jsonDecode)
-    // would otherwise reject the splash's Future.wait and strand the app on
+    // would otherwise reject the bootstrap's Future.wait and strand the app on
     // the spinner forever. Fail open to the default config: an unreadable
     // lock is equivalent to the documented reinstall escape hatch.
     try {

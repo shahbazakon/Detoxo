@@ -1,3 +1,4 @@
+import 'package:detoxo/core/navigation/app_gate.dart';
 import 'package:detoxo/core/platform_channels/engine_channel.dart';
 import 'package:detoxo/core/services/firebase/firebase.dart';
 import 'package:detoxo/core/storage/local_store.dart';
@@ -9,6 +10,10 @@ import 'package:detoxo/features/additional_feature/app_upgrader/data/repositorie
 import 'package:detoxo/features/additional_feature/app_upgrader/domain/repositories/app_upgrade_service.dart';
 import 'package:detoxo/features/analytics/data/repositories/analytics_repository_impl.dart';
 import 'package:detoxo/features/analytics/domain/repositories/analytics_repository.dart';
+import 'package:detoxo/features/analytics/insights/data/repositories/insights_repository_impl.dart';
+import 'package:detoxo/features/analytics/insights/domain/repositories/insights_repository.dart';
+import 'package:detoxo/features/blocking/block_screen/data/repositories/block_screen_repository_impl.dart';
+import 'package:detoxo/features/blocking/block_screen/domain/repositories/block_screen_repository.dart';
 import 'package:detoxo/features/blocking/plans/data/repositories/content_repository_impl.dart';
 import 'package:detoxo/features/blocking/plans/domain/repositories/content_repository.dart';
 import 'package:detoxo/features/blocking/shared/data/repositories/config_repository_impl.dart';
@@ -27,16 +32,25 @@ import 'package:detoxo/features/limits/app_blocker/data/repositories/app_block_r
 import 'package:detoxo/features/limits/app_blocker/domain/repositories/app_block_repository.dart';
 import 'package:detoxo/features/limits/daily_limit/data/repositories/daily_limit_repository_impl.dart';
 import 'package:detoxo/features/limits/daily_limit/domain/repositories/daily_limit_repository.dart';
+import 'package:detoxo/features/limits/rules/data/repositories/rule_repository_impl.dart';
+import 'package:detoxo/features/limits/rules/domain/repositories/rule_repository.dart';
 import 'package:detoxo/features/limits/streak/data/repositories/streak_repository_impl.dart';
 import 'package:detoxo/features/limits/streak/domain/repositories/streak_repository.dart';
+import 'package:detoxo/features/limits/unblock/data/repositories/bypass_ledger_repository_impl.dart';
+import 'package:detoxo/features/limits/unblock/data/repositories/temporary_unblock_repository_impl.dart';
+import 'package:detoxo/features/limits/unblock/domain/repositories/unblock_repositories.dart';
 import 'package:detoxo/features/limits/web_blocker/data/repositories/web_block_repository_impl.dart';
 import 'package:detoxo/features/limits/web_blocker/data/repositories/web_block_stats_repository_impl.dart';
 import 'package:detoxo/features/limits/web_blocker/domain/repositories/web_block_repository.dart';
 import 'package:detoxo/features/limits/web_blocker/domain/repositories/web_block_stats_repository.dart';
+import 'package:detoxo/features/onboarding/data/repositories/onboarding_repository_impl.dart';
+import 'package:detoxo/features/onboarding/domain/repositories/onboarding_repository.dart';
 import 'package:detoxo/features/permissions/data/repositories/permission_repository_impl.dart';
 import 'package:detoxo/features/permissions/domain/repositories/permission_repository.dart';
 import 'package:detoxo/features/protected_apps/data/repositories/protected_apps_repository_impl.dart';
 import 'package:detoxo/features/protected_apps/domain/repositories/protected_apps_repository.dart';
+import 'package:detoxo/features/usage/data/repositories/usage_repository_impl.dart';
+import 'package:detoxo/features/usage/domain/repositories/usage_repository.dart';
 import 'package:get_it/get_it.dart';
 
 /// Service locator. Composition root for the whole app; blocs resolve their
@@ -49,6 +63,9 @@ Future<void> configureDependencies() async {
   sl
     ..registerSingleton<LocalStore>(store)
     ..registerLazySingleton<EngineChannel>(EngineChannel.new)
+    // What the router's single `redirect` reads. A lazy singleton so the router
+    // and the app-wide listeners that feed it share one instance.
+    ..registerLazySingleton<AppGate>(AppGate.new)
     // Firebase telemetry (analytics / crashlytics / performance).
     ..registerLazySingleton<CrashReportingService>(
       FirebaseCrashReportingService.new,
@@ -63,10 +80,17 @@ Future<void> configureDependencies() async {
     ..registerLazySingleton<SettingsRepository>(
       () => SettingsRepositoryImpl(sl()),
     )
+    // First-run resume state. Outlives the onboarding screen: the app's
+    // starter-rule sync reads it at accessibility-grant time.
+    ..registerLazySingleton<OnboardingRepository>(
+      () => OnboardingRepositoryImpl(sl()),
+    )
     ..registerLazySingleton<EngineRepository>(() => EngineRepositoryImpl(sl()))
     ..registerLazySingleton<PermissionRepository>(
       () => PermissionRepositoryImpl(sl(), sl()),
     )
+    // Device screen-time records (UsageStatsManager), pull-only.
+    ..registerLazySingleton<UsageRepository>(() => UsageRepositoryImpl(sl()))
     ..registerLazySingleton<PinRepository>(() => PinRepositoryImpl(sl(), sl()))
     ..registerLazySingleton<WebBlockRepository>(
       () => WebBlockRepositoryImpl(sl()),
@@ -83,11 +107,29 @@ Future<void> configureDependencies() async {
     ..registerLazySingleton<DailyLimitRepository>(
       () => DailyLimitRepositoryImpl(sl()),
     )
+    // Blocking rules (schedules, time limits, open limits).
+    ..registerLazySingleton<RuleRepository>(() => RuleRepositoryImpl(sl()))
+    // Per-target unblocks + the rationed-escape ledger (M8). Two records, one
+    // feature: a grant frees a target, an override lifts a locked rule.
+    ..registerLazySingleton<TemporaryUnblockRepository>(
+      () => TemporaryUnblockRepositoryImpl(sl()),
+    )
+    ..registerLazySingleton<BypassLedgerRepository>(
+      () => BypassLedgerRepositoryImpl(sl()),
+    )
     ..registerLazySingleton<StreakRepository>(() => StreakRepositoryImpl(sl()))
     ..registerLazySingleton<AnalyticsRepository>(
       () => AnalyticsRepositoryImpl(sl()),
     )
+    // Day rollups over the usage layer (real screen time, pickups, top apps).
+    ..registerLazySingleton<InsightsRepository>(
+      () => InsightsRepositoryImpl(sl(), sl(), sl(), sl()),
+    )
     ..registerLazySingleton<ContentRepository>(ContentRepositoryImpl.new)
+    // Block screen (intervention wall) style + editor preview.
+    ..registerLazySingleton<BlockScreenRepository>(
+      () => BlockScreenRepositoryImpl(sl()),
+    )
     // Short-video / reel counter.
     ..registerLazySingleton<ContentCounterRepository>(
       () => ContentCounterRepositoryImpl(sl(), sl()),

@@ -54,6 +54,18 @@ class FirebaseNativeEventReporter {
       case ChannelEvents.webBlocked:
         // `host` is intentionally omitted — browsing targets are private.
         _analytics.logWebBlocked(mode: (event['mode'] as String?) ?? 'unknown');
+      case ChannelEvents.blockScreenAction:
+        // The editor's "Try it" wall is not an intervention; `referenceId`
+        // (a host / package) is never forwarded.
+        if (event['preview'] == true) return;
+        _analytics.logBlockScreenAction(
+          action: (event['action'] as String?) ?? 'unknown',
+        );
+      case ChannelEvents.nudgeShown:
+        // The threshold band only — `package` stays on the device.
+        _analytics.logNudgeShown(
+          thresholdMin: ((event['thresholdMs'] as num?)?.toInt() ?? 0) ~/ 60000,
+        );
     }
   }
 

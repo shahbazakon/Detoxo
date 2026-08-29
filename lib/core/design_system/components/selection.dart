@@ -175,6 +175,8 @@ class AppChip extends StatelessWidget {
     required this.selected,
     required this.onSelected,
     this.icon,
+    this.semanticLabel,
+    this.momentary = false,
     super.key,
   });
 
@@ -183,6 +185,18 @@ class AppChip extends StatelessWidget {
   final VoidCallback onSelected;
   final IconData? icon;
 
+  /// True when the chip is a one-shot action rather than a toggle, so it has no
+  /// selected state to announce. Without this a duration picker reads as
+  /// "5 min, **not selected**, button" — a state the user can never change, on
+  /// a chip that dismisses the sheet the moment it is tapped.
+  final bool momentary;
+
+  /// What a screen reader announces instead of [label]. Needed wherever the
+  /// visible text is an abbreviation ("Mon") or where the chip is really a
+  /// destructive action — a selected chip with a close icon reads as
+  /// "Instagram, selected" but activating it REMOVES Instagram.
+  final String? semanticLabel;
+
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
@@ -190,7 +204,8 @@ class AppChip extends StatelessWidget {
     return AppPressable(
       onTap: onSelected,
       pressedScale: 0.94,
-      selected: selected,
+      selected: momentary ? null : selected,
+      semanticLabel: semanticLabel,
       minTapTarget: const Size(0, AppSizes.minTapTarget),
       child: GlassContainer(
         enableBlur: false,

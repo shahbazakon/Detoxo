@@ -11,7 +11,7 @@ boundary:
 | `flutter_secure_storage` | Dart | Keystore / EncryptedSharedPreferences | Secrets only (the PIN config) |
 | `detoxo_engine_prefs` | Native (Kotlin) | `SharedPreferences` | The engine's own runtime state: plan, counters, blocklists, Conscious bank, watchdog markers |
 | `detoxo_platforms_config` | Native (Kotlin) | `SharedPreferences` | Just the pushed ~31 KB `platforms_config_json` — split out so hot-path counter writes stop re-serialising it (§2.1) |
-| `home_widget` data + native store | Bridge | `home_widget` plugin + `detoxo_engine_prefs` | Home-screen widget face (`cc_today` / `cc_total`) |
+| Home-screen widget | Native (Kotlin) | reads `detoxo_engine_prefs` (`cc_today` / `cc_total` / styles) | Rendered natively from the store; no plugin-side data (the `home_widget` package was removed) |
 
 > **Not used (from the old blueprint):** Room, drift/SQLite, any
 > `ContentProvider`, and any multi-process `SharedPreferences`
@@ -93,8 +93,12 @@ Each key maps to exactly one repository that owns its JSON shape:
 | `appBlocklist` | `app_blocklist` | no | `AppBlockRepositoryImpl` | JSON list of `AppBlockEntry.toJson()` |
 | `protectedApps` | `protected_apps` | no | `ProtectedAppsRepositoryImpl` | JSON list of `ProtectedApp.toJson()` |
 | `dailyLimit` | `daily_limit` | no | `DailyLimitRepositoryImpl` | `DailyLimit.toJson()` — one JSON object |
+| `rules` | `rules` | no | `RuleRepositoryImpl` | JSON list of `Rule.toJson()` — schedules / time limits / open limits, capped at 50; enums as stable name strings; a corrupt blob **throws** so the sync aborts ([27](27-rules-engine.md) §2). M8 added the sparse `locked` / `lockScope` fields, so an unlocked rule's document is byte-identical to a pre-M8 one ([31](31-locked-rules-and-unblock.md) §4) |
+| `temporaryUnblocks` | `temporary_unblocks` | no | `TemporaryUnblockRepositoryImpl` | `{grants: [{targetType, targetId, startMs, endMs, cancelledMs, source}]}` — M8's per-target unblocks, newest first, **capped at 50 and pruned on write**. Only the active ones cross the channel; native enforces their expiry, so a grant lapses on time with Detoxo closed. A corrupt blob **throws** — pushing `[]` would yank a live grant out from under the user ([31](31-locked-rules-and-unblock.md) §2) |
+| `bypassLedger` | `bypass_ledger` | no | `BypassLedgerRepositoryImpl` | `{config: {overrideLimit, overridePeriod, overrideMaxWindowMs, grantLimit, grantPeriod}, entries: [{kind, atMs, untilMs, ruleId, reason}]}` — the rationed-escape ledger, newest first, capped at 50 **per kind** (a flat cap let a burst of grants evict an override still inside its window, which refunds it). **One store with a `kind` discriminator from day one**: M8 wrote only `OVERRIDE`; EVO-053 added `GRANT` with no migration, which is exactly what the discriminator was for, and M2.2's emergency pass will add `EMERGENCY` the same way. `grantLimit` is **0 = unlimited** and is the shipped default. `remaining` / `resetsAt` are **derived**, never stored. A corrupt blob **throws** — reading it as empty would hand out a fresh quota every time ([31](31-locked-rules-and-unblock.md) §4) |
 | `streak` | `daily_limit_streak` | no | `StreakRepositoryImpl` | `Streak.toJson()` — `{base, lastDay, todayFailed}` |
 | `analyticsEvents` | `analytics_events` | no | `AnalyticsRepositoryImpl` | JSON list of block events (capped) |
+| `usageDaily` | `usage_daily` | no | `InsightsRepositoryImpl` | `{days: {"dd-MM-yyyy": DailyStats}}` — one document, **pruned to the newest 90 days on write**; day keys always from `daySignature` ([28](28-insights.md) §4) |
 | `grantedPermissions` | `granted_permissions` | no | `PermissionRepositoryImpl` | JSON list of `AppPermission.name`s granted on the last successful check — the permission gate's memory when a live read comes back `unknown` ([13](13-onboarding-permissions.md) §3.2) |
 | `premiumDevUnlock` | `premium_dev_unlock` | no | *(reserved — no live consumer)* | — |
 | `dismissedNotices` | `dismissed_notices` | no | *(reserved — no live consumer)* | — |
@@ -114,7 +118,10 @@ Each key maps to exactly one repository that owns its JSON shape:
   incl. an override plan or legacy `paused`, to Block All], `defaultBlockMode`,
   `enabledPlatformIds`, `reelAllowance` [the One Reel / Unblock target, 1..20,
   defaulting to 1 via `(json['reelAllowance'] as num?)?.toInt() ?? 1`], pause session,
-  theme, website toggles, …). This `baseMode` is a **Dart-only** persistence field —
+  theme, website toggles, the three soft-nudge fields [`nudgeEnabled` false,
+  `nudgeThresholdMinutes` 5, `nudgeDailyCap` 4 — absent keys read as the defaults,
+  so a pre-M7 blob upgrades to "off" rather than to broken; [30](30-soft-nudge.md)],
+  …). This `baseMode` is a **Dart-only** persistence field —
   it is not pushed on the native wire (native only ever sees the derived `activePlan`).
   `SettingsRepositoryImpl` caches it in memory (`_cache`) after first
   load and re-broadcasts on every `save` through a broadcast `StreamController`, so
@@ -136,7 +143,13 @@ Each key maps to exactly one repository that owns its JSON shape:
   `hosts` map is Dart-only, so the dashboard can surface the most-blocked site;
   adult-list blocks never enter it — native omits `host` for `source: "ADULT"`
   events (EVO-018), so no adult domain is persisted or displayed.
-  `today` rolls over on a new calendar day (`_rollDate`).
+  `today` rolls over on a new calendar day (`_rollDate`). The map is **capped at
+  50 hosts** (EVO-049), trimmed to the highest counts on write: matching is
+  suffix-based and native reports the *observed* host, so one `google.com` rule
+  would otherwise accrue a key per subdomain visited, forever. On read, `hosts`
+  is coerced (`_sanitiseHosts`) — a blob whose `hosts` is a scalar or holds
+  non-int counts reads back empty instead of throwing inside `watch()`'s
+  `await for`, which would have ended the live stats stream for the session.
 - **`app_blocklist`** — JSON list of `AppBlockEntry` (full-app blocks, distinct
   from reel-platform detection).
 - **`protected_apps`** — JSON list of `ProtectedApp`
@@ -154,6 +167,14 @@ Each key maps to exactly one repository that owns its JSON shape:
   Defaults to `const Streak()` when absent. Owned by `StreakRepositoryImpl`,
   advanced once per day by `StreakCubit`. See
   [07-daily-limit-scheduler.md](07-daily-limit-scheduler.md).
+- **`usage_daily`** — the insights rollups: one JSON document,
+  `{days: {"dd-MM-yyyy": {...}}}`, written by `InsightsRepositoryImpl` on every
+  recompute and **pruned to the newest 90 days on write** (chronologically by
+  the day each key names, so a backfilled record can never evict a newer one).
+  Today's record carries `complete: false` until the day ends. Absent on a fresh
+  install; a corrupt blob is logged and read as empty. Day keys come from
+  `daySignature` (`dd-MM-yyyy`) — see §2.3 below. See
+  [28-insights.md](28-insights.md).
 - **`analytics_events`** — a capped JSON list of block events, newest-first.
   `AnalyticsRepositoryImpl` prepends each new event and truncates to
   **`_maxEvents = 500`**. Each event serialises as
@@ -201,7 +222,7 @@ sharing a file meant multi-KB disk writes at scroll frequency. `ConfigStore`'s
 ### 2.1 `ConfigStore` keys
 
 Written by Dart via `CommandHandler` (`pushConfig`, `pushSettings`,
-`pushWebBlocklist`, `pushProtectedApps`, `pushAppBlocklist`); read by
+`pushWebBlocklist`, `pushProtectedApps`, `pushAppBlocklist`, `pushRules`); read by
 `DetoxoAccessibilityService`.
 
 | Key string | Type | Default | Meaning |
@@ -216,8 +237,26 @@ Written by Dart via `CommandHandler` (`pushConfig`, `pushSettings`,
 | `master_enabled` | Boolean | true | Global on/off for blocking |
 | `pause_until` | Long | 0 | Epoch millis until which blocking is paused (0 = not paused) |
 | `web_blocklist_json` | String? | null | Active website blocklist `[{pattern,matchType}]` |
+| `next_boundary_ms` | Long | 0 | Earliest moment any pushed rule window opens or closes, an unspent budget is projected to run out, or local midnight; mirrored into the service, zeroed once `ruleBoundary` is posted. Clamped to ≥ 0 on write |
+
+**`detoxo_rules_snapshot`** — its own prefs file, for the same reason the platforms
+config has one: `rules_json` (String?, the resolved `pushRules` snapshot — one entry
+per rule with flat targets, absolute windows and each limit's budget) measures ~45 KB
+typically and ~175 KB worst case at the 50-rule cap, while the counter flushes usage
+into `detoxo_engine_prefs` every 5 s and `apply()` re-serialises the whole file.
+Migrated out of the hot file once, on the first `ConfigStore` construction, so an
+upgrade keeps enforcing without waiting for Dart's next push. Read by `RuleEngine` on
+push / reload, never per event ([27](27-rules-engine.md)).
 | `block_adult_websites` | Boolean | false | Enforce the bundled adult-domain set |
 | `block_websites_for_blocked_apps` | Boolean | false | Enforce websites of blocked apps |
+| `suppress_notifications` | Boolean | false | Cancel notifications from apps blocked right now. The suppressed **set** is deliberately not stored — it is derived per notification from the live engine state, so it cannot become a second source of truth ([29](29-notification-suppression.md)) |
+| `nudge_enabled` | Boolean | false | Soft nudge master switch ([30](30-soft-nudge.md)) |
+| `nudge_packages` | Set<String> | ∅ | Apps the nudge **times** — the catalog's `distracting` behaviour, derived in Dart and never persisted there. The one flat package set here that does not mean "intervene" |
+| `nudge_step_ms` | Long | 300000 | Minutes between nudges, as ms; clamped 1–60 min in the accessor |
+| `nudge_daily_cap` | Int | 4 | Nudges per app per day; clamped 1–50. The running tally is **not** stored — it lives in the tracker and dies with the process |
+| `temporary_unblocks_json` | String (JSON array) | `null` | M8's active per-target grants (`[{targetType,targetId,endMs}]`), read by `UnblockRegistry` on push and on `reload()`. Bounded at 50 on both sides, so unlike the rules snapshot it is small enough for the hot file. `endMs` is a wall stamp — it has to survive a reboot — converted to an `elapsedRealtime` deadline once per parse ([31](31-locked-rules-and-unblock.md) §2) |
+| `native_grants_json` | String | `null` | EVO-050: grants the user took on the wall itself, as the `pushTemporaryUnblocks` array. Written beside `temporary_unblocks_json` (which native enforces immediately) so Dart can fold them into Hive with `takeNativeGrants` — Hive stays canonical, and its next push rewrites the enforced list wholesale, which would otherwise delete the grant the user just took |
+| `pending_unblock` | String | `null` | A wall the user tapped "Allow for a while" on, as `"TYPE\|id\|stamp"`. Handed to Dart **exactly once** by `takePendingUnblock`, which clears it, returns only the `"TYPE\|id"` pair, and drops anything older than `ConfigStore.PENDING_UNBLOCK_TTL_MS` (2 min) — an un-drained key would otherwise open an unrequested bypass sheet days later |
 | `service_ever_connected` | Boolean | false | The accessibility service connected at least once on this install (watchdog gate) |
 | `last_watchdog_notified_ms` | Long | 0 | Last "Protection stopped" notification — the watchdog's 6 h re-notify debounce |
 
@@ -285,9 +324,12 @@ count, so an unrelated settings change can't refill a spent session. See
 ### 2.2 `ContentCounterStore` keys
 
 The counter is **decoupled from blocking** and enabled by default. Written by
-`engine/ContentCounter.kt` (`recordCount`) and by `CommandHandler`
+`engine/ContentCounter.kt` (`recordCount(pkg, dateKey, usageDeltaMs)` — one
+edit for the count *and* the batched usage time, returning the snapshot;
+`recordUsage` for the periodic usage flush) and by `CommandHandler`
 (`setContentCounterEnabled`, `setContentBubbleEnabled`, `setCounterStyle`); read
-by the bubble overlay and the widget provider.
+by the bubble overlay and the widget provider. `cc_enabled` / `cc_bubble_enabled`
+are cached per store instance (see [17](17-content-counter.md) §3).
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
@@ -304,6 +346,7 @@ by the bubble overlay and the widget provider.
 | `cc_per_app_total` | String (JSON) | `{}` | `{pkg: count}` all-time |
 | `cc_bubble_style` | String (JSON) | "" | Bubble appearance (Dart `BubbleStyle.toWire`) |
 | `cc_widget_style` | String (JSON) | "" | Widget appearance (Dart `WidgetStyle.toWire`) |
+| `block_screen_style` | String (JSON) | "" | Block-screen appearance **+ its `enabled` switch** (Dart `BlockScreenStyle.toWire`); owned by `ConfigStore`, read once per debounced block in `BlockScreenOverlay.show` ([25](25-block-screen.md) §6). No Hive counterpart — native is the single source of truth |
 
 **Counting** (`recordCount(pkg, dateKey)`): on a stored-date mismatch it resets
 the today total and `cc_per_app_today` to 0/`{}` **and zeroes `cc_time_today`**
@@ -347,37 +390,29 @@ but they are not interchangeable:
 | Producer | Format | Example |
 |---|---|---|
 | Native (all callers — `DateKeys.today()`, the single shared `dd-MM-yyyy` formatter in `engine/DateKeys.kt`; ThreadLocal, since the widget provider / job service can run off the main thread) | `dd-MM-yyyy` | `03-07-2026` |
-| Dart `WebBlockStatsRepositoryImpl._todayKey()` | `yyyy-MM-dd` | `2026-07-03` |
+| Dart `daySignature()` (`core/utils/day_signature.dart`; the streak, the daily-limit rollover and the `usage_daily` insight rollups) — pinned to `en_US` so a localized default can't change a persisted key | `dd-MM-yyyy` | `03-07-2026` |
+| Dart `WebBlockStatsRepositoryImpl._todayKey()` — **the one outlier**, and a known cleanup | `yyyy-MM-dd` | `2026-07-03` |
 | Dart analytics events | epoch millis (`ts`) | `1751500800000` |
 
 ---
 
-## 3. Home-screen widget bridge (`cc_today` / `cc_total`)
+## 3. Home-screen widget (`cc_today` / `cc_total`)
 
-`home_content_counter/data/repositories/home_widget_repository_impl.dart` drives
-the 2×2 home-screen widget through the `home_widget` plugin. The important
-design point: **the native `ContentCounterStore` is the real source of truth** —
-the widget provider (`widget/ContentCounterWidgetProvider.kt`) renders its face
-from `ContentCounterStore(context).snapshot(...)`, so it stays correct even when
-the Flutter UI is dead.
+The 2×2 home-screen widget has **one** data source: the `cc_*` integers and
+style JSON in `detoxo_engine_prefs`, written by the native counter and read by
+`widget/ContentCounterWidgetProvider.kt` (`ContentCounterStore(context).snapshot(...)`),
+so it stays correct even when the Flutter UI is dead. Nothing is written from
+Dart — the former `home_widget` plugin mirror (its own `cc_today` / `cc_total`
+copy) was removed on 2026-08-29; native never read it.
 
-- `pushSnapshot(count)` writes `cc_today` and `cc_total` via
-  `HomeWidget.saveWidgetData<int>(...)` **and** calls
-  `_channel.refreshContentWidget()`. The `home_widget` write is a best-effort
-  convenience mirror; if the plugin is unavailable the `catch` swallows it and
-  the native render is still authoritative.
-- `pin()` calls `HomeWidget.requestPinWidget(...)` and falls back to the native
-  `pinContentWidget()` command if the launcher refuses or the plugin is
-  unavailable.
-- All widget calls are gated by `PlatformCapabilities.supportsBlockingEngine`
-  (Android-only); on unsupported platforms `pin()` returns `false` and
-  `pushSnapshot`/`refresh` no-op.
-
-So there are **two `cc_today`/`cc_total` copies**: the `home_widget` plugin's own
-data store (written by Dart, a convenience mirror) and the authoritative
-`detoxo_engine_prefs` integers written by the native counter. The provider only
-reads the latter; the native counter also calls `pushUpdate` directly on each
-counted reel (throttled) so the widget refreshes without any Dart round-trip.
+- Dart control is `home_content_counter/data/repositories/home_widget_repository_impl.dart`:
+  `pin()` → the `pinContentWidget` command (`false` when the launcher can't pin,
+  so the editor tells the user to add it by hand), `refresh()` → the
+  `refreshContentWidget` command. Off-Android the channel itself no-ops.
+- Native pushes: `ContentCounter.pushWidget` on every counted reel (throttled to
+  1 s with a trailing flush), `setCounterStyle` for a widget-style edit, and the
+  15-min `WatchdogJobService` job (the midnight rollover repair — the widget
+  otherwise re-renders only on a count).
 
 ---
 

@@ -14,6 +14,7 @@ import 'package:detoxo/features/blocking/shared/domain/entities/engine_event.dar
 import 'package:detoxo/features/blocking/shared/domain/entities/enums.dart';
 import 'package:detoxo/features/blocking/shared/domain/repositories/blocking_repositories.dart';
 import 'package:detoxo/features/blocking/shared/presentation/settings_cubit.dart';
+import 'package:detoxo/features/catalog/catalog.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -245,6 +246,55 @@ void main() {
       },
     );
 
+    test('setNudgeEnabled persists and pushes the nudge config', () async {
+      await cubit.bootstrap();
+      expect(cubit.state.nudgeEnabled, isFalse);
+
+      await cubit.setNudgeEnabled(enabled: true);
+
+      expect(cubit.state.nudgeEnabled, isTrue);
+      expect(settings.saved?.nudgeEnabled, isTrue);
+      // The three fields ride in AppSettings but reach native over their own
+      // command — a commit without the nudge push configures nothing.
+      expect(engine.nudgePushed, hasLength(1));
+      expect(engine.nudgePushed.last.$1.nudgeEnabled, isTrue);
+      expect(engine.nudgePushed.last.$2, isNotEmpty); // the derived watch list
+    });
+
+    test('nudge tuning setters push the new value, clamped', () async {
+      await cubit.bootstrap();
+
+      await cubit.setNudgeThresholdMinutes(15);
+      expect(engine.nudgePushed.last.$1.nudgeThresholdMinutes, 15);
+
+      await cubit.setNudgeDailyCap(10);
+      expect(engine.nudgePushed.last.$1.nudgeDailyCap, 10);
+
+      // Out-of-range values are clamped at the boundary, not sent raw for the
+      // engine to quietly correct.
+      await cubit.setNudgeDailyCap(-5);
+      expect(cubit.state.nudgeDailyCap, 1);
+      expect(engine.nudgePushed.last.$1.nudgeDailyCap, 1);
+
+      await cubit.setNudgeThresholdMinutes(999);
+      expect(cubit.state.nudgeThresholdMinutes, 60);
+    });
+
+    test('the nudge watch list never contains a protected app', () async {
+      // Defence in depth: native subtracts the protected set too, but the
+      // pushed list is the first place it can be wrong.
+      await cubit.bootstrap();
+      await cubit.setNudgeEnabled(enabled: true);
+      final pushedPackages = engine.nudgePushed.last.$2;
+      for (final pkg in pushedPackages) {
+        expect(
+          Catalog.bundled.behaviorForPackage(pkg),
+          AppBehavior.distracting,
+          reason: pkg,
+        );
+      }
+    });
+
     test('startPause sets Block All with a live pause window', () async {
       await cubit.startPause(pause: const Duration(minutes: 5));
       expect(cubit.state.activePlan, BlockingPlan.blockAll);
@@ -415,10 +465,14 @@ class _FakeSettingsRepo implements SettingsRepository {
 
 class _FakeEngineRepo implements EngineRepository {
   final List<AppSettings> pushed = [];
+  final List<(AppSettings, List<String>)> nudgePushed = [];
 
   @override
   Future<List<InstalledApp>?> installedApps({bool refresh = false}) async =>
       null;
+
+  @override
+  Future<List<String>?> unsupportedBrowsers() async => null;
 
   @override
   Future<void> pushSettings(AppSettings settings) async => pushed.add(settings);
@@ -434,6 +488,27 @@ class _FakeEngineRepo implements EngineRepository {
 
   @override
   Future<void> pushAppBlocklist(List<String> packages) async {}
+
+  @override
+  Future<void> pushNudgeConfig(
+    AppSettings settings,
+    List<String> packages,
+  ) async => nudgePushed.add((settings, packages));
+
+  @override
+  Future<void> pushRules(String json, int nextBoundaryMs) async {}
+
+  @override
+  Stream<int> ruleBoundaryStream() => const Stream.empty();
+
+  @override
+  Future<void> pushTemporaryUnblocks(String json) async {}
+
+  @override
+  Future<String?> takePendingUnblock() async => null;
+
+  @override
+  Future<String?> takeNativeGrants() async => null;
 
   @override
   Stream<ServiceSnapshot> statusStream() => const Stream.empty();

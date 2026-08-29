@@ -21,6 +21,7 @@ export 'components/overlays.dart';
 export 'components/permission_card.dart';
 export 'components/selection.dart';
 export 'components/toggle.dart';
+export 'components/variant_carousel.dart';
 // Foundations
 export 'foundations/ambient_background.dart';
 export 'foundations/animated_icons.dart';

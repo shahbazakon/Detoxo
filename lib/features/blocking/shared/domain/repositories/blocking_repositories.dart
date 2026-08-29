@@ -61,6 +61,34 @@ abstract interface class EngineRepository {
   /// engine bounces HOME whenever they come to the foreground.
   Future<void> pushAppBlocklist(List<String> packages);
 
+  /// Pushes the soft-nudge config: [settings]' three nudge fields plus the
+  /// [packages] it times (the catalog's `distracting` behaviour — timed, never
+  /// blocked). Native owns the dwell machine and the card.
+  Future<void> pushNudgeConfig(AppSettings settings, List<String> packages);
+
+  /// Pushes the resolved rules snapshot (JSON array of flat entries with
+  /// absolute windows) plus the earliest moment any window opens or closes
+  /// (0 = none). Native enforces the windows itself and posts `ruleBoundary`
+  /// once that moment has passed.
+  Future<void> pushRules(String json, int nextBoundaryMs);
+
+  /// `ruleBoundary` events — a pushed rule window opened or closed at the
+  /// yielded epoch-ms. The listener re-resolves and re-pushes.
+  Stream<int> ruleBoundaryStream();
+
+  /// Pushes the ACTIVE per-target temporary unblocks (M8) as a JSON array of
+  /// `{targetType, targetId, endMs}`. Native enforces expiry on its own
+  /// monotonic clock, so a grant lapses on time with Detoxo closed.
+  Future<void> pushTemporaryUnblocks(String json);
+
+  /// Reads and CLEARS the target of an "Allow for a while" tap on the native
+  /// wall, as `"TYPE|id"`, or null when there is none. Consumed exactly once.
+  Future<String?> takePendingUnblock();
+
+  /// Reads and CLEARS the grants the user took on the wall itself (EVO-050),
+  /// as the `pushTemporaryUnblocks` JSON array, or null when there are none.
+  Future<String?> takeNativeGrants();
+
   Future<ServiceSnapshot> currentStatus();
 
   /// One-shot pull of the current Conscious bank (for initial UI render).
@@ -89,4 +117,9 @@ abstract interface class EngineRepository {
   /// picker, or `null` when unknown (off-Android / channel error). Cached
   /// after the first successful scan; [refresh] forces a rescan.
   Future<List<InstalledApp>?> installedApps({bool refresh = false});
+
+  /// Labels of installed browsers the web blocker cannot enforce in (EVO-047),
+  /// or `null` when unknown (off-Android / channel error). An empty list means
+  /// every installed browser is covered.
+  Future<List<String>?> unsupportedBrowsers();
 }

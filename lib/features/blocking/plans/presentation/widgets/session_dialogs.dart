@@ -46,9 +46,7 @@ class _UnblockDialogState extends State<_UnblockDialog> {
 
   /// The base mode this Unblock will return to when the count is spent.
   String get _baseLabel =>
-      context.read<SettingsCubit>().state.baseMode == BlockingPlan.curious
-      ? 'Conscious'
-      : 'Block All';
+      planLabel(context.read<SettingsCubit>().state.baseMode);
 
   @override
   Widget build(BuildContext context) {

@@ -12,8 +12,9 @@ import 'package:go_router/go_router.dart';
 
 /// Full-screen PIN gate. Serves three roles via its callbacks:
 /// * **Launch gate** (routed via `/pin/lock`): the router supplies an
-///   [onUnlocked] that resumes the splash's gating order (permissions →
-///   home); a null [onUnlocked] falls back to navigating home directly.
+///   [onUnlocked] that just clears the gate flag (`AppGate.unlockPin`) and lets
+///   the redirect apply whatever gate comes next — a PIN user must still not
+///   skip permissions. A null [onUnlocked] falls back to navigating home.
 /// * **Inline guard** (see `PinGuard`): calls [onUnlocked] to reveal the screen.
 /// * **Action gate** (see `requirePin`): pushed as a route; [onUnlocked] /
 ///   [onCancel] pop a result.

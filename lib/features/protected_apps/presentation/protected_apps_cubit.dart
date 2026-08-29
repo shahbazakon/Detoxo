@@ -62,13 +62,64 @@ class ProtectedAppsCubit extends Cubit<ProtectedAppsState> {
     }
   }
 
-  /// Whether adding [packageName] must pass the settings PIN first (it is an
-  /// app Detoxo can block, so protecting it bypasses blocking). Fails closed:
-  /// an empty monitored set means the load hasn't completed or failed, so
-  /// every add costs the PIN rather than silently skipping the gate.
-  bool needsPinToAdd(String packageName) =>
-      state.monitoredPackages.isEmpty ||
-      state.monitoredPackages.contains(packageName.trim());
+  /// Browsers, which the web blocker enforces in. Mirrors the packages in
+  /// native `engine/BrowserUrlExtractor.kt` (`URL_BAR_IDS` + `KNOWN_BROWSERS`)
+  /// — that file is the source of truth for what the engine can read, and the
+  /// two lists are maintained together. Dart cannot ask native for it: there is
+  /// no channel method, and adding one costs more than this gate is worth.
+  static const browserPackages = <String>{
+    'com.android.chrome',
+    'com.chrome.beta',
+    'com.chrome.dev',
+    'com.chrome.canary',
+    'com.google.android.apps.chrome',
+    'com.sec.android.app.sbrowser',
+    'org.mozilla.firefox',
+    'org.mozilla.fenix',
+    'org.mozilla.focus',
+    'org.mozilla.klar',
+    'com.microsoft.emmx',
+    'com.brave.browser',
+    'com.opera.browser',
+    'com.opera.mini.native',
+    'com.opera.gx',
+    'com.opera.touch',
+    'com.duckduckgo.mobile.android',
+    'com.kiwibrowser.browser',
+    'com.vivaldi.browser',
+    'com.mi.globalbrowser',
+    'com.mi.globalbrowser.mini',
+    'com.android.browser',
+    'com.UCMobile.intl',
+    'com.yandex.browser',
+    'com.ecosia.android',
+    'acr.browser.lightning',
+    'org.adblockplus.browser',
+    'mark.via.gp',
+    'com.qwant.liberty',
+    'com.cloudmosa.puffinFree',
+    'com.htc.sense.browser',
+    'com.huawei.browser',
+    'org.torproject.torbrowser',
+    'com.jio.web',
+  };
+
+  /// Whether adding [packageName] must pass the settings PIN first. Two ways to
+  /// qualify, both the same self-bypass:
+  ///
+  /// * it is an app Detoxo can block, so protecting it bypasses blocking;
+  /// * it is a **browser**, so protecting it silently turns off the website
+  ///   blocklist AND the 18+ filter inside it — the privacy guard returns
+  ///   before the web arm ever runs (`DetoxoAccessibilityService.kt`).
+  ///
+  /// Fails closed: an empty monitored set means the load hasn't completed or
+  /// failed, so every add costs the PIN rather than silently skipping the gate.
+  bool needsPinToAdd(String packageName) {
+    final pkg = packageName.trim();
+    return state.monitoredPackages.isEmpty ||
+        state.monitoredPackages.contains(pkg) ||
+        browserPackages.contains(pkg);
+  }
 
   /// Adds a manual protection, or says why it can't — the caller's toast must
   /// tell the truth, so a refusal is never silent.

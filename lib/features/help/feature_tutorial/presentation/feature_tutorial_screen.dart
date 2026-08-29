@@ -5,7 +5,7 @@ import 'package:detoxo/core/navigation/routes.dart';
 import 'package:detoxo/core/widgets/common_widgets.dart';
 import 'package:detoxo/features/additional_feature/app_feedback/app_feedback.dart';
 import 'package:detoxo/features/additional_feature/showcase_view/showcase_view.dart';
-import 'package:detoxo/features/blocking/shared/presentation/settings_cubit.dart';
+import 'package:detoxo/features/blocking/blocking.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';

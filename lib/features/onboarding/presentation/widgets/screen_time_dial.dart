@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 
 import 'package:detoxo/core/design_system/design_system.dart';
+import 'package:detoxo/core/utils/duration_format.dart';
 import 'package:flutter/material.dart';
 
 /// An interactive radial gauge for picking a daily short-form-video limit —
@@ -85,7 +86,7 @@ class _ScreenTimeDialState extends State<ScreenTimeDial> {
     return Semantics(
       slider: true,
       label: 'Daily limit',
-      value: _formatLimit(widget.value),
+      value: formatHm(widget.value),
       onIncrease: () => _nudge(1),
       onDecrease: () => _nudge(-1),
       child: GestureDetector(
@@ -146,7 +147,7 @@ class _ScreenTimeDialState extends State<ScreenTimeDial> {
           shaderCallback: (b) => context.metricGradient.createShader(b),
           blendMode: BlendMode.srcIn,
           child: Text(
-            _formatLimit(widget.value),
+            formatHm(widget.value),
             style: text.displaySmall?.copyWith(
               fontWeight: FontWeight.w800,
               height: 1,
@@ -179,14 +180,6 @@ class _ScreenTimeDialState extends State<ScreenTimeDial> {
       ],
     );
   }
-}
-
-String _formatLimit(Duration d) {
-  final h = d.inHours;
-  final m = d.inMinutes % 60;
-  if (h == 0) return '${m}m';
-  if (m == 0) return '${h}h';
-  return '${h}h ${m}m';
 }
 
 class _DialPainter extends CustomPainter {

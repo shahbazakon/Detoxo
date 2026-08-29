@@ -10,7 +10,6 @@ class WebBlockEntry extends Equatable {
     required this.pattern,
     this.matchType = WebMatchType.domain,
     this.enabled = true,
-    this.pausedUntil,
     this.displayName,
     this.source = WebBlockSource.custom,
     this.brandColor,
@@ -21,9 +20,6 @@ class WebBlockEntry extends Equatable {
     pattern: json['pattern'] as String? ?? '',
     matchType: WebMatchType.fromWire(json['matchType'] as String?),
     enabled: json['enabled'] as bool? ?? true,
-    pausedUntil: json['pausedUntil'] == null
-        ? null
-        : DateTime.fromMillisecondsSinceEpoch(json['pausedUntil'] as int),
     displayName: json['displayName'] as String?,
     source: WebBlockSource.fromWire(json['source'] as String?),
     brandColor: json['brandColor'] as int?,
@@ -36,9 +32,11 @@ class WebBlockEntry extends Equatable {
   final WebMatchType matchType;
   final bool enabled;
 
-  /// Per-site pause: while in the future, native skips this rule and re-arms
-  /// it at expiry (enforced natively, so it survives the app never reopening).
-  final DateTime? pausedUntil;
+  // M8: `pausedUntil` lived here from EVO-012 until the per-site pause was
+  // generalised into `TemporaryUnblock`. "This target is dormant until T" is
+  // now ONE mechanism for reels, apps and websites — a paused site is a
+  // WEBSITE grant keyed on this pattern, and `migrateWebPauses` moves any
+  // stored window across once, on the first load after upgrading.
 
   /// Friendly label for the UI (e.g. "YouTube"); falls back to [pattern].
   final String? displayName;
@@ -49,7 +47,9 @@ class WebBlockEntry extends Equatable {
   /// Optional ARGB brand colour for the leading badge.
   final int? brandColor;
 
-  /// When the entry was added (newest-first ordering); null for legacy entries.
+  /// When the entry was added; null for entries saved before this field
+  /// existed. Recorded only — the list renders in insertion order, so nothing
+  /// sorts by this yet.
   final DateTime? createdAt;
 
   /// Stable identity — [pattern] is unique within the blocklist.
@@ -58,22 +58,15 @@ class WebBlockEntry extends Equatable {
   /// What to render as the row title.
   String get label => displayName ?? pattern;
 
-  /// Pure, clock-injectable form of [isActive] (repo test idiom).
-  bool isActiveAt(DateTime now) =>
-      enabled && (pausedUntil == null || pausedUntil!.isBefore(now));
-
-  bool get isActive => isActiveAt(DateTime.now());
-
-  /// Whether the pause window is currently holding at [now].
-  bool isPausedAt(DateTime now) =>
-      enabled && pausedUntil != null && pausedUntil!.isAfter(now);
+  /// Whether this entry contributes to the pushed blocklist at all. A live
+  /// unblock no longer changes this — it is a grant now, held by
+  /// `UnblockCubit`, so the entry keeps riding the wire and native decides.
+  bool get isActive => enabled;
 
   WebBlockEntry copyWith({
     String? pattern,
     WebMatchType? matchType,
     bool? enabled,
-    DateTime? pausedUntil,
-    bool clearPause = false,
     String? displayName,
     WebBlockSource? source,
     int? brandColor,
@@ -82,7 +75,6 @@ class WebBlockEntry extends Equatable {
     pattern: pattern ?? this.pattern,
     matchType: matchType ?? this.matchType,
     enabled: enabled ?? this.enabled,
-    pausedUntil: clearPause ? null : (pausedUntil ?? this.pausedUntil),
     displayName: displayName ?? this.displayName,
     source: source ?? this.source,
     brandColor: brandColor ?? this.brandColor,
@@ -93,7 +85,6 @@ class WebBlockEntry extends Equatable {
     'pattern': pattern,
     'matchType': matchType.wire,
     'enabled': enabled,
-    'pausedUntil': pausedUntil?.millisecondsSinceEpoch,
     'displayName': displayName,
     'source': source.wire,
     'brandColor': brandColor,
@@ -105,7 +96,6 @@ class WebBlockEntry extends Equatable {
     pattern,
     matchType,
     enabled,
-    pausedUntil,
     displayName,
     source,
     brandColor,

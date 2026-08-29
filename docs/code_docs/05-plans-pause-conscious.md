@@ -88,7 +88,7 @@ startedAt ──pauseDuration──▶ pauseEnd ──cooldownDuration──▶ 
 
 ### Current live behaviour: no cooldown wind-down
 
-`SettingsCubit.startPause` constructs the session with **`cooldownDuration: Duration.zero`** and `planToResume: state.baseMode` (the sticky base — Block All *or* Conscious). So today a Pause is: *reel and website blocking suspended for the chosen window (whole-app locks stay enforced — [06] §2), then blocking returns immediately as the base mode* — the cooldown phase and its emoji band are **modelled but not exercised** by the current picker. The cooldown machinery (`cooldownProgressPct`, `EMOJI_PAUSE_COUNTDOWN_COOLDOWN`, `allowInCooldown`) is retained for a future graduated wind-down and should be treated as **planned / follow-up**, not live.
+`SettingsCubit.startPause` constructs the session with **`cooldownDuration: Duration.zero`** and `planToResume: state.baseMode` (the sticky base — Block All *or* Conscious). So today a Pause is: *reel and website blocking suspended for the chosen window (whole-app locks stay enforced — [06] §2, and so does any rule marked **Strict** — [27](27-rules-engine.md) §6), then blocking returns immediately as the base mode* — the cooldown phase and its emoji band are **modelled but not exercised** by the current picker. The cooldown machinery (`cooldownProgressPct`, `EMOJI_PAUSE_COUNTDOWN_COOLDOWN`, `allowInCooldown`) is retained for a future graduated wind-down and should be treated as **planned / follow-up**, not live.
 
 ### How Pause reaches the engine (derived enforcement)
 
@@ -122,7 +122,7 @@ Conscious lets reels play **only while the user has banked allowance by staying 
 
 - **Abstaining** (off any reel-bearing app): the bank fills at `1 / earnDivisor` of elapsed time → **+1 min per 10 min** (default). Capped at **10 min**.
 - **Watching** (a reel is on screen): the bank drains **1:1**.
-- **Empty bank**: the reel is booted (back-press) and blocking resumes until the user earns more.
+- **Empty bank**: the reel is booted (back-press) and the block screen is raised — from the accountant's own drain-to-empty tick as well as from the next detection ([25](25-block-screen.md) §3) — and blocking resumes until the user earns more.
 
 The running balance lives **natively** so it survives the Flutter UI being killed; Dart only mirrors it for display. There is **no Dart-side Conscious session** — unlike Pause, `AppSettings` holds nothing live for Conscious.
 
@@ -303,15 +303,19 @@ onDetected(...)  // allowance spent → fall through and block
 ```
 
 **A reel counts toward the allowance only after it's been watched for `MIN_VIEW_MS =
-2s`** (matching the awareness counter's dwell). So a quick flick-through (<2s) doesn't
-count, and a **single looping reel costs at most one count** — a `reelViewCounted`
-latch stops the same view being re-counted. Reels are still **scroll-delimited**
+2s`** — deliberately longer than the awareness counter's 1s "seen" dwell, because an
+allowance is spent on reels *watched*. So a quick flick-through (<2s) doesn't count,
+and a **single looping reel costs at most one count** — a `reelViewCounted` latch
+stops the same view being re-counted. Reels are still **scroll-delimited**
 (consecutive reels share one continuously-visible view-id, so `matches()` fires the
-whole time a reel is up), but a scroll only counts as an **advance to a new reel**
-once **≥ 2s have passed since the last count** (`lastReelCountMs`) — this debounces
-in-reel scrolls (comments / caption / carousel) so they don't burn the allowance or
-block the reel you're still watching. The advance scroll (`TYPE_VIEW_SCROLLED`) is
-still captured into `lastScrollAtMs` **before** the 150 ms per-package throttle.
+whole time a reel is up), but only a scroll that **lands on a different pager page**
+(`ReelTracker.settledPage(fromIndex, toIndex)` vs `oneReelPage`) stamps
+`lastScrollAtMs` — a comments-sheet scroll (multi-item list) or a snap-back onto the
+same reel never does — and it only counts as an **advance to a new reel** once **≥ 2s
+have passed since the last count** (`lastReelCountMs`). Together these keep in-reel
+scrolls (comments / caption / carousel) from burning the allowance or blocking the
+reel you're still watching. The advance scroll (`TYPE_VIEW_SCROLLED`) is still
+captured **before** the 150 ms per-package throttle.
 
 The **currently-playing reel is never blocked**; only a *fresh* reel detected after
 `reelsConsumed >= reelAllowance` is blocked (`emitReelSessionState(blocked = true)`,
@@ -328,14 +332,15 @@ full `allowReelOrBlock` / `countReel` walk.
   `reload()` / `onServiceConnected` do **not** reset it — only `resetReelSession()`
   (called from the imperative arm) does.
 - `armReelSession()` (native) zeroes the runtime dwell fields (`reelViewStartMs`,
-  `reelViewCounted`, `lastReelCountMs`, `lastScrollAtMs`), calls `reload()`, and emits
-  fresh state.
+  `reelViewCounted`, `lastReelCountMs`, `lastScrollAtMs`, `oneReelPage`), calls
+  `reload()`, and emits fresh state.
 
-> **`ponytail:` ceiling** (a comment in the service): reel identity is heuristic
-> (scroll + 2s dwell, no per-reel id) — a spurious scroll >2s after a count can still
-> be misread as an advance, and a fast scroll within 2s of a count is absorbed into
-> the current reel (a small leniency, safer than false-blocking). Accepted; the
-> upgrade path is content-based reel identity.
+> **`ponytail:` ceiling** (a comment in the service): reel identity is the pager page
+> at event time (no settle window, unlike the awareness counter's `ReelTracker`) plus
+> the 2s dwell — a spurious page change >2s after a count can still be misread as an
+> advance, and a fast advance within 2s of a count is absorbed into the current reel
+> (a small leniency, safer than false-blocking). Accepted; the upgrade path is to
+> drive this gate from `ReelTracker` too.
 
 ### 7.3 Reel-session state stream + Dart mirror
 

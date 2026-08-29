@@ -133,6 +133,7 @@ class EngineRepositoryImpl implements EngineRepository {
       'consciousMaxBankMs': SessionDefaults.consciousMaxBank.inMilliseconds,
       'blockAdultWebsites': settings.blockAdultWebsites,
       'blockWebsitesForBlockedApps': settings.blockWebsitesForBlockedApps,
+      'suppressNotifications': settings.suppressNotifications,
     });
   }
 
@@ -146,6 +147,37 @@ class EngineRepositoryImpl implements EngineRepository {
   @override
   Future<void> pushAppBlocklist(List<String> packages) =>
       _channel.pushAppBlocklist(packages);
+
+  @override
+  Future<void> pushNudgeConfig(AppSettings settings, List<String> packages) =>
+      _channel.pushNudgeConfig(
+        enabled: settings.nudgeEnabled,
+        packages: packages,
+        thresholdStepMs: settings.nudgeThresholdMinutes * 60 * 1000,
+        dailyCap: settings.nudgeDailyCap,
+      );
+
+  @override
+  Future<void> pushRules(String json, int nextBoundaryMs) =>
+      _channel.pushRules(json, nextBoundaryMs);
+
+  @override
+  Stream<int> ruleBoundaryStream() async* {
+    await for (final e in _channel.events()) {
+      if (e['type'] != ChannelEvents.ruleBoundary) continue;
+      yield (e['atMs'] as num?)?.toInt() ?? 0;
+    }
+  }
+
+  @override
+  Future<void> pushTemporaryUnblocks(String json) =>
+      _channel.pushTemporaryUnblocks(json);
+
+  @override
+  Future<String?> takePendingUnblock() => _channel.takePendingUnblock();
+
+  @override
+  Future<String?> takeNativeGrants() => _channel.takeNativeGrants();
 
   @override
   Future<void> performBack() => _channel.performBack();
@@ -184,4 +216,9 @@ class EngineRepositoryImpl implements EngineRepository {
       }
     }();
   }
+
+  /// Not cached: the user can install or uninstall a browser between visits,
+  /// and this runs once per screen open, not on the hot path.
+  @override
+  Future<List<String>?> unsupportedBrowsers() => _channel.unsupportedBrowsers();
 }

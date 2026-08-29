@@ -46,6 +46,7 @@ class _PermissionsScreenState extends State<PermissionsScreen>
     AppPermission.usageAccess => Icons.bar_chart,
     AppPermission.batteryOptimization => Icons.battery_charging_full,
     AppPermission.deviceAdmin => Icons.shield,
+    AppPermission.notificationListener => Icons.notifications_off,
   };
 
   @override

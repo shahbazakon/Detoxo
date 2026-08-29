@@ -52,8 +52,10 @@ YouTube. Detoxo only steps in when the endless video feed takes over.
 
 ### Reel & Short blocking
 Detoxo detects short-form video surfaces across popular apps and pulls you out the
-instant a feed starts. It focuses on the infinite-scroll parts — Reels, Shorts, and
-similar — while leaving the rest of the app usable.
+instant a feed starts, then shows its **block screen** — a full-screen card that says what
+was blocked and why, with **Go home**, **Open Detoxo** and **Back to the app** as the ways
+out. It focuses on the infinite-scroll parts — Reels, Shorts, and similar — while leaving the
+rest of the app usable.
 
 ### Blocking plans — pick your style
 Detoxo gives you four ways to handle the scroll, so it fits how *you* want to
@@ -91,13 +93,25 @@ even when blocking is turned off or paused, so you always get an honest number.
   you have left before it flips back to the daily total.
 - A **home-screen widget** puts "reels today" and your all-time total right on your
   launcher, so the number greets you every time you unlock your phone.
-- A quick-scroll heuristic keeps the count honest: a video only counts once you've
-  actually watched it for about 2 seconds — flicking past clips doesn't inflate the
-  number.
+- A settled-page rule keeps the count honest: a video only counts once you've
+  stopped on it for about a second, and the same reel never counts twice — flicking
+  past clips, half-swipes and scrolling the comments don't inflate the number.
 
 You can restyle both the bubble and the widget — different looks, sizes, colors, and
 an optional "the more you watch, the redder it gets" usage tint — so your counter
 matches your home screen and quietly reflects your habits.
+
+### Honest numbers — your real screen time
+Counting reels tells you about one habit; **Insights** (Activity → Insights) tells you
+about your day. It reads Android's own screen-time records — the same ones behind
+Digital Wellbeing — and shows your total screen time, how much of it went to
+distracting apps, how many times you picked up your phone, how often you switched
+apps, and where the time actually went.
+
+It is deliberately honest: if you haven't granted the optional Usage access
+permission, Detoxo shows you **nothing** rather than a screen of zeros that would look
+just like a quiet day. Everything stays on your device, and none of it is behind a
+paywall.
 
 ### App & website blocking, and daily limits
 Beyond reels, Detoxo lets you build a **blocklist** of distracting apps and websites.

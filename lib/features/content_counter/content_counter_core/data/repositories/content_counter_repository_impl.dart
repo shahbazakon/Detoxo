@@ -1,5 +1,6 @@
 import 'package:detoxo/core/constants/channel_constants.dart';
 import 'package:detoxo/core/platform_channels/engine_channel.dart';
+import 'package:detoxo/core/utils/app_logger.dart';
 import 'package:detoxo/features/blocking/shared/domain/entities/block_target.dart';
 import 'package:detoxo/features/blocking/shared/domain/repositories/blocking_repositories.dart';
 import 'package:detoxo/features/content_counter/content_counter_core/domain/entities/app_content_count.dart';
@@ -21,8 +22,16 @@ class ContentCounterRepositoryImpl implements ContentCounterRepository {
     final cached = _appIndex;
     if (cached != null) return cached;
     final index = <String, BlockTarget>{};
-    for (final t in await _config.loadBlockTargets()) {
-      index.putIfAbsent(t.packageName, () => t);
+    // The catalog only decorates the breakdown (names + icons). A catalog
+    // failure must not take the counter with it — fall back to bare package
+    // names and retry the catalog on the next read.
+    try {
+      for (final t in await _config.loadBlockTargets()) {
+        index.putIfAbsent(t.packageName, () => t);
+      }
+    } on Object catch (e) {
+      AppLogger.e('counter app index', e);
+      return index;
     }
     return _appIndex = index;
   }
@@ -37,7 +46,17 @@ class ContentCounterRepositoryImpl implements ContentCounterRepository {
     yield _fromMap(await _channel.contentCounterSnapshot(), index);
     await for (final e in _channel.events()) {
       if (e['type'] != ChannelEvents.contentCounted) continue;
-      yield _fromMap(e, index);
+      // A throw inside an async* body ends the generator for good, so one
+      // malformed event (a trust-boundary payload) must be skipped, not
+      // propagated — else the live count freezes for the session.
+      final ContentCount next;
+      try {
+        next = _fromMap(e, index);
+      } on Object catch (error) {
+        AppLogger.e('contentCounted payload', error);
+        continue;
+      }
+      yield next;
     }
   }
 

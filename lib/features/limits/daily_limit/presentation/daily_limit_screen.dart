@@ -1,6 +1,7 @@
 import 'package:detoxo/core/design_system/design_system.dart';
 import 'package:detoxo/core/widgets/common_widgets.dart';
 import 'package:detoxo/features/additional_feature/app_feedback/app_feedback.dart';
+import 'package:detoxo/features/content_counter/content_counter.dart';
 import 'package:detoxo/features/limits/daily_limit/domain/entities/daily_limit.dart';
 import 'package:detoxo/features/limits/daily_limit/presentation/daily_limit_cubit.dart';
 import 'package:flutter/material.dart';
@@ -8,6 +9,9 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 
 /// Reads and mutates the app-wide [DailyLimitCubit] (provided in `main.dart`),
 /// not a private instance — so a saved limit updates the dashboard ring live.
+/// "Used" is today's reel time from the native counter ([ContentCounterCubit]),
+/// the same meter that enforces the limit (the rules snapshot's daily reel
+/// limit entry).
 class DailyLimitScreen extends StatelessWidget {
   const DailyLimitScreen({super.key});
 
@@ -36,7 +40,8 @@ class _DailyLimitViewState extends State<_DailyLimitView> {
         child: BlocBuilder<DailyLimitCubit, DailyLimit>(
           builder: (context, limit) {
             final minutes = _draftMinutes ?? limit.limit.inMinutes.toDouble();
-            final consumed = limit.consumed.inMinutes;
+            final count = context.watch<ContentCounterCubit>().state;
+            final consumed = count.timeToday.inMinutes;
             return ListView(
               padding: const EdgeInsets.all(16),
               children: [
@@ -102,11 +107,21 @@ class _DailyLimitViewState extends State<_DailyLimitView> {
                   ),
                 ),
                 const SizedBox(height: 12),
-                const InfoBanner(
-                  text:
-                      'Usage counting is enforced by the native service on a real '
-                      'device with usage access granted.',
-                ),
+                if (count.loaded && !count.enabled)
+                  const InfoBanner(
+                    title: 'Reel counter is off',
+                    text:
+                        'The limit is measured by the reel counter, so it '
+                        'cannot be enforced until you turn the counter back on '
+                        'in Appearance.',
+                  )
+                else
+                  const InfoBanner(
+                    text:
+                        "When today's reel time reaches the limit, Detoxo "
+                        'blocks every reel feed until midnight. A Pause lifts '
+                        'it like any other block.',
+                  ),
               ],
             );
           },

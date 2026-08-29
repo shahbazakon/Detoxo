@@ -4,6 +4,7 @@ import 'package:detoxo/features/blocking/plans/domain/entities/reel_session_stat
 import 'package:detoxo/features/blocking/plans/domain/entities/sessions.dart';
 import 'package:detoxo/features/blocking/shared/domain/entities/app_settings.dart';
 import 'package:detoxo/features/blocking/shared/domain/entities/enums.dart';
+import 'package:detoxo/features/blocking/shared/domain/nudge_sync.dart';
 import 'package:detoxo/features/blocking/shared/domain/repositories/blocking_repositories.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 
@@ -93,8 +94,35 @@ class SettingsCubit extends Cubit<AppSettings> {
   Future<void> setMasterEnabled({required bool enabled}) =>
       _commit((s) => s.copyWith(masterEnabled: enabled));
 
+  /// Notification suppression. The push is what binds/unbinds the native
+  /// listener, so this must go through the normal commit path — turning it off
+  /// is how Detoxo stops receiving notifications at all.
+  Future<void> setSuppressNotifications({required bool enabled}) =>
+      _commit((s) => s.copyWith(suppressNotifications: enabled));
+
   Future<void> setVibration({required bool enabled}) =>
       _commit((s) => s.copyWith(vibrationEnabled: enabled));
+
+  // ── Soft nudge ─────────────────────────────────────────────────────────────
+  // The three fields ride in [AppSettings] but travel to native over their own
+  // command (they configure the dwell machine, not the block engine), so each
+  // setter follows the normal commit with a nudge push.
+
+  Future<void> setNudgeEnabled({required bool enabled}) =>
+      _commitNudge((s) => s.copyWith(nudgeEnabled: enabled));
+
+  /// Minutes in one app before the first card, and between each one after.
+  Future<void> setNudgeThresholdMinutes(int minutes) => _commitNudge(
+    (s) => s.copyWith(nudgeThresholdMinutes: minutes.clamp(1, 60)),
+  );
+
+  Future<void> setNudgeDailyCap(int cap) =>
+      _commitNudge((s) => s.copyWith(nudgeDailyCap: cap.clamp(1, 50)));
+
+  Future<void> _commitNudge(AppSettings Function(AppSettings) update) async {
+    await _commit(update);
+    await _engine.pushNudgeConfig(state, nudgePackages());
+  }
 
   /// Show/hide the global feedback button in screen app bars. UI-only (like
   /// [setThemeMode]); persisted through the single [_commit] path.

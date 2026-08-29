@@ -14,6 +14,22 @@ Color toneColor(BuildContext context, AppTone tone) => switch (tone) {
   AppTone.danger => AppColors.danger,
 };
 
+/// Text colour to use ON a [toneColor] fill. The tone is a *surface* accent:
+/// painted as 11 sp label text over the pill's 16 %-alpha fill it lands around
+/// 2:1 (`warning`) and 3.2:1 (`success`) in light theme, both under WCAG AA.
+/// Dark theme already clears AA comfortably, so only light is darkened — to a
+/// fixed lightness ceiling, which holds for any hue.
+Color onToneColor(BuildContext context, AppTone tone) {
+  final color = toneColor(context, tone);
+  if (Theme.of(context).brightness == Brightness.dark) return color;
+  final hsl = HSLColor.fromColor(color);
+  return hsl.lightness <= _maxOnToneLightness
+      ? color
+      : hsl.withLightness(_maxOnToneLightness).toColor();
+}
+
+const double _maxOnToneLightness = 0.32;
+
 /// A small rounded status chip — "Required", "Premium", "Active". Replaces the
 /// ad-hoc inline chips that were scattered across screens.
 class Pill extends StatelessWidget {
@@ -31,7 +47,16 @@ class Pill extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final color = toneColor(context, tone);
+    final onTone = onToneColor(context, tone);
     return Container(
+      // A pill lives in trailing slots that are NOT flex children (see
+      // GlassListTile — making one squeezes the title's Expanded instead), so
+      // it has to bound itself: a long label ("Needs usage access") at large
+      // system font scale otherwise overflows the row it sits in. Ellipsis
+      // beats overflow, and no status chip is legitimately this wide.
+      constraints: BoxConstraints(
+        maxWidth: MediaQuery.sizeOf(context).width * 0.4,
+      ),
       padding: const EdgeInsets.symmetric(
         horizontal: AppSpacing.sm,
         vertical: AppSpacing.xxs,
@@ -45,14 +70,20 @@ class Pill extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           if (icon != null) ...[
-            Icon(icon, size: 13, color: color),
+            Icon(icon, size: 13, color: onTone),
             const SizedBox(width: 4),
           ],
-          Text(
-            label,
-            style: Theme.of(context).textTheme.labelSmall?.copyWith(
-              color: color,
-              fontWeight: FontWeight.w700,
+          // Flexible + ellipsis: a pill is a trailing slot, and a long label
+          // ("Needs usage access") must give way rather than overflow the row.
+          Flexible(
+            child: Text(
+              label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                color: onTone,
+                fontWeight: FontWeight.w700,
+              ),
             ),
           ),
         ],

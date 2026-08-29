@@ -1,7 +1,6 @@
 package com.errorxperts.detoxo.channels
 
 import android.app.Activity
-import android.app.AppOpsManager
 import android.app.admin.DevicePolicyManager
 import android.appwidget.AppWidgetManager
 import android.content.ComponentName
@@ -17,16 +16,21 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.PowerManager
-import android.os.Process
 import android.provider.Settings
 import android.view.WindowManager
 import com.errorxperts.detoxo.MainActivity
 import com.errorxperts.detoxo.accessibility.DetoxoAccessibilityService
 import com.errorxperts.detoxo.admin.DetoxoDeviceAdminReceiver
 import com.errorxperts.detoxo.engine.AccessibilityCheck
+import com.errorxperts.detoxo.engine.BrowserUrlExtractor
 import com.errorxperts.detoxo.engine.ConfigStore
 import com.errorxperts.detoxo.engine.ContentCounterStore
 import com.errorxperts.detoxo.engine.DateKeys
+import com.errorxperts.detoxo.engine.NotificationListenerCheck
+import com.errorxperts.detoxo.engine.UsageQuery
+import com.errorxperts.detoxo.notifications.DetoxoNotificationListener
+import com.errorxperts.detoxo.overlay.BlockScreenOverlay
+import com.errorxperts.detoxo.overlay.BlockScreenPayload
 import com.errorxperts.detoxo.widget.ContentCounterWidgetProvider
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
@@ -110,6 +114,17 @@ class CommandHandler(
                 call.argument<Boolean>("blockWebsitesForBlockedApps")?.let {
                     store.blockWebsitesForBlockedApps = it
                 }
+                // Notification suppression drives the LISTENER BINDING, not just
+                // a flag: while it is off Detoxo unbinds, so it receives no
+                // notifications at all rather than receiving every one on the
+                // device and discarding it. Only on a real change — requestRebind
+                // on every settings push would churn the binding.
+                call.argument<Boolean>("suppressNotifications")?.let {
+                    if (it != store.suppressNotifications) {
+                        store.suppressNotifications = it
+                        DetoxoNotificationListener.syncBinding(context, it)
+                    }
+                }
                 DetoxoAccessibilityService.instance?.reload()
                 result.success(true)
             }
@@ -157,6 +172,80 @@ class CommandHandler(
                     }
                 }
                 result.success(true)
+            }
+            "pushNudgeConfig" -> {
+                // The advisory dwell nudge: its switch, its tuning and the apps
+                // it watches. Same fail-safe contract as pushProtectedApps —
+                // each absent/malformed arg is an independent no-op, never a
+                // wipe. One refresh at the end whatever changed: unlike a
+                // blocklist this touches no hot-path set, so there is nothing
+                // to save by diffing each field.
+                call.argument<Boolean>("enabled")?.let { store.nudgeEnabled = it }
+                call.argument<List<*>>("packages")?.let { list ->
+                    store.nudgePackages = list.filterIsInstance<String>().toSet()
+                }
+                call.argument<Number>("thresholdStepMs")?.let {
+                    store.nudgeStepMs = it.toLong()
+                }
+                call.argument<Number>("dailyCap")?.let { store.nudgeDailyCap = it.toInt() }
+                DetoxoAccessibilityService.instance?.refreshNudgeConfig()
+                result.success(true)
+            }
+            "pushRules" -> {
+                // The resolved rules snapshot (schedules as absolute windows,
+                // spent limits, the daily reel limit's meter). Same fail-safe
+                // contract as pushWebBlocklist: an absent or malformed json is a
+                // no-op, never a wipe (clearing requires an explicit "[]"); an
+                // unchanged json skips the prefs rewrite. The boundary is always
+                // written — it moves even when the snapshot does not — and the
+                // engine re-parses only when the snapshot string actually
+                // changed (RuleEngine.setSnapshot holds the last source).
+                // Clamped like armReelSession below: a negative boundary would
+                // read as "none" and silently stop the ruleBoundary event for
+                // the life of the snapshot.
+                call.argument<Number>("nextBoundaryMs")?.let {
+                    store.nextBoundaryMs = it.toLong().coerceAtLeast(0L)
+                }
+                call.argument<String>("json")?.let { json ->
+                    if (json != store.rulesJson && runCatching { JSONArray(json) }.isSuccess) {
+                        store.rulesJson = json
+                    }
+                }
+                DetoxoAccessibilityService.instance?.refreshRules()
+                result.success(true)
+            }
+            "pushTemporaryUnblocks" -> {
+                // M8's per-target grants ("Instagram for 15 minutes"). The
+                // pushWebBlocklist arm verbatim: an absent or malformed json is
+                // a no-op, never a wipe (clearing requires an explicit "[]"), an
+                // unchanged payload skips the prefs rewrite, and only the narrow
+                // registry is refreshed — never a full reload().
+                call.argument<String>("json")?.let { json ->
+                    if (json != store.temporaryUnblocksJson &&
+                        runCatching { JSONArray(json) }.isSuccess
+                    ) {
+                        store.temporaryUnblocksJson = json
+                        DetoxoAccessibilityService.instance?.refreshTemporaryUnblocks()
+                    }
+                }
+                result.success(true)
+            }
+            "takePendingUnblock" -> {
+                // Read-and-CLEAR, exactly once: the wall armed "TYPE|id" when the
+                // user tapped "Unblock for a while", and Dart opens the duration
+                // sheet for it on the launch that tap triggered. Replaying a
+                // sticky event instead would re-offer a bypass for a target from
+                // a previous session on the next engine attach — and so would a
+                // key with no expiry, which is why the store stamps it and drops
+                // anything older than its TTL.
+                result.success(store.takePendingUnblock(System.currentTimeMillis()))
+            }
+            "takeNativeGrants" -> {
+                // EVO-050: grants the user took ON the wall, already enforced
+                // natively. Read-and-clear, so Dart absorbs each exactly once
+                // and its next push — which rewrites the whole enforced list —
+                // carries them instead of deleting them.
+                result.success(store.takeNativeGrants())
             }
             "consciousState" -> result.success(
                 DetoxoAccessibilityService.instance?.consciousSnapshot() ?: mapOf(
@@ -214,6 +303,41 @@ class CommandHandler(
             "hasUsageAccess" -> result.success(hasUsageAccess())
             "openUsageAccessSettings" ->
                 result.success(launch(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)))
+            "isNotificationListenerEnabled" ->
+                result.success(NotificationListenerCheck.isEnabled(context))
+            "openNotificationListenerSettings" ->
+                result.success(launch(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS)))
+            "queryAppUsage", "queryUsageEvents" -> {
+                // The two arms that THROW: an empty list is indistinguishable
+                // from a genuinely quiet day, so a missing grant or bad bounds
+                // must reach Dart as an error, never as a confident zero
+                // (EVO-014). Everything else in this handler stays fail-safe.
+                val start = call.argument<Number>("startMillis")?.toLong()
+                val end = call.argument<Number>("endMillis")?.toLong()
+                if (start == null || end == null || !UsageQuery.validBounds(start, end)) {
+                    result.error("BAD_ARGS", "startMillis/endMillis missing or invalid", null)
+                    return
+                }
+                if (!hasUsageAccess()) {
+                    result.error("USAGE_ACCESS_DENIED", "Usage access is not granted", null)
+                    return
+                }
+                val wantEvents = call.method == "queryUsageEvents"
+                // A day of events is a few hundred rows; a week a few thousand.
+                // Same off-thread / post-back pattern as installedApps below.
+                ioExecutor.execute {
+                    val out = runCatching {
+                        if (wantEvents) UsageQuery.events(context, start, end)
+                        else UsageQuery.appUsage(context, start, end)
+                    }
+                    mainHandler.post {
+                        out.fold(
+                            { result.success(it) },
+                            { result.error("USAGE_QUERY_FAILED", it.message, null) },
+                        )
+                    }
+                }
+            }
             "isIgnoringBatteryOptimizations" -> result.success(isIgnoringBattery())
             "requestIgnoreBatteryOptimizations" -> result.success(
                 launch(
@@ -242,6 +366,36 @@ class CommandHandler(
                 DetoxoAccessibilityService.instance?.lockScreen()
                 result.success(true)
             }
+            // ── Block screen (intervention wall) ──────────────────────────
+            // The overlay is an object that needs only a Context, so a style
+            // preview from Dart works with the service down — unlike the three
+            // service-routed arms above.
+            "showBlockScreen" -> {
+                val payload = BlockScreenPayload.fromMap(call.arguments as? Map<*, *>)?.sanitised()
+                result.success(
+                    payload != null &&
+                        BlockScreenOverlay.show(context, payload, setOf(context.packageName), preview = true),
+                )
+            }
+            "hideBlockScreen" -> {
+                BlockScreenOverlay.hide()
+                result.success(true)
+            }
+            "isBlockScreenShowing" -> result.success(BlockScreenOverlay.isShowing())
+            "goHome" -> {
+                BlockScreenOverlay.goHome(context)
+                result.success(true)
+            }
+            "setBlockScreenStyle" -> {
+                // Persist, then live-rebuild a showing wall (the setCounterStyle
+                // shape). A malformed style is skipped, not a crash.
+                (call.argument<Any?>("style") as? Map<*, *>)?.let {
+                    store.blockScreenStyleJson = JSONObject(it).toString()
+                    BlockScreenOverlay.onStyleChanged(context)
+                }
+                result.success(true)
+            }
+            "blockScreenStyle" -> result.success(jsonToMap(store.blockScreenStyleJson))
             "setSecureScreen" -> {
                 // PIN lock privacy: FLAG_SECURE hides the window in Recents and
                 // blocks screenshots. Runs on the platform (UI) thread.
@@ -277,14 +431,18 @@ class CommandHandler(
                     ?: ContentCounterStore(context).snapshot(dateKey())
                 result.success(snap)
             }
+            // A missing/malformed flag is a no-op (like pushConfig), never a
+            // silent "on": the persisted value is the user's choice.
             "setContentCounterEnabled" -> {
-                val on = call.argument<Boolean>("enabled") ?: true
+                val on = call.argument<Boolean>("enabled")
+                    ?: return result.success(false)
                 ContentCounterStore(context).enabled = on
                 DetoxoAccessibilityService.instance?.contentCounter?.setEnabled(on)
                 result.success(true)
             }
             "setContentBubbleEnabled" -> {
-                val on = call.argument<Boolean>("enabled") ?: true
+                val on = call.argument<Boolean>("enabled")
+                    ?: return result.success(false)
                 ContentCounterStore(context).bubbleEnabled = on
                 DetoxoAccessibilityService.instance?.contentCounter?.setBubbleEnabled(on)
                 result.success(true)
@@ -297,17 +455,18 @@ class CommandHandler(
                 result.success(true)
             }
             "setCounterStyle" -> {
-                // Persist the changed surface(s), then live-re-render: the visible
-                // bubble via the service, and every pinned widget directly.
+                // Persist the changed surface(s), then live-re-render ONLY that
+                // surface: the visible bubble via the service, every pinned
+                // widget directly. A malformed surface is skipped, not a crash.
                 val store = ContentCounterStore(context)
-                call.argument<Map<String, Any?>>("bubble")?.let {
+                (call.argument<Any?>("bubble") as? Map<*, *>)?.let {
                     store.bubbleStyleJson = JSONObject(it).toString()
+                    DetoxoAccessibilityService.instance?.contentCounter?.onStyleChanged()
                 }
-                call.argument<Map<String, Any?>>("widget")?.let {
+                (call.argument<Any?>("widget") as? Map<*, *>)?.let {
                     store.widgetStyleJson = JSONObject(it).toString()
+                    ContentCounterWidgetProvider.pushUpdate(context, store.snapshot(dateKey()))
                 }
-                DetoxoAccessibilityService.instance?.contentCounter?.onStyleChanged()
-                ContentCounterWidgetProvider.pushUpdate(context, store.snapshot(dateKey()))
                 result.success(true)
             }
             "pinContentWidget" -> result.success(pinContentWidget())
@@ -318,6 +477,14 @@ class CommandHandler(
                 ioExecutor.execute {
                     val packages = queryLaunchablePackages()
                     mainHandler.post { result.success(packages) }
+                }
+            }
+            // EVO-047: browsers Detoxo cannot enforce in, so the Website
+            // blocker can say so instead of looking protective.
+            "unsupportedBrowsers" -> {
+                ioExecutor.execute {
+                    val browsers = queryUnsupportedBrowsers()
+                    mainHandler.post { result.success(browsers) }
                 }
             }
             "installedApps" -> {
@@ -345,6 +512,51 @@ class CommandHandler(
         } else {
             @Suppress("DEPRECATION")
             pm.queryIntentActivities(intent, 0)
+        }
+    }
+
+    /**
+     * Installed browsers the web blocker CANNOT enforce in: everything that
+     * resolves ACTION_VIEW for http/https minus [BrowserUrlExtractor.isBrowser].
+     *
+     * Resolving that intent is the definitive "is a browser" test, and the
+     * manifest already declares both `<queries>` intents for it, so no
+     * QUERY_ALL_PACKAGES is involved. Returns `{packageName, label}` per app,
+     * sorted by label; empty when everything installed is covered, and null
+     * only on total failure (Dart then shows no notice rather than a wrong one).
+     */
+    private fun queryUnsupportedBrowsers(): List<Map<String, String>>? {
+        return try {
+            val pm = context.packageManager
+            val seen = LinkedHashSet<String>()
+            for (scheme in arrayOf("https", "http")) {
+                val intent = Intent(Intent.ACTION_VIEW, Uri.parse("$scheme://example.com"))
+                val resolved =
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                        pm.queryIntentActivities(intent, PackageManager.ResolveInfoFlags.of(0L))
+                    } else {
+                        @Suppress("DEPRECATION")
+                        pm.queryIntentActivities(intent, 0)
+                    }
+                for (info in resolved) {
+                    info.activityInfo?.packageName?.let { seen.add(it) }
+                }
+            }
+            seen
+                .asSequence()
+                .filter { it != context.packageName && !BrowserUrlExtractor.isBrowser(it) }
+                .map { pkg ->
+                    val label = try {
+                        pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+                    } catch (_: Throwable) {
+                        pkg
+                    }
+                    mapOf("packageName" to pkg, "label" to label)
+                }
+                .sortedBy { it["label"]?.lowercase() ?: "" }
+                .toList()
+        } catch (_: Throwable) {
+            null
         }
     }
 
@@ -431,26 +643,26 @@ class CommandHandler(
 
     private fun dateKey(): String = DateKeys.today()
 
-    private fun isAccessibilityEnabled(): Boolean = AccessibilityCheck.isEnabled(context)
-
-    private fun hasUsageAccess(): Boolean {
+    /** `{}` for an empty or malformed JSON object — a persisted style never fails to load. */
+    private fun jsonToMap(json: String): Map<String, Any?> {
+        if (json.isEmpty()) return emptyMap()
         return try {
-            val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
-            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                appOps.unsafeCheckOpNoThrow(
-                    AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), context.packageName,
-                )
-            } else {
-                @Suppress("DEPRECATION")
-                appOps.checkOpNoThrow(
-                    AppOpsManager.OPSTR_GET_USAGE_STATS, Process.myUid(), context.packageName,
-                )
+            val o = JSONObject(json)
+            val out = HashMap<String, Any?>()
+            for (key in o.keys()) {
+                val v = o.opt(key)
+                out[key] = if (v == JSONObject.NULL) null else v
             }
-            mode == AppOpsManager.MODE_ALLOWED
+            out
         } catch (_: Throwable) {
-            false
+            emptyMap()
         }
     }
+
+    private fun isAccessibilityEnabled(): Boolean = AccessibilityCheck.isEnabled(context)
+
+    /** One AppOps check for the whole native side — the block screen reads it too (EVO-027). */
+    private fun hasUsageAccess(): Boolean = UsageQuery.hasAccess(context)
 
     private fun isIgnoringBattery(): Boolean {
         val pm = context.getSystemService(Context.POWER_SERVICE) as PowerManager

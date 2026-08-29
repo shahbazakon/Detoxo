@@ -38,7 +38,9 @@
         android:label="Detoxo"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher"
-        android:enableOnBackInvokedCallback="true">
+        android:enableOnBackInvokedCallback="true"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules">
 
         <!-- local_auth needs a FlutterFragmentActivity host. -->
         <activity
@@ -101,6 +103,24 @@
             android:name=".receivers.WatchdogJobService"
             android:permission="android.permission.BIND_JOB_SERVICE"
             android:exported="false"/>
+
+        <!-- Notification suppression: cancels notifications from apps that are
+             blocked right now, so a locked app can't advertise itself back.
+             OFF by default and bound only while the user's toggle is on (see
+             DetoxoNotificationListener.syncBinding) — off means Detoxo receives
+             nothing. The BIND_ permission is declared on the tag, not as a
+             <uses-permission>; the system holds it, not us. Reads a
+             notification's package name, key and category — never its
+             content (title, text, sender, images). -->
+        <service
+            android:name=".notifications.DetoxoNotificationListener"
+            android:exported="false"
+            android:label="@string/notification_listener_label"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService"/>
+            </intent-filter>
+        </service>
 
         <!-- Home-screen reel counter widget. Data comes from detoxo_engine_prefs
              (ContentCounterStore); live updates are pushed natively by the

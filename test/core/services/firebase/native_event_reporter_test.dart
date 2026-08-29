@@ -39,6 +39,9 @@ void main() {
     when(
       () => analytics.logWebBlocked(mode: any(named: 'mode')),
     ).thenAnswer((_) async {});
+    when(
+      () => analytics.logBlockScreenAction(action: any(named: 'action')),
+    ).thenAnswer((_) async {});
     when(() => crash.setKey(any(), any())).thenAnswer((_) async {});
     reporter = FirebaseNativeEventReporter(engine, analytics, crash)..start();
   });
@@ -84,6 +87,32 @@ void main() {
         platform: any(named: 'platform'),
         mode: any(named: 'mode'),
       ),
+    );
+  });
+
+  test('blockScreenAction logs the action token only', () async {
+    controller.add({
+      'type': ChannelEvents.blockScreenAction,
+      'action': 'GO_HOME',
+      'referenceType': 'WEBSITE',
+      'referenceId': 'private.example.com',
+      'preview': false,
+    });
+    await pump();
+
+    verify(() => analytics.logBlockScreenAction(action: 'GO_HOME')).called(1);
+  });
+
+  test('a preview wall from the editor is not an intervention', () async {
+    controller.add({
+      'type': ChannelEvents.blockScreenAction,
+      'action': 'DISMISS',
+      'preview': true,
+    });
+    await pump();
+
+    verifyNever(
+      () => analytics.logBlockScreenAction(action: any(named: 'action')),
     );
   });
 

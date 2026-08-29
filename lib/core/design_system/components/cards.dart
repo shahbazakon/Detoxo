@@ -69,44 +69,62 @@ class StatCard extends StatelessWidget {
   final String? unit;
   final TrendDelta? trend;
 
+  /// What a screen reader hears: one sentence, not the three loose nodes the
+  /// visual layout happens to produce.
+  String _semanticLabel() {
+    final trailing = trend == null
+        ? ''
+        : ', ${trend!.up ? 'up' : 'down'} ${trend!.percent} percent';
+    return '$label: $value${unit == null ? '' : ' $unit'}$trailing';
+  }
+
   @override
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
-    return GlassContainer(
-      enableBlur: false,
-      padding: const EdgeInsets.all(14),
-      tintTop: AppColors.seed.withValues(alpha: 0.18),
-      tintBottom: AppColors.seed.withValues(alpha: 0.05),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              Icon(icon, color: context.accent),
-              if (trend != null)
-                AppBadge.label(
-                  '${trend!.up ? '▲' : '▼'} ${trend!.percent}%',
-                  tone: trend!.up ? AppTone.success : AppTone.danger,
+    // The count-up is decoration. Honour the OS "remove animations" setting,
+    // and keep the per-frame tween churn out of the semantics tree entirely —
+    // otherwise TalkBack reads every intermediate number (the
+    // `ReelCounterCard` rule).
+    final reduce = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
+    return Semantics(
+      label: _semanticLabel(),
+      excludeSemantics: true,
+      child: GlassContainer(
+        enableBlur: false,
+        padding: const EdgeInsets.all(14),
+        tintTop: AppColors.seed.withValues(alpha: 0.18),
+        tintBottom: AppColors.seed.withValues(alpha: 0.05),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Icon(icon, color: context.accent),
+                if (trend != null)
+                  AppBadge.label(
+                    '${trend!.up ? '▲' : '▼'} ${trend!.percent}%',
+                    tone: trend!.up ? AppTone.success : AppTone.danger,
+                  ),
+              ],
+            ),
+            const SizedBox(height: AppSpacing.xs),
+            TweenAnimationBuilder<int>(
+              key: ValueKey(value),
+              tween: IntTween(begin: 0, end: value),
+              duration: reduce ? Duration.zero : AppDurations.slow,
+              curve: AppCurves.standard,
+              builder: (context, v, _) => Text(
+                unit == null ? '$v' : '$v $unit',
+                style: text.headlineSmall?.copyWith(
+                  fontWeight: FontWeight.w800,
+                  fontFeatures: const [FontFeature.tabularFigures()],
                 ),
-            ],
-          ),
-          const SizedBox(height: AppSpacing.xs),
-          TweenAnimationBuilder<int>(
-            key: ValueKey(value),
-            tween: IntTween(begin: 0, end: value),
-            duration: AppDurations.slow,
-            curve: AppCurves.standard,
-            builder: (context, v, _) => Text(
-              unit == null ? '$v' : '$v $unit',
-              style: text.headlineSmall?.copyWith(
-                fontWeight: FontWeight.w800,
-                fontFeatures: const [FontFeature.tabularFigures()],
               ),
             ),
-          ),
-          Text(label, style: text.bodySmall),
-        ],
+            Text(label, style: text.bodySmall),
+          ],
+        ),
       ),
     );
   }

@@ -115,7 +115,8 @@ object WidgetBitmapRenderer {
 
     // ── Palette ──────────────────────────────────────────────────────────────────
 
-    private fun paletteFor(background: String, dark: Boolean, count: Int): Palette {
+    /** Shared with the block screen so both surfaces read from one palette table. */
+    internal fun paletteFor(background: String, dark: Boolean, count: Int): Palette {
         val textPrimary = if (dark) 0xFFFFFFFF.toInt() else 0xFF14151A.toInt()
         val textAccent = if (dark) 0xFF44E2CD.toInt() else 0xFF12A594.toInt()
         val textMuted = if (dark) 0xFFB8C0D9.toInt() else 0xFF5A6072.toInt()
@@ -156,31 +157,12 @@ object WidgetBitmapRenderer {
         )
     }
 
-    private fun isSystemDark(context: Context): Boolean =
+    internal fun isSystemDark(context: Context): Boolean =
         (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
             Configuration.UI_MODE_NIGHT_YES
 
-    /** Linear RGB blend of [a] over [b] by [t] (0 = b, 1 = a); result is opaque. */
-    private fun blend(a: Int, b: Int, t: Float): Int {
-        fun ch(shift: Int): Int =
-            (((a ushr shift) and 0xFF) * t + ((b ushr shift) and 0xFF) * (1f - t))
-                .roundToInt().coerceIn(0, 255)
-        return (0xFF shl 24) or (ch(16) shl 16) or (ch(8) shl 8) or ch(0)
-    }
-
-    private fun withAlpha(color: Int, alpha: Int): Int = (alpha shl 24) or (color and 0x00FFFFFF)
-
     private val BOLD = Typeface.create(Typeface.DEFAULT, Typeface.BOLD)
     private const val MAX_PX = 1200
-
-    private data class Palette(
-        val bgTop: Int,
-        val bgBottom: Int,
-        val stroke: Int,
-        val today: Int,
-        val label: Int,
-        val total: Int,
-    )
 
     private data class Line(
         val text: String,
@@ -189,6 +171,26 @@ object WidgetBitmapRenderer {
         val color: Int,
     )
 }
+
+/** One surface's colours: the widget face and the block screen read the same table. */
+internal data class Palette(
+    val bgTop: Int,
+    val bgBottom: Int,
+    val stroke: Int,
+    val today: Int,
+    val label: Int,
+    val total: Int,
+)
+
+/** Linear RGB blend of [a] over [b] by [t] (0 = b, 1 = a); result is opaque. */
+internal fun blend(a: Int, b: Int, t: Float): Int {
+    fun ch(shift: Int): Int =
+        (((a ushr shift) and 0xFF) * t + ((b ushr shift) and 0xFF) * (1f - t))
+            .roundToInt().coerceIn(0, 255)
+    return (0xFF shl 24) or (ch(16) shl 16) or (ch(8) shl 8) or ch(0)
+}
+
+internal fun withAlpha(color: Int, alpha: Int): Int = (alpha shl 24) or (color and 0x00FFFFFF)
 
 /**
  * Immutable widget appearance parsed from the JSON persisted by the Dart

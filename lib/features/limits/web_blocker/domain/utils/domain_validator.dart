@@ -4,15 +4,23 @@
 /// path, query, fragment or port); rejects empty input, spaces, scheme-only
 /// text and single-label hosts.
 ///
-/// Deliberate limits, matching what the native matcher can handle: ASCII
-/// hostnames only (no IDN — paste the punycode form instead), no IPv4/IPv6
-/// literals, TLD of 2–24 letters.
+/// Deliberate limits, matching what the native matcher (`HOST_GUARD` in
+/// `BrowserUrlExtractor.kt`) can handle: ASCII hostnames only, no IPv4/IPv6
+/// literals, and a TLD of 2–24 **letters**.
+///
+/// That last part rules out IDN in both halves: a punycode LABEL is fine
+/// (`xn--80ak6aa92e.com`), but a punycode TLD is not (`.xn--p1ai`, `.xn--fiqs8s`)
+/// because it carries digits and hyphens. Sites on one are unblockable — the
+/// native guard would reject them too, so widening only here would not help.
 abstract final class DomainValidator {
   // One or more dot-separated labels (letters/digits/hyphens, not edge hyphens)
   // followed by a 2–24 character TLD.
   static final RegExp _host = RegExp(
     r'^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,24}$',
   );
+
+  /// Longest legal fully-qualified hostname (RFC 1035).
+  static const _maxHostLength = 253;
 
   static const invalidMessage = 'Enter a valid domain like youtube.com';
 
@@ -47,6 +55,9 @@ abstract final class DomainValidator {
     s = s.replaceFirst(RegExp(r'^www\.'), '');
     s = s.replaceFirst(RegExp(r'\.$'), ''); // trailing-dot FQDN form
     if (s.isEmpty || s.contains(' ') || !s.contains('.')) return null;
+    // RFC 1035 ceiling. Enforced HERE, not by the text field, so a pasted
+    // 2000-character host cannot reach the store and the pushed wire blob.
+    if (s.length > _maxHostLength) return null;
     return _host.hasMatch(s) ? s : null;
   }
 }

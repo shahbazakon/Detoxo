@@ -86,6 +86,12 @@ android {
 
 dependencies {
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs:2.1.4")
+    // Plain JVM tests for the Android-free engine logic (engine/ReelTracker):
+    // `cd android && ./gradlew :app:testDebugUnitTest`.
+    testImplementation("junit:junit:4.13.2")
+    // org.json is a stub in the unit-test android.jar (every call throws "not
+    // mocked"); the real artifact lets RuleEngine.parse run on the JVM.
+    testImplementation("org.json:json:20240303")
 }
 
 kotlin {

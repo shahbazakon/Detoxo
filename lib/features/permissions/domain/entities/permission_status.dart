@@ -60,6 +60,11 @@ enum AppPermission {
     'Uninstall protection',
     'Optional uninstall protection.',
     required: false,
+  ),
+  notificationListener(
+    'Notification access',
+    'Silences notifications from apps you have locked.',
+    required: false,
   );
 
   const AppPermission(this.label, this.why, {required this.required});
@@ -70,5 +75,8 @@ enum AppPermission {
   /// Toggles Android's restricted-settings (13/14) / Enhanced Confirmation Mode
   /// (15+) gate can silently refuse when the installer isn't trusted.
   bool get restrictedWhenSideloaded =>
-      this == accessibility || this == overlay || this == deviceAdmin;
+      this == accessibility ||
+      this == overlay ||
+      this == deviceAdmin ||
+      this == notificationListener;
 }

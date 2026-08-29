@@ -130,6 +130,30 @@ void main() {
     });
   });
 
+  group('StreakCubit.observe before load', () {
+    test(
+      'is ignored — the empty default must never overwrite the store',
+      () async {
+        final repo = _MemStreakRepo(
+          const Streak(base: 6, lastDay: '02-01-2026', todayFailed: false),
+        );
+        final cubit = StreakCubit(repo);
+
+        // The dashboard hero observes post-frame on its first build, before
+        // load()'s continuation has emitted. This used to persist
+        // {base: 0, lastDay: today, todayFailed: true} over the real streak.
+        await cubit.observe(now: DateTime(2026, 1, 3), underLimit: false);
+        expect(repo.saves, 0);
+        expect(cubit.state, const Streak());
+
+        await cubit.load();
+        await cubit.observe(now: DateTime(2026, 1, 3), underLimit: true);
+        expect(cubit.state.count, 8);
+        await cubit.close();
+      },
+    );
+  });
+
   group('StreakCubit.observe day arithmetic', () {
     test(
       'carries the streak across midnight on the DST spring-forward day',
@@ -161,10 +185,14 @@ void main() {
 class _MemStreakRepo implements StreakRepository {
   _MemStreakRepo(this._stored);
   Streak _stored;
+  int saves = 0;
 
   @override
   Future<Streak> load() async => _stored;
 
   @override
-  Future<void> save(Streak streak) async => _stored = streak;
+  Future<void> save(Streak streak) async {
+    saves++;
+    _stored = streak;
+  }
 }

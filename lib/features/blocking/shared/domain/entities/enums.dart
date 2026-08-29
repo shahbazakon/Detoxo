@@ -20,6 +20,18 @@ enum BlockingPlan {
   );
 }
 
+/// The plan's user-facing name — the one place a wire token becomes a label.
+/// `BlockingPlan.curious` is the legacy wire for **Conscious** and must never
+/// be shown; `oneReel` is "One Reel" for an allowance of 1 and "Unblock" for
+/// more (the dashboard's rule). Null → '' (no chip on the block screen).
+String planLabel(BlockingPlan? plan, {int allowance = 1}) => switch (plan) {
+  null => '',
+  BlockingPlan.curious => 'Conscious',
+  BlockingPlan.oneReel => allowance <= 1 ? 'One Reel' : 'Unblock',
+  BlockingPlan.blockAll => 'Block All',
+  BlockingPlan.paused => 'Paused',
+};
+
 /// What happens when short content is detected.
 enum BlockingMode {
   pressBack('PRESS_BACK'),
@@ -80,7 +92,9 @@ enum ViewDetector {
 /// Website blocklist matching modes.
 enum WebMatchType {
   domain('DOMAIN'),
-  exact('EXACT'),
+  // No `exact`: it needed a full URL the host-based native engine never has,
+  // so an EXACT rule blocked nothing. `fromWire` now folds any stored EXACT
+  // back into `domain`, which does block.
   wildcard('WILDCARD');
 
   const WebMatchType(this.wire);

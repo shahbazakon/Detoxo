@@ -32,6 +32,7 @@ enum AppIcon {
   shieldCheck,
   oneReel,
   unblock,
+  rules,
 }
 
 /// Every `not_static_icons` widget extends `AnimatedSVGIcon` and shares this
@@ -71,6 +72,7 @@ final Map<AppIcon, _IconCtor> _iconBuilders = {
   AppIcon.shieldCheck: BrickWallShieldIcon.new,
   AppIcon.oneReel: CirclePlayIcon.new,
   AppIcon.unblock: DoorOpenIcon.new,
+  AppIcon.rules: CalendarClockIcon.new,
 };
 
 /// Interactive animated icon with app-standard styling, a single entry point

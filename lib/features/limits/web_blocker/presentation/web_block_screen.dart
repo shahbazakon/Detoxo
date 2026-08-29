@@ -1,9 +1,14 @@
 import 'package:detoxo/core/design_system/design_system.dart';
 import 'package:detoxo/core/di/injector.dart';
 import 'package:detoxo/core/navigation/routes.dart';
+import 'package:detoxo/core/utils/clock_format.dart';
 import 'package:detoxo/core/widgets/common_widgets.dart';
 import 'package:detoxo/features/blocking/shared/domain/repositories/blocking_repositories.dart';
 import 'package:detoxo/features/limits/app_blocker/domain/repositories/app_block_repository.dart';
+import 'package:detoxo/features/limits/rules/domain/usecases/rule_summary.dart';
+import 'package:detoxo/features/limits/unblock/domain/entities/temporary_unblock.dart';
+import 'package:detoxo/features/limits/unblock/presentation/unblock_cubit.dart';
+import 'package:detoxo/features/limits/unblock/presentation/widgets/unblock_duration_sheet.dart';
 import 'package:detoxo/features/limits/web_blocker/domain/entities/popular_site.dart';
 import 'package:detoxo/features/limits/web_blocker/domain/entities/web_block_entry.dart';
 import 'package:detoxo/features/limits/web_blocker/domain/entities/web_block_source.dart';
@@ -50,9 +55,9 @@ class _WebBlockView extends StatelessWidget {
         title: Text('Website blocker'),
         actions: [
           InfoButton(
-            'Blocks distracting sites in any browser — Detoxo reads the '
-            'address bar and backs you out of the page. Tap a popular site, '
-            'add your own, or open Protection to block whole categories.',
+            'Blocks distracting sites in any supported browser — Detoxo reads '
+            'the address bar and backs you out of the page. Tap a popular '
+            'site, add your own, or open Protection to block whole categories.',
           ),
         ],
       ),
@@ -103,6 +108,14 @@ class _WebBlockView extends StatelessWidget {
                   ),
                 ),
                 inset(_Blocklist(state: state)),
+                if (state.unsupportedBrowsers.isNotEmpty) ...[
+                  const SizedBox(height: AppSpacing.md),
+                  inset(
+                    _UnsupportedBrowsersNotice(
+                      browsers: state.unsupportedBrowsers,
+                    ),
+                  ),
+                ],
               ],
             );
           },
@@ -212,6 +225,39 @@ class _StatsSection extends StatelessWidget {
   }
 }
 
+// ── Unsupported browsers (EVO-047) ──────────────────────────────────────────
+/// Names the installed browsers the engine cannot read, so the screen never
+/// looks protective about a browser where nothing is enforced. Only rendered
+/// when native actually answered and the list is non-empty — silence means
+/// "all covered" or "couldn't ask", and inventing a warning for the second
+/// would be its own kind of lie.
+class _UnsupportedBrowsersNotice extends StatelessWidget {
+  const _UnsupportedBrowsersNotice({required this.browsers});
+
+  final List<String> browsers;
+
+  @override
+  Widget build(BuildContext context) {
+    final names = browsers.join(', ');
+    return Semantics(
+      label: 'Not covered: $names. Blocking does not apply in these browsers.',
+      excludeSemantics: true,
+      child: AppCard(
+        leading: const IconBadge(
+          icon: Icons.warning_amber_outlined,
+          color: AppColors.warning,
+          shape: BoxShape.rectangle,
+        ),
+        title: 'Not covered: $names',
+        subtitle:
+            "Detoxo can't read the address bar in "
+            '${browsers.length == 1 ? 'this browser' : 'these browsers'}, so '
+            'your blocklist and the 18+ filter do not apply there.',
+      ),
+    );
+  }
+}
+
 // ── Protection pill: batch protections live on their own screen ─────────────
 /// Leads the popular-sites row but is deliberately not an [AppChip]: it is
 /// always seed-tinted with a trailing chevron so it reads as "opens a screen",
@@ -233,7 +279,9 @@ class _ProtectionChip extends StatelessWidget {
     }
 
     return Semantics(
-      label: 'Protection, $activeCount of 2 on, opens screen',
+      label:
+          'Protection, $activeCount of ${WebBlockState.protectionTotal} on, '
+          'opens screen',
       button: true,
       excludeSemantics: true,
       child: AppPressable(
@@ -286,8 +334,7 @@ class _PopularChips extends StatelessWidget {
     // first row and the "Add website" chip closes the second, so each row
     // carries one extra chip and the split is an even half.
     final half = sites.length ~/ 2;
-    final protectionCount =
-        (state.blockForApps ? 1 : 0) + (state.blockAdult ? 1 : 0);
+    final protectionCount = state.protectionCount;
     Widget chip(PopularSite site) => Padding(
       padding: const EdgeInsets.only(right: AppSpacing.xs),
       child: AppChip(
@@ -340,6 +387,19 @@ class _Blocklist extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final cubit = context.read<WebBlockCubit>();
+    if (state.loadFailed) {
+      // Unreadable, NOT empty: offering "add your own" here would invite the
+      // user to type over a list that still exists and is still being
+      // enforced natively. Retry, and say what actually happened.
+      return EmptyState(
+        icon: Icons.error_outline,
+        title: "Couldn't open your blocklist",
+        subtitle:
+            'Your saved sites are still blocked. Try again, or reopen this '
+            'screen.',
+        action: PrimaryButton(label: 'Try again', onPressed: cubit.load),
+      );
+    }
     if (!state.hasEntries) {
       // Same idiom as sibling screens: primary empty list = EmptyState + CTA.
       return EmptyState(
@@ -400,16 +460,31 @@ class _BlocklistRow extends StatelessWidget {
     final cubit = context.read<WebBlockCubit>();
     final isCustom = entry.source == WebBlockSource.custom;
     final site = PopularSites.byPrimaryDomain(entry.pattern);
-    final paused = entry.isPausedAt(DateTime.now());
     final color = entry.brandColor != null
         ? Color(entry.brandColor!)
         : Theme.of(context).colorScheme.secondary;
-    String pausedLabel() {
-      final t = entry.pausedUntil!;
-      final h = t.hour.toString().padLeft(2, '0');
-      final m = t.minute.toString().padLeft(2, '0');
-      return 'Paused until $h:$m';
-    }
+    // M8: the pause window is a grant now, so it comes from UnblockCubit's
+    // DERIVED `active` list rather than from `DateTime.now()` at build time.
+    // That matters: a cubit emit when the grant lapses actually rebuilds this
+    // row, where a build-time clock read left a dead "Paused until 14:05" pill
+    // on screen until something unrelated happened.
+    final grant = context.select<UnblockCubit, TemporaryUnblock?>(
+      (c) => c.state.activeFor(
+        UnblockTargetType.website,
+        entry.pattern,
+        DateTime.now().millisecondsSinceEpoch,
+      ),
+    );
+    final paused = grant != null;
+    // Device 12/24-hour preference, like every other time the app reads back
+    // (the window is picked in this app's own sheet).
+    // "Until 10:30 PM", not "Allowed until …": Pill caps itself at 0.4x screen
+    // width, and the longer label ellipsised away the only datum it carries at
+    // ordinary text scale. `RuleSummary.clock` adds the weekday when the window
+    // ends tomorrow, which a bare clock silently dropped.
+    String pausedLabel() =>
+        'Until '
+        '${RuleSummary.clock(grant!.endMs, DateTime.now(), time: (m) => formatLocalTime(context, m))}';
 
     // How many actions the pane holds decides how far it opens.
     final actionCount = 1 + (entry.enabled ? 1 : 0) + (isCustom ? 1 : 0);
@@ -429,14 +504,21 @@ class _BlocklistRow extends StatelessWidget {
           if (entry.enabled)
             _RowAction(
               icon: paused ? Icons.play_arrow : Icons.timer_outlined,
-              label: paused ? 'Resume' : 'Pause',
+              label: paused ? 'Resume' : 'Allow',
               tone: AppColors.warning,
               semanticLabel: paused
                   ? 'Resume blocking ${entry.label}'
-                  : 'Pause blocking ${entry.label}',
+                  : 'Allow ${entry.label} for a while',
               onPressed: (context) => paused
-                  ? cubit.resumeEntry(entry)
-                  : _showPauseSheet(context, entry),
+                  ? context.read<UnblockCubit>().endEarly(
+                      UnblockTargetType.website,
+                      entry.pattern,
+                      // The same aliases the grant freed — see `_showAllowSheet`.
+                      alsoEnd: entry.source == WebBlockSource.popular
+                          ? PopularSites.aliasesFor(entry.pattern)
+                          : const [],
+                    )
+                  : _showAllowSheet(context, entry),
             ),
           if (isCustom)
             _RowAction(
@@ -456,48 +538,57 @@ class _BlocklistRow extends StatelessWidget {
         ],
       ),
       child: Builder(
-        builder: (rowContext) => AppCard(
-          // Tap toggles the pane: swipe discoverability + a non-swipe path.
-          onTap: () {
-            final slidable = Slidable.of(rowContext);
-            if (slidable == null) return;
-            if (slidable.ratio == 0) {
-              slidable.openEndActionPane();
-            } else {
-              slidable.close();
-            }
-          },
-          leading: AnimatedOpacity(
-            opacity: dimmed ? 0.45 : 1,
-            duration: AppDurations.fast,
-            child: IconBadge(
-              icon: site?.icon ?? Icons.public,
-              color: color,
-              shape: BoxShape.rectangle,
-              fillAlpha: 0.18,
+        // The swipe pane is the only route to Pause/Edit/Delete, and a screen
+        // reader cannot swipe. Tap opens the same pane, so the tap target has
+        // to SAY that — otherwise TalkBack announces a bare "example.com,
+        // button" and those actions are unreachable.
+        builder: (rowContext) => MergeSemantics(
+          child: Semantics(
+            hint: 'Opens allow, edit and delete actions',
+            child: AppCard(
+              // Tap toggles the pane: swipe discoverability + a non-swipe path.
+              onTap: () {
+                final slidable = Slidable.of(rowContext);
+                if (slidable == null) return;
+                if (slidable.ratio == 0) {
+                  slidable.openEndActionPane();
+                } else {
+                  slidable.close();
+                }
+              },
+              leading: AnimatedOpacity(
+                opacity: dimmed ? 0.45 : 1,
+                duration: AppDurations.fast,
+                child: IconBadge(
+                  icon: site?.icon ?? Icons.public,
+                  color: color,
+                  shape: BoxShape.rectangle,
+                  fillAlpha: 0.18,
+                ),
+              ),
+              title: entry.label,
+              // Popular rows show the domain under the brand name; custom rows'
+              // title already IS the domain. Pause gets its own pill below.
+              subtitle: isCustom ? null : entry.pattern,
+              trailing: AppToggle(
+                value: entry.enabled,
+                semanticLabel: 'Block ${entry.label}',
+                onChanged: (v) => cubit.toggleEntry(entry, enabled: v),
+              ),
+              // Row keeps the Pill intrinsic-width in AppCard's stretch column.
+              child: paused
+                  ? Row(
+                      children: [
+                        Pill(
+                          label: pausedLabel(),
+                          tone: AppTone.warning,
+                          icon: Icons.timer_outlined,
+                        ),
+                      ],
+                    )
+                  : null,
             ),
           ),
-          title: entry.label,
-          // Popular rows show the domain under the brand name; custom rows'
-          // title already IS the domain. Pause state gets its own pill below.
-          subtitle: isCustom ? null : entry.pattern,
-          trailing: AppToggle(
-            value: entry.enabled,
-            semanticLabel: 'Block ${entry.label}',
-            onChanged: (v) => cubit.toggleEntry(entry, enabled: v),
-          ),
-          // Row keeps the Pill intrinsic-width in AppCard's stretch column.
-          child: paused
-              ? Row(
-                  children: [
-                    Pill(
-                      label: pausedLabel(),
-                      tone: AppTone.warning,
-                      icon: Icons.timer_outlined,
-                    ),
-                  ],
-                )
-              : null,
         ),
       ),
     );
@@ -568,36 +659,38 @@ class _RowAction extends StatelessWidget {
   }
 }
 
-/// EVO-012: pick how long to allow the site; native re-arms the block at
-/// expiry even if the app never reopens.
-Future<void> _showPauseSheet(BuildContext context, WebBlockEntry entry) async {
-  final cubit = context.read<WebBlockCubit>();
-  final minutes = await GlassBottomSheet.show<int>(
-    context: context,
-    title: 'Allow ${entry.label} for…',
-    child: Builder(
-      builder: (sheetContext) => Wrap(
-        spacing: AppSpacing.xs,
-        children: [
-          for (final m in const [5, 15, 30, 60])
-            AppChip(
-              label: '$m min',
-              selected: false,
-              onSelected: () => Navigator.of(sheetContext).pop(m),
-            ),
-        ],
-      ),
-    ),
+/// EVO-012, generalised by M8: pick how long to allow the site. The chips are
+/// now the shared `showUnblockDurationSheet` — the same sheet an app row and
+/// the block screen use — and the window is a `WEBSITE` grant rather than a
+/// per-entry field. Native still re-arms the block at expiry with Detoxo
+/// closed; that is the property the whole mechanism exists for.
+Future<void> _showAllowSheet(BuildContext context, WebBlockEntry entry) async {
+  final unblock = context.read<UnblockCubit>();
+  final window = await showUnblockDurationSheet(
+    context,
+    label: entry.label,
+    remaining: unblock.state.grantsLeft,
   );
-  if (minutes != null) {
-    await cubit.pauseEntry(entry, Duration(minutes: minutes));
-    if (context.mounted) {
-      GlassToast.show(
-        context,
-        '${entry.label} allowed for $minutes min',
-        tone: AppTone.success,
-      );
-    }
+  if (window == null) return;
+  // A popular entry's cross-registrable aliases (youtu.be for youtube.com) ride
+  // the wire as their own patterns, so they need their own grants — exactly
+  // what `pausedUntil` did when it was duplicated onto them.
+  final ok = await unblock.grant(
+    UnblockTargetType.website,
+    entry.pattern,
+    window,
+    source: UnblockSource.blocklistRow,
+    alsoFree: entry.source == WebBlockSource.popular
+        ? PopularSites.aliasesFor(entry.pattern)
+        : const [],
+  );
+  // Only on success — a failure is toasted app-wide by the unblock listener.
+  if (ok && context.mounted) {
+    GlassToast.show(
+      context,
+      '${entry.label} allowed for ${window.inMinutes} min',
+      tone: AppTone.success,
+    );
   }
 }
 

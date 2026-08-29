@@ -43,8 +43,8 @@ class _WebProtectionView extends StatelessWidget {
         actions: [
           InfoButton(
             'Batch protections block whole categories of sites at once — no '
-            'need to add them one by one. They work in any browser alongside '
-            'your blocklist.',
+            'need to add them one by one. They work in any supported browser '
+            'alongside your blocklist.',
           ),
         ],
       ),
@@ -89,8 +89,8 @@ class _WebProtectionView extends StatelessWidget {
                   title: 'Block adult content (18+)',
                   subtitle:
                       'Blocks every page of 200+ known adult sites and every '
-                      '.xxx, .porn, .sex or .adult address — in any browser, '
-                      'on top of your own blocklist.',
+                      '.xxx, .porn, .sex or .adult address — in any supported '
+                      'browser, on top of your own blocklist.',
                   leading: const IconBadge(
                     icon: Icons.shield_outlined,
                     color: AppColors.danger,

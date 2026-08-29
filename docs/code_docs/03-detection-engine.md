@@ -56,24 +56,38 @@ onAccessibilityEvent(event):
   pkgProtected = isProtected(pkg)    ; privacy-protected app? (cached set)
   if WINDOW_STATE_CHANGED:           ; track foreground for Conscious + counter
       foregroundPkg = pkg
+      checkRuleBoundary(now)         ; posts ruleBoundary once nextBoundaryMs has passed (see 27)
       if pkgProtected or no platforms for pkg: lastReelAtMs = 0  ; end "watching"
-      contentCounter.onForegroundChanged(pkg, !pkgProtected && isReelBearing)
+      if pkg is not the IME: contentCounter.onForegroundChanged(pkg, !pkgProtected && isReelBearing)
   if pkgProtected or isProtected(foregroundPkg): return  ; PRIVACY GUARD (see 24)
   if pkg == our own package: return
   if contentCounter.isEnabled: countContent(event, pkg)   ; side-effect-free
+  if nudge.enabled: tickNudge(now)                         ; soft nudge — advisory, never blocks
   if !masterOn: return                                     ; master kill-switch (cached)
-  if pkg in blockedApps and (windowState or pkg==foregroundPkg):
+  appUnblocked = unblocks.hasAny(APP) and unblocks.isUnblocked(APP, pkg, elapsed)  ; M8 (see 31)
+  if !appUnblocked and pkg in blockedApps and (windowState or pkg==foregroundPkg):
       onAppBlocked(pkg); return                            ; whole-app block — ABOVE Pause (see 06)
+                                                           ; a grant lifts it; a Pause does not
+  ; strict rules run HERE, above the gate — and never read `appUnblocked` (see 27, 31)
   if now < pausedUntil: return                             ; Pause window (cached)
+  if !appUnblocked and ruleEngine.hasPackageRules() and (windowState or pkg==foregroundPkg):
+      rule = ruleEngine.blockingForPackage(pkg, now)       ; schedules / spent limits — BELOW Pause
+      if rule: onAppBlocked(pkg, rule.reason); return
   if plan==ONE_REEL and event==VIEW_SCROLLED and pkg has platforms:
-      lastScrollAtMs = now                                 ; capture reel advance BEFORE throttle
+      page = ReelTracker.settledPage(fromIndex, toIndex)   ; pager page / NO_INDEX / IGNORE
+      if page != IGNORE and (page == NO_INDEX or page != oneReelPage):
+          lastScrollAtMs = now; oneReelPage = page         ; capture reel advance BEFORE throttle
   ── per-package throttle (THROTTLE_MS = 150) ──
-  if BrowserUrlExtractor.isBrowser(pkg):                   ; web blocking branch
-      handleBrowser(pkg) on window/content change; return    ; bails unless the FOCUSED root's package == pkg (split-screen)
+  if BrowserUrlExtractor.isBrowser(pkg):                   ; web blocking branch (blocklist OR host rules)
+      handleBrowser(pkg, paused) on window/content change; return  ; bails unless the FOCUSED root's
+                                                           ; package == pkg (split-screen). Runs during
+                                                           ; a Pause only for STRICT host rules (M8)
   platforms = config.platformsFor(pkg)   ; return if empty
   for each platform (LEGACY/OVERLAY, enabled):
       for each detector (FINDBYID / VIEWID_RES_NAME):
-          if matches(root, event, detector, pkg):
+          if matches(root, event, detector):
+              rule = ruleEngine.blockingForPlatform(platformId, now, reelTimeTodayMs)  ; schedule / daily reel limit (see 27)
+              if rule: onDetected(pkg, platformId, detector, rule.reason); continue/return
               if plan==CURIOUS and bank>0: lastReelAtMs=now; return   ; let it play
               if plan==ONE_REEL and allowReelOrBlock(now): return     ; within allowance
               onDetected(pkg, platformId, detector)
@@ -100,13 +114,32 @@ onAccessibilityEvent(event):
 4. **Self-package** (`pkg == packageName`) → return (never act on Detoxo's own UI).
 5. **Content counting** — `if (contentCounter.isEnabled) countContent(event, pkg)`.
    Runs even when blocking is off/paused/disabled (see §6).
+5b. **Soft nudge** — `if (nudge.enabled) tickNudge(nowMs)`. Advances the
+   Android-free `NudgeTracker` dwell machine and, at a threshold, raises the
+   bottom card. Sits here for the counter's reason: it is **advisory**, so it
+   runs above the master switch and the Pause gate — the user asked to be told
+   how long they have been somewhere, which is true whether or not blocking is
+   on. It never returns, never presses BACK and never touches block state, and
+   it walks no nodes: it reads a package name off an already-dispatched event.
+   Driven from **every** event, not only `WINDOW_STATE_CHANGED`, because the
+   idle timeout needs a dense heartbeat; the package it is handed is the
+   separately latched `nudgeForegroundPkg` (moved only on real window changes,
+   and never to the IME). Full design in [30-soft-nudge.md](30-soft-nudge.md).
 6. **Master switch** — `if (!masterOn) return` (the cached mirror of
    `store.masterEnabled`, see §2.2). Default `true`.
-7. **Custom whole-app block** — `if (pkg in blockedApps && (windowState || pkg == foregroundPkg)) { onAppBlocked(pkg); return }`.
+7. **Custom whole-app block** — `if (!appUnblocked && pkg in blockedApps && (windowState || pkg == foregroundPkg)) { onAppBlocked(pkg); return }`.
    The user locked this entire app (`pushAppBlocklist`): HOME bounce with its own
    1200 ms debounce, before the throttle. **Checked ABOVE the Pause gate** (still
-   below the master switch): the App Blocker UI presents locks as unconditional,
-   so a Pause taken for reels must not quietly unlock a fully-locked app.
+   below the master switch): a Pause taken for reels must not quietly unlock a
+   fully-locked app.
+
+   **`appUnblocked` (M8)** is resolved once, right after the master switch, from
+   `UnblockRegistry.isUnblocked("APP", pkg, elapsedRealtime)` — behind
+   `hasAny(TYPE_APP)`, so a user with no grants pays one volatile read and no
+   `elapsedRealtime` call. A per-target grant **does** lift this lock and the
+   non-strict rules arm at step 9; that is the whole point of "Unblock Instagram
+   for 15 minutes". It never reaches the strict arm below
+   ([31-locked-rules-and-unblock.md](31-locked-rules-and-unblock.md) §2).
    Anchored to the foreground — a backgrounded blocked app's notification events
    carry its packageName and must never bounce the user out of an unrelated app;
    the `foregroundPkg` leg still bounces someone already inside the app when the
@@ -115,19 +148,80 @@ onAccessibilityEvent(event):
 8. **Pause gate** — `if (System.currentTimeMillis() < pausedUntil) return`
    (cached mirror of `store.pauseUntil`). Clock-based; suspends reel/web
    blocking (whole-app locks above stay enforced) regardless of the pushed plan
-   name (see §5).
-9. **Per-package throttle** — see §3. Immediately *before* this throttle, under the
-   `ONE_REEL` plan a `TYPE_VIEW_SCROLLED` from a monitored app stamps
-   `lastScrollAtMs` — a throttled scroll would hide a reel advance and leak the next
-   reel past the allowance (see §5.3).
-10. **Browser branch** — if the package is a known browser, run web blocking
+   name (see §5). One clock read (`nowMs`) is taken once per event and reused by
+   the boundary check, this gate, the rules arm and the throttle.
+
+   **Strict rules run just ABOVE this gate** (EVO-030): `if (ruleEngine.hasStrictRules()
+   && (windowState || pkg == foregroundPkg))` → `blockingForPackage(pkg, nowMs,
+   strictOnly = true)`. A strict rule is the per-rule opt-out from "a Pause lifts
+   rules"; the gate itself only returns early when there is no strict rule targeting a
+   **reel surface**, because that decision is made inside the detector loop.
+
+   **This arm deliberately does not read `appUnblocked`** — and a rule the user
+   marked *Locked* is pushed as strict, so nothing a per-target grant can do
+   lifts one. That absence is the guarantee: there is no wire flag saying "this
+   grant is privileged", so no Dart bug can mint one. The wall it raises sets
+   `offersUnblock = false`. The only relief is an **override**, which spends
+   quota and is applied by splitting that rule's own windows before the push.
+9. **Rules arm** — `if (!paused && !appUnblocked && ruleEngine.hasPackageRules() && (windowState || pkg
+   == foregroundPkg))` ask `RuleEngine.blockingForPackage(pkg, nowMs)`: an open schedule
+   window or a **spent** daily limit covering this app → `onAppBlocked(pkg, rule.reason,
+   rule.activeUntil(nowMs))` (HOME bounce, the wall with the rule's reason and its
+   release time, `blocked{platformId:"rule"}`). **Checked BELOW the Pause gate by
+   design** — a Pause lifts non-strict rules the way it lifts reel and web blocking;
+   App Blocker locks (step 7) stay unconditional. Foreground-anchored and before the
+   throttle for the same reasons as step 7. The guard is `hasPackageRules()`, **not**
+   `hasAnyRules()`: a user with zero rules but a global Daily Limit still has the
+   synthetic meter entry, so `hasAnyRules()` is true for them and this arm would run on
+   nearly every foreground event for nothing. A **pending** limit entry (budget not yet
+   spent) never blocks — native only measures it. Full design in
+   [27-rules-engine.md](27-rules-engine.md).
+10. **Per-package throttle** — see §3. Immediately *before* this throttle, under the
+    `ONE_REEL` plan a `TYPE_VIEW_SCROLLED` from a monitored app stamps
+    `lastScrollAtMs` — a throttled scroll would hide a reel advance and leak the next
+    reel past the allowance (see §5.3).
+11. **Browser branch** — if the package is a known browser, run web blocking
     (only on `WINDOW_STATE_CHANGED` / `WINDOW_CONTENT_CHANGED`, and only if the
-    blocklist has rules) and `return`. Browsers carry no reel surfaces, so the
-    reel path is skipped either way. Detailed in
-    [06-app-and-web-blocker.md](06-app-and-web-blocker.md).
-11. **Reel detection** — iterate the package's platforms/detectors (§4), apply the
-    Conscious allowance check (§5.2) **or the One Reel / Unblock gate (§5.3)**, then
-    execute the block (§4.4).
+    blocklist has rules **or** the rules snapshot names a domain) and `return`.
+    Browsers carry no reel surfaces, so the reel path is skipped either way.
+    Detailed in [06-app-and-web-blocker.md](06-app-and-web-blocker.md).
+
+    **M8 re-gated it for a Pause**: the arm now runs when
+    `!paused || ruleEngine.hasStrictHostRules()`, passing `paused` into
+    `handleBrowser`, which then skips the user's own blocklist entirely and
+    narrows the rules pass to `strictOnly`. That closes EVO-030's documented
+    website gap — a strict (and therefore a locked) rule's sites used to be
+    opened for free by a two-minute Pause. Everything a Pause always lifted
+    still lifts.
+12. **Reel detection** — iterate the package's platforms/detectors (§4); on a match
+    the **rules platform arm** runs first (`RuleEngine.blockingForPlatform` — a
+    schedule on this reel feed, or the daily reel limit whose native meter
+    `ContentCounter.timeTodayMs(now)` has reached the limit → `onDetected(...,
+    ruleReason, ruleUnlocksAtMs)` regardless of the plan), else apply the Conscious
+    allowance check (§5.2) **or the One Reel / Unblock gate (§5.3)**, then execute the
+    block (§4.4). While a Pause is live the loop is narrowed to `strictOnly` and every
+    plan check below it is skipped, so a Pause keeps lifting everything it always did.
+
+    **M8 splits the rule resolve in two.** A `strictOnly = true` pass runs
+    FIRST (gated on `hasStrictPlatformRules()`), mirroring the package arm above
+    the gate, and a hit blocks with `offersUnblock = false` without consulting
+    any grant. Only then — and only below `if (paused) continue` — does the
+    general pass run. The loop cannot trust the first match's `strict` flag
+    instead: `blockingForPlatform` returns the FIRST covering entry and the
+    snapshot is ordered by `createdAtMs`, so an older non-strict rule masks a
+    newer locked one, and the wall it raises would offer a button whose grant
+    then lifts the locked rule for free.
+
+    **`reelUnblocked`** is resolved per platform from
+    `UnblockRegistry.isUnblocked("REEL", platformId, …)` and consumed twice: it
+    lifts a non-strict rule hit, and it lifts the plan below. The awareness
+    counter ran above this whole branch, so a granted reel is still counted —
+    and the granted arm clears `lastReelAtMs`, which drops the Conscious
+    accountant into its existing "lingering in a reel app" branch: no drain, no
+    accrue. Deliberately not a per-package freeze inside `accountConscious` —
+    the accountant only knows the package, but a grant names one `platformId`,
+    so that would stop the bank draining for every OTHER surface in the same
+    app.
 
 ### 2.2 Hot-path settings cache
 
@@ -161,15 +255,23 @@ lastEventByPackage[pkg] = now
 ```
 
 `lastEventByPackage` is a `ConcurrentHashMap<String, Long>`. The counting pass
-keeps its **own** independent throttle map (`lastCountEventByPackage`, same
-150 ms) so counting and blocking never starve each other.
+keeps its **own** independent throttle map (`lastCountEventByPackage`) at a
+slower `COUNT_THROTTLE_MS = 400` (a stage-3 miss on a non-reel screen is a full
+DFS, and a reel's dwell is anchored to the scroll event, not to this check);
+`TYPE_WINDOW_STATE_CHANGED` bypasses it. Counting and blocking never starve
+each other, and the per-event memo (§4) means both passes still share one walk.
+The counting pass additionally **backs off the stage-3 DFS** after a miss
+(EVO-021): a per-package `countMisses` counter cycles `0..DFS_SKIP = 4` and the
+DFS runs only at 0 — stages 1–2 still run every check. A shallow result comes
+from `matches(..., deep = false)` and is never memoised, so the block pass
+always gets the full three stages.
 
 ---
 
 ## 4. The 3-stage view-id detection (`matches`)
 
-`matches(root, event, detector, pkg)` is the verified detection primitive shared
-by both the block path and the counting path — and it is called through
+`matches(root, event, detector, deep = true)` is the verified detection primitive
+shared by both the block path and the counting path — and it is called through
 **`matchesMemo`**, a per-event memo (`matchMemo.getOrPut(detector) { matches(...) }`,
 cleared at the top of every event): the counting pass and the block pass test the
 same detectors against the same window, so the second pass becomes map lookups
@@ -188,11 +290,14 @@ kinds are honoured:
   (e.g. `com.instagram.androidid/clips_video_container`).
 - **`VIEWID_RES_NAME`** — the id is used **verbatim** as the target.
 
-The fully-qualified `targets` list is built **once per `matches()` call** (a
-`detector.identifiers.map { "$pkg$it" }` for `FINDBYID`, the identifiers verbatim
-otherwise) — stage 3 visits up to 12000 nodes, and a per-node `"$pkg$id"` concat
-was measurable allocation churn on the hottest path. Every positive match is
-gated on `isVisibleToUser` so an off-screen/recycled node never triggers a block.
+The fully-qualified `targets` list is `DetectorRule.qualifiedIds`, built **once
+at config parse** (`DetectionConfig.parsePlatform(p, pkg)`: `"$pkg$id"` for
+`FINDBYID`, the identifiers verbatim for `VIEWID_RES_NAME`) — stage 3 visits up
+to 12000 nodes, and a per-node (later per-call) `"$pkg$id"` concat was
+measurable allocation churn on the hottest path. Every positive match is gated
+on `isVisibleToUser` so an off-screen/recycled node never triggers a block.
+`matches(root, event, detector, deep = true)`: `deep = false` (the counting
+pass's back-off, §3) returns after stage 2 and must not be memoised.
 
 The three stages run cheapest-first and short-circuit on the first visible hit:
 
@@ -280,6 +385,13 @@ returns immediately (one block per event). Defaults to `true` in config parsing.
 
 ### 4.4 Block execution — `onDetected`
 
+Since the block screen shipped ([25](25-block-screen.md)), every block site raises the
+intervention wall **after** its `ServiceEventBus.post` and **before** its navigation, inside the
+same debounced region: `onDetected` (skipped for mode `NONE`), the Conscious accountant's
+drain-to-empty boot, `onAppBlocked`, and `handleBrowser`. The wall never replaces the BACK /
+HOME below — with no overlay grant or the wall switched off, `raiseWall` returns `false` and the
+site shows its legacy toast instead. The pseudocode below is unchanged apart from that call.
+
 ```kotlin
 private fun onDetected(pkg, platformId, detector) {
     val now = System.currentTimeMillis()
@@ -304,7 +416,7 @@ private fun onDetected(pkg, platformId, detector) {
 | `PRESS_BACK` (default) | `performGlobalAction(GLOBAL_ACTION_BACK)` via `pressBackWithRateLimit()` | Rate-limited (§4.5). |
 | `KILL_APP` | Back, then `ActivityManager.killBackgroundProcesses(pkg)` | Best-effort; catches throwables. |
 | `LOCK_SCREEN` | Back, then device-admin `DevicePolicyManager.lockNow()` | Only if admin active (`admin/DetoxoDeviceAdminReceiver`). |
-| `NONE` | No-op | `onDetected` runs `recordBlock`/emit *before* the `when`, so a `NONE` detector still records the stat and emits a `blocked` event but performs no navigation. |
+| `NONE` | No-op | `onDetected` runs `recordBlock`/emit *before* the `when`, so a `NONE` detector still records the stat and emits a `blocked` event but performs no navigation — and raises **no block screen** (a wall over a still-playing reel would be a trap). |
 
 **`resolveBlockMode(detector)`** picks the mode:
 
@@ -488,18 +600,23 @@ State in `ConfigStore`: `reelAllowance` (key `reel_allowance`) and the **persist
 event-driven inside the detector loop.
 
 **A reel counts only after 2s of dwell.** A reel is added to `reelsConsumed` **only
-after it's been watched for `MIN_VIEW_MS = 2000 ms`** (matching the awareness
-counter's dwell), so a quick flick-through (<2s) doesn't count, and a **single
-looping reel costs at most one count** — a `reelViewCounted` latch prevents
-re-counting the same view. Reels are still **scroll-delimited** (consecutive reels
-share the same continuously-visible view-id, so `matches()` fires the whole time a
-reel is up), but a scroll only counts as an **advance to a new reel** once **≥ 2s
-have passed since the last count** (`lastReelCountMs`) — this **debounces in-reel
-scrolls** (opening comments/captions/carousels) so they don't burn the allowance or
-block the reel you're still watching. The reel-advance scroll (`TYPE_VIEW_SCROLLED`
-from a monitored app) is still stamped into the runtime `@Volatile lastScrollAtMs`
-**before** the 150 ms throttle (§2.1 step 7); a scroll swallowed by the throttle
-would hide the advance.
+after it's been watched for `MIN_VIEW_MS = 2000 ms`** — deliberately longer than
+the awareness counter's 1 s "seen" dwell, because an allowance is spent on reels
+*watched* — so a quick flick-through (<2s) doesn't count, and a **single looping
+reel costs at most one count** — a `reelViewCounted` latch prevents re-counting the
+same view. Reels are still **scroll-delimited** (consecutive reels share the same
+continuously-visible view-id, so `matches()` fires the whole time a reel is up),
+but only a scroll that **lands on a different pager page** stamps the advance:
+`ReelTracker.settledPage(event.fromIndex, event.toIndex)` is compared with the
+runtime `oneReelPage` — a multi-item list (comments sheet) is never an advance, a
+snap-back onto the same page is not, an unindexed view (`−1`) always is. And a
+stamped advance only counts as an **advance to a new reel** once **≥ 2s have
+passed since the last count** (`lastReelCountMs`). Together these **keep in-reel
+scrolls** (opening comments/captions/carousels) from burning the allowance or
+blocking the reel you're still watching. The capture into the runtime `@Volatile
+lastScrollAtMs` happens **before** the 150 ms throttle (§2.1 step 7); a scroll
+swallowed by the throttle would hide the advance. `oneReelPage` resets with the
+other dwell fields (`armReelSession`, leaving the reel app).
 
 In the detector loop, when a reel matches under `ONE_REEL`:
 
@@ -552,11 +669,12 @@ Conscious). Native still owns the count and still boots the over-allowance reel 
 the override simply doesn't sit blocked afterwards. Full Dart/UI side in
 [05-plans-pause-conscious.md](05-plans-pause-conscious.md) §7.4.
 
-> `ponytail:` reel identity is heuristic (scroll + 2s dwell, no per-reel id). A
-> spurious scroll **> 2s** after a count can still be misread as an advance, and a
-> fast scroll **within 2s** of a count is absorbed into the current reel (a small
+> `ponytail:` reel identity here is the pager page at event time (no settle window,
+> unlike the awareness counter's `ReelTracker`) plus the 2s dwell. A spurious page
+> change **> 2s** after a count can still be misread as an advance, and a fast
+> advance **within 2s** of a count is absorbed into the current reel (a small
 > leniency — safer than false-blocking the reel you're still watching). Accepted
-> ceiling; the service comment names the upgrade path (content-based reel identity).
+> ceiling; the upgrade path is to drive this gate from `ReelTracker` too.
 > Full Dart/UI side in [05-plans-pause-conscious.md](05-plans-pause-conscious.md) §7.
 
 ---
@@ -569,12 +687,22 @@ reads/writes block state. It:
 
 1. Accrues **whole-app usage time** for monitored apps via
    `contentCounter.onAppActivity(pkg)` (see below), before the throttle.
-2. On `TYPE_VIEW_SCROLLED`, forwards `contentCounter.onScroll(pkg)` (cheap proxy
-   for "advanced to next reel"; the counter debounces internally).
-3. Applies its **own** 150 ms per-package throttle (`lastCountEventByPackage`).
+2. On `TYPE_VIEW_SCROLLED`, forwards `contentCounter.onScroll(pkg, fromIndex,
+   toIndex, scrollDeltaY, isPager)` — the pager's own visible-page range is the
+   reel's identity; `ReelTracker` settles and classifies it (see
+   [17-content-counter.md](17-content-counter.md) §2.3). `isPager` comes from
+   `pagerVerdict()` (EVO-024): `null` unless a platform of this package declares
+   a `pagerViewId` ([02](02-detection-config-schema.md) §1.3), else one
+   `event.source` read compared against the declared id. A
+   `Log.isLoggable`-gated line logs the raw fields (incl. `pager=`) for per-app
+   calibration.
+3. Applies its **own** per-package throttle (`lastCountEventByPackage`,
+   `COUNT_THROTTLE_MS = 400`; `TYPE_WINDOW_STATE_CHANGED` bypasses it).
 4. Reuses the read-only `matches()` walk — through the shared per-event
-   `matchesMemo`, so the block pass that follows never re-walks a detector this
-   pass already tested — against **reel** platforms only
+   `matchesMemo` when the check is deep, so the block pass that follows never
+   re-walks a detector this pass already tested; after a miss the next
+   `DFS_SKIP = 4` checks are shallow (stages 1–2, memo bypassed) — against
+   **reel** platforms only
    (`isReelPlatform`, which excludes `NON_REEL_PLATFORM_IDS`: `ig_feed`,
    `ig_stories`, `insta_pro_stories`, `insta_pro2_stories`, `snap_stories`,
    `wa_status`, `wab_status`). A hit → `onReelSurfaceSeen(pkg)`; actively
@@ -652,7 +780,9 @@ for UI affordances and Dart-side policy — the hot path itself runs in Kotlin.
 
 | Constant | Native value | Dart mirror (`EngineTimings`) | Purpose |
 |----------|--------------|-------------------------------|---------|
-| `THROTTLE_MS` | 150 ms | `eventThrottle = 150 ms` | Per-package event throttle. |
+| `THROTTLE_MS` | 150 ms | `eventThrottle = 150 ms` | Per-package event throttle (block path). |
+| `COUNT_THROTTLE_MS` | 400 ms | — | Counter surface-check cadence (own map; `WINDOW_STATE_CHANGED` bypasses). |
+| `DFS_SKIP` | 4 | — | Counting-pass checks that skip the stage-3 DFS after a miss (EVO-021); the block path never skips. |
 | `BLOCK_DEBOUNCE_MS` | 1200 ms | `blockDebounce = 1200 ms` | Min gap between block actions. |
 | `BACK_RATE_LIMIT_MS` | 1100 ms | `backRateLimit = 1100 ms` | Simulated-Back rate limit. |
 | `MAX_NODES` | 12000 | `maxNodeTraversal = 12000` | DFS node cap in `matches`. |
@@ -681,11 +811,13 @@ Types this file emits:
 | Type | Payload | When |
 |------|---------|------|
 | `serviceStatus` | `{running}` | Connect / interrupt / unbind / destroy. The last payload is **sticky** — replayed to a late Dart subscriber ([04](04-native-android-layer.md) §4). |
-| `blocked` | `{package, platformId, mode, today, total}` | A reel block fired in `onDetected`, or a custom whole-app block in `onAppBlocked` (`platformId:"app_block"`, `mode:"HOME"` — [06](06-app-and-web-blocker.md)). |
+| `blocked` | `{package, platformId, mode, today, total, reason}` | A reel block fired in `onDetected`, or a whole-app block in `onAppBlocked` (`mode:"HOME"`; `platformId:"app_block"` for an App Blocker lock, `"rule"` for a rule — [06](06-app-and-web-blocker.md), [27](27-rules-engine.md)). `reason` is `PLAN` \| `APP_BLOCK` \| `SCHEDULE` \| `DAILY_LIMIT`. |
+| `ruleBoundary` | `{atMs}` | The pushed `nextBoundaryMs` passed (a rule window opened or closed) — posted once from the `WINDOW_STATE_CHANGED` block or the watchdog tick, then zeroed ([27](27-rules-engine.md) §5). |
 | `webBlocked` | `{source:"RULE"\|"ADULT", mode:"PRESS_BACK", today, total, host?}` | A blocked host bounced (browser branch). `host` only for RULE hits — adult-list blocks are never named (EVO-018). |
 | `consciousState` | `{bankMs, maxBankMs, watching, blocked, active}` | Each Conscious tick / sync. |
 | `reelSessionState` | `{consumed, allowance, blocked, active}` | Each One Reel / Unblock allow, block, or arm (§5.3). |
 | `contentCounted` | — | Emitted by the sibling `ContentCounter` module, not shown here. |
+| `nudgeShown` | `{package, elapsedMs, thresholdMs}` | A soft-nudge card actually attached (`showNudge`). Only the threshold band reaches Firebase; the package stays on the device ([30](30-soft-nudge.md)). |
 
 Block/web counters are date-keyed `dd-MM-yyyy` (via the shared
 `DateKeys.today()` formatter) in `ConfigStore` (`recordBlock` +
@@ -701,8 +833,13 @@ writes don't re-serialise it.
 
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/accessibility/DetoxoAccessibilityService.kt`
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/DetectionConfig.kt`
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/ReelTracker.kt` — `settledPage()`, shared with the One Reel gate; the counting rule itself is [17](17-content-counter.md)
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/ConfigStore.kt`
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/RuleEngine.kt` — the rules snapshot the two rule arms and the boundary check consult ([27](27-rules-engine.md))
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/DateKeys.kt`
-- `android/app/src/main/res/values/strings.xml` — block toast (`toast_blocked`) + FGS notification strings
+- `android/app/src/main/res/values/strings.xml` — block toast (`toast_blocked`, now the fallback when the block screen cannot be raised) + the block screen's `wall_*` copy + FGS notification strings
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/overlay/BlockScreenOverlay.kt`, `BlockScreenRenderer.kt` — the intervention wall the block sites raise ([25](25-block-screen.md))
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/NudgeTracker.kt` — the soft-nudge dwell machine `tickNudge` drives ([30](30-soft-nudge.md))
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/overlay/NudgeOverlay.kt` — the card it raises ([30](30-soft-nudge.md))
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/NodeRecycling.kt`
 - `lib/core/constants/app_constants.dart`

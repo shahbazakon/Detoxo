@@ -1,6 +1,7 @@
 package com.errorxperts.detoxo.engine
 
 import android.content.Context
+import android.os.SystemClock
 import org.json.JSONArray
 import java.util.zip.GZIPInputStream
 
@@ -15,16 +16,23 @@ import java.util.zip.GZIPInputStream
  * it costs no heap otherwise. All matching is host-based — Android accessibility
  * can read the address bar but cannot see network traffic.
  */
-class WebBlockEngine(private val context: Context) {
+class WebBlockEngine(
+    private val context: Context,
+    private val unblocks: UnblockRegistry,
+) {
 
     // `regex` is precompiled at parse time for WILDCARD rules — never on the
-    // per-event hot path. `pausedUntil` (epoch ms, 0 = never) lets a rule sit
-    // dormant until it expires; expiry is enforced here, natively, so a per-site
-    // pause re-arms even if the Flutter app is never reopened.
+    // per-event hot path.
+    //
+    // M8: the per-entry `pausedUntil` this class used to carry is GONE. "This
+    // target is dormant until T" is now one mechanism for reels, apps and
+    // websites — [UnblockRegistry] — instead of two, and it keeps EVO-048's
+    // monotonic deadline (the registry converts at parse exactly as this class
+    // used to). An old build's `pausedUntil` key is simply ignored, so a
+    // downgrade cannot resurrect a stale pause.
     private data class Rule(
         val pattern: String,
         val type: String,
-        val pausedUntil: Long = 0L,
         val regex: Regex? = null,
     )
 
@@ -54,18 +62,40 @@ class WebBlockEngine(private val context: Context) {
     enum class Match { RULE, ADULT }
 
     /** Which list blocks [host] (already normalized), or null when it is allowed. */
-    fun matchHost(host: String, fullUrl: String? = null): Match? {
+    fun matchHost(host: String): Match? {
         if (host.isEmpty()) return null
-        val now = System.currentTimeMillis()
-        for (r in rules) {
-            if (now < r.pausedUntil) continue // per-site pause window
-            val hit = when (r.type) {
-                "EXACT" -> fullUrl != null && fullUrl == r.pattern
-                "WILDCARD" -> r.regex?.matches(host) == true
-                else -> host == r.pattern || isSubdomainOf(host, r.pattern)
+        // ONE grant check, above the loop and gating only the user's own rules.
+        // The adult walk below is structurally outside it — not merely skipped
+        // by a `continue` — so an 18+ hit can never be lifted by a grant, which
+        // is EVO-018's promise ("never named, never one tap from being lifted").
+        val nowElapsed = SystemClock.elapsedRealtime()
+        val granted = unblocks.hasAny(UnblockRegistry.TYPE_WEBSITE, nowElapsed) &&
+            unblocks.isUnblocked(UnblockRegistry.TYPE_WEBSITE, host, nowElapsed)
+        if (!granted) {
+            for (r in rules) {
+                // No EXACT arm: nothing has ever pushed one, and matching it needed
+                // a full URL this host-based engine never has — so an EXACT rule
+                // restored from an old blob fell through and silently blocked
+                // NOTHING. It now lands in `else` and blocks by domain.
+                val hit = when (r.type) {
+                    "WILDCARD" -> r.regex?.matches(host) == true
+                    else -> host == r.pattern || isSubdomainOf(host, r.pattern)
+                }
+                if (hit) return Match.RULE
             }
-            if (hit) return Match.RULE
         }
+        if (matchesAdult(host)) return Match.ADULT
+        return null
+    }
+
+    /**
+     * Whether the bundled 18+ set covers [host]. Public so the wall can refuse
+     * to render "Unblock for a while" on a host that is on BOTH the user's
+     * blocklist and this set — the rule arm wins the match, so the button would
+     * otherwise appear, mint a grant, and the very next visit would be blocked
+     * again (unnamed). Cold path only: called once per raised wall.
+     */
+    fun matchesAdult(host: String): Boolean {
         val set = adultSet
         if (adultEnabled && set != null) {
             // Walk the host up its parent labels, ending at the bare TLD:
@@ -73,13 +103,13 @@ class WebBlockEngine(private val context: Context) {
             // TLD line in the asset (`porn`) therefore blocks every *.porn host.
             var h = host
             while (true) {
-                if (set.contains(h)) return Match.ADULT
+                if (set.contains(h)) return true
                 val dot = h.indexOf('.')
                 if (dot < 0) break
                 h = h.substring(dot + 1)
             }
         }
-        return null
+        return false
     }
 
     private fun parse(json: String?): List<Rule> {
@@ -92,11 +122,13 @@ class WebBlockEngine(private val context: Context) {
                 val pattern = o.optString("pattern").trim().lowercase()
                 if (pattern.isEmpty()) continue
                 val type = o.optString("matchType", "DOMAIN")
+                // An old build's `pausedUntil` is read by nothing and therefore
+                // ignored — the tolerance the wire-contract change requires,
+                // for free.
                 out.add(
                     Rule(
                         pattern,
                         type,
-                        pausedUntil = o.optLong("pausedUntil", 0L),
                         regex = if (type == "WILDCARD") compileWildcard(pattern) else null,
                     ),
                 )
@@ -107,11 +139,9 @@ class WebBlockEngine(private val context: Context) {
         }
     }
 
-    /** Allocation-free `host.endsWith(".$pattern")` for the hot path. */
+    /** Allocation-free `host.endsWith(".$pattern")` — one copy, in [RuleEngine]. */
     private fun isSubdomainOf(host: String, pattern: String): Boolean =
-        host.length > pattern.length &&
-            host[host.length - pattern.length - 1] == '.' &&
-            host.endsWith(pattern)
+        RuleEngine.isSubdomainOf(host, pattern)
 
     /** Translate a glob (`*` = any run) to an anchored regex — once, at parse. */
     private fun compileWildcard(pattern: String): Regex? {

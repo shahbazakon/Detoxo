@@ -5,19 +5,8 @@
 # Format: <importing file> <imported package uri>
 # Anything not listed here fails the build. Burn this list down; do not add.
 #
-# Most of these are the same root cause: `settings_cubit` is a cross-cutting
-# cubit that six features need but which is only reachable through
-# blocking/shared/presentation/. Exporting it from the blocking barrel (or
-# moving it to core) clears five entries at once.
-lib/features/limits/app_blocker/presentation/app_block_screen.dart package:detoxo/features/blocking/blocklist/presentation/targets_cubit.dart
-lib/features/limits/app_blocker/presentation/app_block_screen.dart package:detoxo/features/blocking/blocklist/presentation/widgets/block_app_tile.dart
-lib/features/limits/app_blocker/presentation/app_block_screen.dart package:detoxo/features/blocking/shared/presentation/settings_cubit.dart
-lib/features/additional_feature/appearance/presentation/appearance_screen.dart package:detoxo/features/blocking/shared/presentation/settings_cubit.dart
-lib/features/additional_feature/appearance/presentation/appearance_screen.dart package:detoxo/features/content_counter/content_counter_appearance/presentation/widgets/bubble_preview.dart
-lib/features/additional_feature/appearance/presentation/appearance_screen.dart package:detoxo/features/content_counter/content_counter_appearance/presentation/widgets/widget_preview.dart
-lib/features/additional_feature/app_feedback/presentation/widgets/feedback_action_button.dart package:detoxo/features/blocking/shared/presentation/settings_cubit.dart
-lib/features/onboarding/presentation/onboarding_screen.dart package:detoxo/features/limits/daily_limit/presentation/daily_limit_cubit.dart
-lib/features/help/feature_tutorial/presentation/feature_tutorial_screen.dart package:detoxo/features/blocking/shared/presentation/settings_cubit.dart
-lib/features/help/report_issue/presentation/report_issue_dialog.dart package:detoxo/features/blocking/shared/presentation/settings_cubit.dart
-lib/features/analytics/presentation/analytics_screen.dart package:detoxo/features/content_counter/content_counter_core/presentation/content_counter_cubit.dart
-lib/features/analytics/presentation/analytics_screen.dart package:detoxo/features/content_counter/content_counter_core/presentation/widgets/reel_counter_card.dart
+# EMPTY, as of M6. All seven entries had the same root cause: `settings_cubit`,
+# `targets_cubit` and `block_app_tile` are cross-cutting surfaces that six
+# features need but which were only reachable through blocking/**/presentation/.
+# Exporting them from lib/features/blocking/blocking.dart — the content_counter
+# and limits precedent — cleared the list in one edit. Keep it empty.

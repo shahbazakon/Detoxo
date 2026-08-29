@@ -139,7 +139,23 @@ class LiquidPill extends StatelessWidget {
       child: pill,
     );
     if (expand) content = SizedBox(width: double.infinity, child: content);
-    if (disabled) return Opacity(opacity: 0.45, child: content);
+    // A disabled button skips AppPressable, and with it AppPressable's
+    // Semantics — so without this the control is announced as plain static
+    // text, and a switch-access user cannot even focus it to learn that it is
+    // disabled. Onboarding's sole forward control is disabled by default on two
+    // of its steps, which is how this surfaced.
+    if (disabled) {
+      // `container: true` and no explicit label: the pill's own Text merges up
+      // into this node, so the announcement keeps the visible wording instead
+      // of needing it restated here.
+      return Semantics(
+        button: true,
+        enabled: false,
+        container: true,
+        label: semanticLabel,
+        child: Opacity(opacity: 0.45, child: content),
+      );
+    }
     return AppPressable(
       onTap: onPressed!,
       semanticLabel: semanticLabel,
@@ -246,7 +262,17 @@ class SecondaryButton extends StatelessWidget {
       ),
     );
     if (expand) content = SizedBox(width: double.infinity, child: content);
-    if (disabled) return Opacity(opacity: 0.45, child: content);
+    // Same reasoning as PrimaryButton: the disabled path must still announce
+    // itself as a disabled button, not as decorative text.
+    if (disabled) {
+      return Semantics(
+        button: true,
+        enabled: false,
+        container: true,
+        label: label,
+        child: ExcludeSemantics(child: Opacity(opacity: 0.45, child: content)),
+      );
+    }
     return AppPressable(
       onTap: onPressed!,
       semanticLabel: label,

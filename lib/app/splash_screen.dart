@@ -1,23 +1,13 @@
-import 'dart:async';
-
-import 'package:detoxo/app/engine_sync.dart';
+import 'package:detoxo/app/bootstrap.dart';
 import 'package:detoxo/core/design_system/design_system.dart';
-import 'package:detoxo/core/di/injector.dart';
-import 'package:detoxo/core/navigation/routes.dart';
-import 'package:detoxo/features/access_protection/presentation/pin_cubit.dart';
-import 'package:detoxo/features/blocking/blocklist/presentation/targets_cubit.dart';
-import 'package:detoxo/features/blocking/shared/domain/entities/enums.dart';
-import 'package:detoxo/features/blocking/shared/presentation/settings_cubit.dart';
-import 'package:detoxo/features/content_counter/content_counter_core/domain/repositories/content_counter_repository.dart';
-import 'package:detoxo/features/content_counter/home_content_counter/domain/repositories/home_widget_repository.dart';
-import 'package:detoxo/features/permissions/presentation/permissions_cubit.dart';
 import 'package:detoxo/gen/assets.gen.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_bloc/flutter_bloc.dart';
-import 'package:go_router/go_router.dart';
 
-/// Boots the app state, then routes to onboarding / PIN lock / permissions /
-/// home depending on what the user has already set up.
+/// The brand moment shown while [runBootstrap] hydrates the app.
+///
+/// It no longer routes. Gating moved to the router's single `redirect` (see
+/// `AppGate`), which the bootstrap opens by flipping `ready` — so this screen
+/// is what the user looks at, and nothing more.
 class SplashScreen extends StatefulWidget {
   const SplashScreen({super.key});
 
@@ -29,67 +19,9 @@ class _SplashScreenState extends State<SplashScreen> {
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback((_) => _bootstrap());
-  }
-
-  Future<void> _bootstrap() async {
-    final settings = context.read<SettingsCubit>();
-    final targets = context.read<TargetsCubit>();
-    final permissions = context.read<PermissionsCubit>();
-    final pin = context.read<PinCubit>();
-
-    // Only what the routing decision below reads. `targets.load()` is the slow
-    // leg (native config push + installed-package scan) and nothing here needs
-    // it after first run, so it stays off the critical path.
-    await Future.wait([
-      settings.bootstrap(),
-      permissions.refresh(),
-      pin.load(),
-    ]);
-
-    // First run: seed the enabled set from each installed target's default
-    // status — don't pre-enable apps the user doesn't have. Needs the scan.
-    if (settings.state.enabledPlatformIds.isEmpty) {
-      await targets.load();
-      final defaults = targets.state.targets
-          .where((t) => t.defaultEnabled && t.isInstalled)
-          .map((t) => t.platformId)
-          .toSet();
-      if (defaults.isNotEmpty) await settings.setEnabledPlatforms(defaults);
-    } else {
-      unawaited(targets.load());
-    }
-
-    // Reel counter runs natively (enabled by default); refresh the home widget
-    // with the latest snapshot. Fire-and-forget so it never blocks routing.
-    unawaited(_refreshReelCounterWidget());
-
-    // Blocklist drift repair: protected apps, web blocklist and whole-app
-    // blocks all pushed so the native engine matches Dart without any screen
-    // ever being opened. Fire-and-forget so it never blocks routing.
-    unawaited(syncEngineBlocklists());
-
-    if (!mounted) return;
-
-    if (!settings.state.onboarded) {
-      context.go(Routes.onboarding);
-      return;
-    }
-    if (pin.state.isConfigured && pin.state.guards(PinScope.app)) {
-      context.go(Routes.pinLock);
-      return;
-    }
-    if (!permissions.allRequiredGranted) {
-      context.go(Routes.permissions);
-      return;
-    }
-    context.go(Routes.home);
-  }
-
-  /// Pushes the current counter snapshot to the home-screen widget on launch.
-  Future<void> _refreshReelCounterWidget() async {
-    final count = await sl<ContentCounterRepository>().current();
-    await sl<HomeWidgetRepository>().pushSnapshot(count);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) runBootstrap(context);
+    });
   }
 
   @override

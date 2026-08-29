@@ -111,7 +111,7 @@ Package id is the identity — display names change; package ids don't.
 
 ## 4. Catalog — always protected, never editable
 
-`ProtectedAppCatalog` (domain, `AppDomainCatalog`-style const list, ~40
+`ProtectedAppCatalog` (domain, const list — the same shape as the category catalog's `AppCategorySeed`, ~40
 entries, India-weighted: YONO SBI/HDFC/iMobile…, Google Pay/PhonePe/Paytm/BHIM,
 DigiLocker/mAadhaar/UMANG, Bitwarden/1Password/…, Google & Microsoft
 Authenticator, ABHA/1mg, Kite/Groww/…, PolicyBazaar).
@@ -161,11 +161,19 @@ fallback. The blocker side mirrors the exclusion: its picker marks protected
 packages and `AppBlockCubit.add` refuses catalog packages outright (see doc
 06).
 
-**PIN gate:** protection overrides the monitored catalog, so protecting
-Instagram would bypass the user's own blocking. Adding a package that appears
-in the blocking catalog (`ConfigRepository.loadBlockTargets()`) therefore
-requires `requirePin(context, PinScope.settings)` — the same gate as turning
-blocking off. With the multi-select picker the PIN is asked **once per batch**
+**PIN gate:** protection overrides everything the engine does, so protecting
+the wrong app bypasses the user's own blocking. **Two** kinds of package
+therefore cost `requirePin(context, PinScope.settings)` — the same gate as
+turning blocking off:
+
+1. anything in the blocking catalog (`ConfigRepository.loadBlockTargets()`) —
+   protecting Instagram would bypass reel blocking;
+2. any **browser** (`ProtectedAppsCubit.browserPackages`, EVO-047's twin of
+   native `BrowserUrlExtractor`'s `KNOWN_BROWSERS`) — the privacy guard returns
+   above the web arm, so protecting Chrome silently switches off the website
+   blocklist *and* the 18+ filter inside it (EVO-046). Browsers carry no reel
+   surfaces, so they are never in the catalog and the first rule alone missed
+   them entirely. With the multi-select picker the PIN is asked **once per batch**
 when *any* picked package is monitored. Adding a bank has zero friction. The
 gate **fails closed**: an empty monitored set (load pending or failed)
 PIN-gates every add, and the "Add app" FAB is disabled until a load succeeds —
@@ -181,8 +189,26 @@ always keeps whatever the repo returned.
 - No native log line prints a protected package name.
 - The list never leaves the device; the wire payload is enabled package names
   only, Dart → native.
-- No polling, no UsageStats, no new permissions, no new services — the guard
-  rides the existing accessibility event stream.
+- No polling and no new permissions **for this feature** — the guard rides the existing
+  accessibility event stream.
+- **Notifications are a third surface, and the guard is re-asserted there.** The
+  notification listener ([29](29-notification-suppression.md)) sees far more of the
+  device than the accessibility service's foreground-package view, so
+  `SuppressionDecision.shouldSuppress` refuses a protected package **above every
+  other check** — a protected app is never silenced even when it is also locked in
+  the App Blocker *and* named by an active rule, paused or not. Pinned by
+  `SuppressionDecisionTest.protectedAppIsNeverSuppressedEvenWhenAlsoBlocked`. That
+  listener reads a notification's package name and key and nothing else, and is
+  unbound entirely while the feature is off.
+- **UsageStats is a second surface, and it is filtered separately.** This guard
+  is `DetoxoAccessibilityService.isProtected`, which only sees accessibility
+  events; `engine/UsageQuery.kt` reads `UsageStatsManager` and knows nothing
+  about it. Since insights ([28](28-insights.md)) reads per-app screen time,
+  protected packages are excluded from the only output that *names* an app —
+  `DailyStats.topApps`, on screen and in the `usage_daily` document (EVO-032).
+  Their time still counts toward the aggregate totals, which are not
+  identifying. Any **future** consumer of `UsageQuery` must make the same
+  exclusion; the promise below is not enforced by the accessibility guard.
 
 ## 7. Known limitations
 
@@ -217,3 +243,22 @@ always keeps whatever the repo returned.
 - `lib/core/storage/local_store.dart`
 - `lib/app/splash_screen.dart`
 - `test/protected_apps_test.dart`
+
+---
+
+## Backup exclusion (EVO-005)
+
+`android:allowBackup="false"` plus `res/xml/data_extraction_rules.xml` (which
+excludes `domain="root"` from both `<cloud-backup>` and `<device-transfer>`) keep
+the Hive box `detoxo` and `detoxo_engine_prefs` out of Google cloud backup and
+device-to-device transfer. Until M6 the manifest declared neither, so the
+platform default (`allowBackup=true`) made this doc's "never leaves the device"
+promise technically false — the protected-app list, and later the onboarding
+record's first name, were both backup-eligible.
+
+Excluded wholesale rather than by path: Detoxo is offline-first with no account,
+so a restore carries nothing the user would miss beyond local settings, and an
+exclusion keyed to a Hive file path would fail silently if path_provider's
+directory ever moved. Accepted cost: a reinstall or device transfer means
+re-doing onboarding and re-adding manual protections. Catalog-derived protection
+is computed, not stored, and is unaffected.

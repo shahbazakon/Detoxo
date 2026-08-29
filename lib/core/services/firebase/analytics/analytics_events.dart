@@ -12,6 +12,19 @@ abstract final class AnalyticsEvent {
   static const String blockTriggered = 'block_triggered';
   static const String reelsCounted = 'reels_counted';
   static const String webBlocked = 'web_blocked';
+
+  /// The first run reached a step (`step` = the OnboardingStepId wire token,
+  /// `direction` = ENTER | FORWARD | BACK). The funnel event — no answer values
+  /// are ever sent, only which step and how it was reached.
+  static const String onboardingStep = 'onboarding_step';
+
+  /// The user acted on the block screen (`action` = GO_HOME | OPEN_APP |
+  /// DISMISS | UNBLOCK). The target (a host / package) is never sent.
+  static const String blockScreenAction = 'block_screen_action';
+
+  /// A soft-nudge card was shown (`duration_min` = the threshold that was
+  /// crossed). The package is never sent — which apps a user has is theirs.
+  static const String nudgeShown = 'nudge_shown';
 }
 
 /// Parameter keys for [AnalyticsEvent]s. Firebase only accepts `String` or `num`
@@ -24,4 +37,7 @@ abstract final class AnalyticsParam {
   static const String platform = 'platform';
   static const String mode = 'mode';
   static const String count = 'count';
+  static const String action = 'action';
+  static const String step = 'step';
+  static const String direction = 'direction';
 }

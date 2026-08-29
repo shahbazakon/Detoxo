@@ -18,7 +18,7 @@ class PinCubit extends Cubit<PinConfig> {
 
   /// Loads the persisted config and re-applies the FLAG_SECURE window state.
   /// Window flags die with the activity and every recreation path re-runs the
-  /// splash (which awaits this), so only a *set* is ever needed here — the
+  /// bootstrap (which awaits this), so only a *set* is ever needed here — the
   /// no-PIN majority skips the channel round-trip on the launch critical path;
   /// [setup]/[disable] handle explicit clears.
   Future<void> load() async {

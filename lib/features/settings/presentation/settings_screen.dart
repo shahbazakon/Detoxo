@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:detoxo/core/constants/app_constants.dart';
 import 'package:detoxo/core/design_system/design_system.dart';
 import 'package:detoxo/core/di/injector.dart';
+import 'package:detoxo/core/navigation/app_gate.dart';
 import 'package:detoxo/core/navigation/routes.dart';
 import 'package:detoxo/core/storage/local_store.dart';
 import 'package:detoxo/core/widgets/common_widgets.dart';
@@ -14,6 +15,7 @@ import 'package:detoxo/features/blocking/shared/domain/entities/app_settings.dar
 import 'package:detoxo/features/blocking/shared/domain/entities/enums.dart';
 import 'package:detoxo/features/blocking/shared/presentation/settings_cubit.dart';
 import 'package:detoxo/features/limits/daily_limit/presentation/daily_limit_screen.dart';
+import 'package:detoxo/features/limits/limits.dart';
 import 'package:detoxo/features/permissions/domain/entities/permission_status.dart';
 import 'package:detoxo/features/permissions/presentation/permission_actions.dart';
 import 'package:detoxo/features/permissions/presentation/permissions_cubit.dart';
@@ -73,6 +75,14 @@ class _SettingsScreenState extends State<SettingsScreen>
     );
   }
 
+  Future<void> _openNudgeThreshold() async {
+    await GlassBottomSheet.show<void>(
+      context: context,
+      title: 'Nudge me every',
+      child: const _NudgeThresholdSheet(),
+    );
+  }
+
   /// Disabling protection is a sensitive change, so it asks for the PIN (when
   /// the `settings` scope guards it); enabling proceeds directly. The switch is
   /// bound to `settings.masterEnabled`, so a cancelled PIN snaps it back.
@@ -86,6 +96,43 @@ class _SettingsScreenState extends State<SettingsScreen>
     }
     if (!context.mounted) return;
     await context.read<SettingsCubit>().setMasterEnabled(enabled: enabled);
+  }
+
+  /// Turning suppression on without Android's notification-access grant would
+  /// silently do nothing, so the grant is funnelled first — through the same
+  /// [requestPermission] entry point as everywhere else, which carries the
+  /// prominent disclosure and the restricted-settings recovery.
+  ///
+  /// A **declined disclosure is a refusal**, and the setting is not committed:
+  /// recording the feature as on right after the user read what it does and
+  /// said no would be the app overriding an explicit consent decision.
+  ///
+  /// Proceeding past the disclosure does commit, because the system grant
+  /// screen returns no result — the user is still standing on Android's list
+  /// when this resolves, so "not granted yet" is not "not wanted". The tile
+  /// renders that gap truthfully instead of pretending (see `_SuppressionTile`).
+  Future<void> _setSuppressNotifications(
+    BuildContext context, {
+    required bool enabled,
+  }) async {
+    final permissions = context.read<PermissionsCubit>();
+    if (enabled) {
+      final status = permissions.state.firstWhere(
+        (s) => s.kind == AppPermission.notificationListener,
+        orElse: () =>
+            const PermissionStatus(kind: AppPermission.notificationListener),
+      );
+      if (!permissions.effectivelyGranted(status)) {
+        final proceeded = await requestPermission(
+          context,
+          AppPermission.notificationListener,
+        );
+        if (!proceeded || !context.mounted) return;
+      }
+    }
+    await context.read<SettingsCubit>().setSuppressNotifications(
+      enabled: enabled,
+    );
   }
 
   Future<void> _resetData() async {
@@ -104,6 +151,11 @@ class _SettingsScreenState extends State<SettingsScreen>
     if (!ok || !mounted) return;
     await sl<LocalStore>().clearAll();
     if (!mounted) return;
+    // Slam the router's gate shut BEFORE navigating. This path re-enters the
+    // splash without restarting the process, so the gate still holds the flags
+    // from before the wipe — leaving them set would wave the user straight
+    // through to home and the bootstrap would never run.
+    sl<AppGate>().reset();
     context.go(Routes.splash);
   }
 
@@ -165,6 +217,15 @@ class _SettingsScreenState extends State<SettingsScreen>
                   ),
                 ),
 
+                const _AllowanceTile(),
+
+                _NudgeTile(
+                  settings: settings,
+                  onChanged: (v) =>
+                      context.read<SettingsCubit>().setNudgeEnabled(enabled: v),
+                  onTuning: _openNudgeThreshold,
+                ),
+
                 // ── Privacy: apps Detoxo must never touch ───────────────────
                 const SectionHeader('Privacy'),
                 FeatureTile(
@@ -173,6 +234,12 @@ class _SettingsScreenState extends State<SettingsScreen>
                   subtitle:
                       'Banking & sensitive apps Detoxo completely ignores',
                   onTap: () => context.push(Routes.protectedApps),
+                ),
+
+                _SuppressionTile(
+                  enabled: settings.suppressNotifications,
+                  onChanged: (v) =>
+                      unawaited(_setSuppressNotifications(context, enabled: v)),
                 ),
 
                 // ── Security: who can change things & system access ─────────
@@ -214,6 +281,222 @@ class _SettingsScreenState extends State<SettingsScreen>
           },
         ),
       ),
+    );
+  }
+}
+
+/// Notification silence, rendered truthfully (EVO-036).
+///
+/// The switch has a permission dependency, so "on" and "working" are two
+/// different things: the grant can still be pending on Android's own screen, or
+/// have been revoked from system settings while the switch stayed on. Showing a
+/// plain ON in either case is the app claiming to do something it cannot —
+/// the same shape `ContentCount.bubbleBlocked` solves for the counter bubble.
+///
+/// When the grant is missing the row says so and offers the fix; the permission
+/// state refreshes on every resume, so returning from Android's list clears it.
+/// Soft nudge: the switch, and — when it is on — the tuning row.
+///
+/// Like [_SuppressionTile], "on" and "working" are two different things here.
+/// The nudge draws its card in a `TYPE_APPLICATION_OVERLAY` window, so without
+/// "Display over other apps" `NudgeOverlay.show` returns false and the engine
+/// deliberately reports nothing — the switch would read ON while not one card
+/// could ever appear. This is the same grant, and the same shape, that
+/// `ContentCount.bubbleBlocked` solves for the counter bubble (EVO-022).
+/// EVO-053 — how many per-target allowances ("Allow Instagram for 15 minutes")
+/// may be spent per day.
+///
+/// Ships as **Unlimited**, so nothing changes for anyone who does not opt in.
+/// It lives here rather than on a blocklist screen because it governs every
+/// grant surface at once — a row, the wall, the website list — and because
+/// Settings is what the PIN already guards.
+class _AllowanceTile extends StatelessWidget {
+  const _AllowanceTile();
+
+  static const List<int> _options = [0, 1, 2, 3, 5];
+
+  static String _label(int limit) => limit == 0 ? 'Unlimited' : '$limit a day';
+
+  @override
+  Widget build(BuildContext context) {
+    final limit = context.select<UnblockCubit, int>(
+      (c) => c.state.config.grantLimit,
+    );
+    return _Spaced(
+      FeatureTile(
+        icon: Icons.timer_outlined,
+        title: 'Allowances',
+        subtitle: '${_label(limit)} · "Allow this for a while"',
+        onTap: () => _pick(context, limit),
+      ),
+    );
+  }
+
+  Future<void> _pick(BuildContext context, int current) async {
+    final cubit = context.read<UnblockCubit>();
+    final picked = await GlassBottomSheet.show<int>(
+      context: context,
+      title: 'Allowances a day',
+      child: Builder(
+        builder: (sheetContext) => Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Wrap(
+              spacing: AppSpacing.xs,
+              children: [
+                for (final o in _options)
+                  AppChip(
+                    label: _label(o),
+                    selected: o == current,
+                    onSelected: () => Navigator.of(sheetContext).pop(o),
+                  ),
+              ],
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            const InlineHint(
+              icon: Icons.info_outline,
+              text:
+                  'A locked rule already costs an override to lift. This is the '
+                  'other half: how often you can free one app, feed or site for '
+                  'a few minutes before tomorrow.',
+            ),
+          ],
+        ),
+      ),
+    );
+    if (picked == null || picked == current) return;
+    await cubit.setGrantLimit(picked);
+  }
+}
+
+class _NudgeTile extends StatelessWidget {
+  const _NudgeTile({
+    required this.settings,
+    required this.onChanged,
+    required this.onTuning,
+  });
+
+  final AppSettings settings;
+  final ValueChanged<bool> onChanged;
+  final VoidCallback onTuning;
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = Theme.of(context).colorScheme.secondary;
+    final enabled = settings.nudgeEnabled;
+    return BlocBuilder<PermissionsCubit, List<PermissionStatus>>(
+      builder: (context, statuses) {
+        final cubit = context.read<PermissionsCubit>();
+        final status = statuses.firstWhere(
+          (s) => s.kind == AppPermission.overlay,
+          orElse: () => const PermissionStatus(kind: AppPermission.overlay),
+        );
+        // Only a *definite* missing grant is a problem — an unknown read falls
+        // back to lastKnownGranted (EVO-014), so a flaky channel call never
+        // accuses a working setup of being broken.
+        final blocked = enabled && !cubit.effectivelyGranted(status);
+        return Column(
+          children: [
+            _Spaced(
+              AppToggleTile(
+                leading: Icon(
+                  Icons.timer_outlined,
+                  color: blocked ? AppColors.warning : accent,
+                ),
+                title: 'Soft nudge',
+                subtitle:
+                    'A card that says how long you’ve been in a distracting '
+                    'app. Nothing is blocked.',
+                value: enabled,
+                onChanged: onChanged,
+              ),
+            ),
+            if (blocked)
+              _Spaced(
+                GlassListTile(
+                  leading: const Icon(
+                    Icons.error_outline,
+                    color: AppColors.warning,
+                  ),
+                  title: 'Needs “Display over other apps”',
+                  subtitle: 'No cards can appear yet — tap to allow',
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => unawaited(
+                    requestPermission(context, AppPermission.overlay),
+                  ),
+                ),
+              ),
+            if (enabled)
+              FeatureTile(
+                icon: Icons.tune,
+                title: 'Nudge me every',
+                subtitle: _nudgeTitle(settings),
+                onTap: onTuning,
+              ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _SuppressionTile extends StatelessWidget {
+  const _SuppressionTile({required this.enabled, required this.onChanged});
+
+  final bool enabled;
+  final ValueChanged<bool> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final accent = Theme.of(context).colorScheme.secondary;
+    return BlocBuilder<PermissionsCubit, List<PermissionStatus>>(
+      builder: (context, statuses) {
+        final cubit = context.read<PermissionsCubit>();
+        final status = statuses.firstWhere(
+          (s) => s.kind == AppPermission.notificationListener,
+          orElse: () =>
+              const PermissionStatus(kind: AppPermission.notificationListener),
+        );
+        // Only a *definite* missing grant is a problem. An unknown read is
+        // covered by effectivelyGranted's lastKnownGranted fallback (EVO-014),
+        // so a flaky channel call never accuses a working setup of being broken.
+        final blocked = enabled && !cubit.effectivelyGranted(status);
+        return Column(
+          children: [
+            _Spaced(
+              AppToggleTile(
+                leading: Icon(
+                  Icons.notifications_off,
+                  color: blocked ? AppColors.warning : accent,
+                ),
+                title: 'Notification silence',
+                subtitle: 'Mute apps while they’re blocked',
+                value: enabled,
+                onChanged: onChanged,
+              ),
+            ),
+            if (blocked)
+              _Spaced(
+                GlassListTile(
+                  leading: const Icon(
+                    Icons.error_outline,
+                    color: AppColors.warning,
+                  ),
+                  title: 'Needs “Notification access”',
+                  subtitle: 'Nothing is being muted yet — tap to allow',
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: () => unawaited(
+                    requestPermission(
+                      context,
+                      AppPermission.notificationListener,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 }
@@ -310,7 +593,7 @@ class _UpdateButton extends StatelessWidget {
 // ── Block-mode + appearance option data ───────────────────────────────────────
 
 const _blockModes = <(BlockingMode, String, String)>[
-  (BlockingMode.pressBack, 'Press back', 'Gently exits the reel (recommended)'),
+  (BlockingMode.pressBack, 'Press back', 'Exits the reel (recommended)'),
   (
     BlockingMode.killApp,
     'Close the app',
@@ -326,6 +609,15 @@ const _blockModes = <(BlockingMode, String, String)>[
 String _blockModeTitle(BlockingMode m) => _blockModes
     .firstWhere((e) => e.$1 == m, orElse: () => _blockModes.first)
     .$2;
+
+/// Minutes offered for the soft nudge. Deliberately no value under 5: a card
+/// every couple of minutes stops being information and becomes nagging.
+/// Both lists sit inside the native clamps (1–60 min, 1–50 cards).
+const _nudgeMinutes = <int>[5, 10, 15, 30];
+const _nudgeCaps = <int>[2, 4, 6, 10];
+
+String _nudgeTitle(AppSettings s) =>
+    '${s.nudgeThresholdMinutes} min · up to ${s.nudgeDailyCap} per app a day';
 
 IconData _themeIcon(AppThemeMode m) => switch (m) {
   AppThemeMode.system => Icons.brightness_auto,
@@ -448,6 +740,7 @@ IconData _permissionIcon(AppPermission p) => switch (p) {
   AppPermission.usageAccess => Icons.bar_chart,
   AppPermission.batteryOptimization => Icons.battery_charging_full,
   AppPermission.deviceAdmin => Icons.shield,
+  AppPermission.notificationListener => Icons.notifications_off,
 };
 
 /// Main-screen entry: a single tile summarising permission status; opens the
@@ -460,8 +753,15 @@ class _PermissionsTile extends StatelessWidget {
   Widget build(BuildContext context) {
     return BlocBuilder<PermissionsCubit, List<PermissionStatus>>(
       builder: (context, statuses) {
-        final granted = statuses.where((s) => s.granted).length;
-        final total = statuses.length;
+        // Required only, via effectivelyGranted — the same predicate the
+        // funnel's "N of M" row and Continue button use, so the two can never
+        // contradict each other. Counting all of AppPermission.values made
+        // "All set" unreachable: it demanded uninstall protection and
+        // notification access, both of which ship off by design.
+        final cubit = context.read<PermissionsCubit>();
+        final required = statuses.where((s) => s.kind.required).toList();
+        final granted = required.where(cubit.effectivelyGranted).length;
+        final total = required.length;
         final allOk = total > 0 && granted == total;
         return FeatureTile(
           icon: Icons.verified_user_outlined,
@@ -507,7 +807,8 @@ class _PermissionSheet extends StatelessWidget {
                     ),
                     title: s.kind.label,
                     subtitle: s.kind.why,
-                    trailing: s.granted
+                    trailing:
+                        context.read<PermissionsCubit>().effectivelyGranted(s)
                         ? const Pill(
                             label: 'Granted',
                             tone: AppTone.success,
@@ -580,6 +881,68 @@ class _BlockModeSheet extends StatelessWidget {
                   onTap: () => unawaited(_select(context, e.$1)),
                 ),
               ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+/// Picks how often the soft nudge speaks, and how many times a day it may.
+///
+/// The copy is explicit that the threshold is per visit, because "nudge me
+/// every 5 minutes" and "nudge me after 30 minutes today" are different
+/// features and the second one is the Daily limit, one tile up this screen.
+class _NudgeThresholdSheet extends StatelessWidget {
+  const _NudgeThresholdSheet();
+
+  @override
+  Widget build(BuildContext context) {
+    return BlocBuilder<SettingsCubit, AppSettings>(
+      builder: (context, settings) {
+        final cubit = context.read<SettingsCubit>();
+        return Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            for (final m in _nudgeMinutes)
+              Padding(
+                padding: const EdgeInsets.only(bottom: AppSpacing.xs),
+                child: _OptionTile(
+                  title: '$m minutes',
+                  subtitle: 'Counted from opening the app, not across the day',
+                  selected: settings.nudgeThresholdMinutes == m,
+                  onTap: () {
+                    unawaited(cubit.setNudgeThresholdMinutes(m));
+                    Navigator.of(context).pop();
+                  },
+                ),
+              ),
+            const SizedBox(height: AppSpacing.md),
+            Padding(
+              padding: const EdgeInsets.only(bottom: AppSpacing.xs),
+              child: Text(
+                'Most nudges per app, per day',
+                style: Theme.of(context).textTheme.labelLarge,
+              ),
+            ),
+            Wrap(
+              spacing: AppSpacing.xs,
+              children: [
+                for (final cap in _nudgeCaps)
+                  AppChip(
+                    label: '$cap',
+                    // The visible text is a bare number; without this a screen
+                    // reader announces "4, selected" with no idea of what.
+                    semanticLabel: '$cap nudges per app per day',
+                    selected: settings.nudgeDailyCap == cap,
+                    onSelected: () {
+                      unawaited(cubit.setNudgeDailyCap(cap));
+                      Navigator.of(context).pop();
+                    },
+                  ),
+              ],
+            ),
           ],
         );
       },

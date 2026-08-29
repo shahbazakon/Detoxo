@@ -32,10 +32,11 @@ class PermissionRepositoryImpl implements PermissionRepository {
     // list makes PermissionsCubit.allRequiredGranted vacuously true, so the
     // splash gate routes straight to /home on iOS.
     if (!PlatformCapabilities.usesAndroidPermissionFunnel) return const [];
-    final result = <PermissionStatus>[];
-    for (final p in AppPermission.values) {
-      result.add(await status(p));
-    }
+    // Concurrent, not serial: each leg is an independent channel round trip
+    // that retries once after 150 ms on a null read, and this runs inside the
+    // splash gate's Future.wait. Serially that was N round trips plus up to
+    // N x 150 ms of retry delay on the cold-start critical path.
+    final result = await Future.wait(AppPermission.values.map(status));
     _persistGranted(result);
     return result;
   }
@@ -98,6 +99,9 @@ class PermissionRepositoryImpl implements PermissionRepository {
     AppPermission.deviceAdmin => _channel.invokeBoolOrNull(
       ChannelMethods.isDeviceAdminActive,
     ),
+    AppPermission.notificationListener => _channel.invokeBoolOrNull(
+      ChannelMethods.isNotificationListenerEnabled,
+    ),
     AppPermission.notifications => Future.value(false), // handled in status()
   };
 
@@ -157,6 +161,10 @@ class PermissionRepositoryImpl implements PermissionRepository {
         await _channel.requestIgnoreBattery();
       case AppPermission.deviceAdmin:
         await _channel.requestDeviceAdmin();
+      case AppPermission.notificationListener:
+        // No programmatic grant exists: the user toggles Detoxo on in the
+        // system's "Notification access" list themselves.
+        await _channel.openNotificationListenerSettings();
       case AppPermission.notifications:
         // A plain request() no-ops once permanently denied — send the user to
         // the app's settings screen instead so they have a recovery path.

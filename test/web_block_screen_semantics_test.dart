@@ -5,12 +5,16 @@ import 'package:detoxo/core/di/injector.dart';
 import 'package:detoxo/features/blocking/shared/domain/entities/app_settings.dart';
 import 'package:detoxo/features/blocking/shared/domain/repositories/blocking_repositories.dart';
 import 'package:detoxo/features/limits/app_blocker/domain/repositories/app_block_repository.dart';
+import 'package:detoxo/features/limits/unblock/domain/entities/temporary_unblock.dart';
+import 'package:detoxo/features/limits/unblock/domain/repositories/unblock_repositories.dart';
+import 'package:detoxo/features/limits/unblock/presentation/unblock_cubit.dart';
 import 'package:detoxo/features/limits/web_blocker/domain/entities/web_block_entry.dart';
 import 'package:detoxo/features/limits/web_blocker/domain/entities/web_block_stats.dart';
 import 'package:detoxo/features/limits/web_blocker/domain/repositories/web_block_repository.dart';
 import 'package:detoxo/features/limits/web_blocker/domain/repositories/web_block_stats_repository.dart';
 import 'package:detoxo/features/limits/web_blocker/presentation/web_block_screen.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:mocktail/mocktail.dart';
 
@@ -23,6 +27,24 @@ class _MockAppBlockRepo extends Mock implements AppBlockRepository {}
 class _MockStatsRepo extends Mock implements WebBlockStatsRepository {}
 
 class _MockEngine extends Mock implements EngineRepository {}
+
+/// The row reads its "Allowed until" pill off this (M8), so the screen needs
+/// one above it — empty stores mean no grants and no quota spent.
+class _EmptyGrants implements TemporaryUnblockRepository {
+  @override
+  Future<List<TemporaryUnblock>> load() async => const [];
+
+  @override
+  Future<void> save(List<TemporaryUnblock> grants) async {}
+}
+
+class _EmptyLedger implements BypassLedgerRepository {
+  @override
+  Future<BypassLedger> load() async => const BypassLedger();
+
+  @override
+  Future<void> save(BypassLedger ledger) async {}
+}
 
 // AppTheme pulls google_fonts, which stalls under flutter_test — the screen
 // only needs GlassTokens plus a ColorScheme (same idiom as app_picker_test).
@@ -64,6 +86,8 @@ void main() {
     when(() => statsRepo.load()).thenAnswer((_) async => const WebBlockStats());
     when(() => statsRepo.watch()).thenAnswer((_) => statsCtrl.stream);
     when(() => engine.pushWebBlocklist(any())).thenAnswer((_) async {});
+    when(() => engine.pushTemporaryUnblocks(any())).thenAnswer((_) async {});
+    when(() => engine.takePendingUnblock()).thenAnswer((_) async => null);
     sl
       ..registerSingleton<WebBlockRepository>(repo)
       ..registerSingleton<SettingsRepository>(settings)
@@ -79,7 +103,11 @@ void main() {
 
   Future<void> pumpScreen(WidgetTester tester) async {
     await tester.pumpWidget(
-      MaterialApp(theme: _theme(), home: const WebBlockScreen()),
+      BlocProvider(
+        create: (_) =>
+            UnblockCubit(_EmptyGrants(), _EmptyLedger(), engine)..load(),
+        child: MaterialApp(theme: _theme(), home: const WebBlockScreen()),
+      ),
     );
     await tester.pump(); // load() future completes
     // Entrance animations (fadeIn/slideY). Never pumpAndSettle: the

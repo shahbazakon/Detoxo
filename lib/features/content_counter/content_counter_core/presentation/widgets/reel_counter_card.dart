@@ -36,7 +36,12 @@ class _ReelCounterCardState extends State<ReelCounterCard> {
               const SizedBox(height: AppSpacing.lg),
               _heroCount(context, value: value, reduce: reduce),
               const SizedBox(height: AppSpacing.lg),
-              _breakdown(context, apps: apps, reduce: reduce),
+              _breakdown(
+                context,
+                apps: apps,
+                reduce: reduce,
+                counting: count.enabled,
+              ),
             ],
           ),
         );
@@ -142,13 +147,24 @@ class _ReelCounterCardState extends State<ReelCounterCard> {
     BuildContext context, {
     required List<AppContentCount> apps,
     required bool reduce,
+    required bool counting,
   }) {
+    final muted = Theme.of(
+      context,
+    ).textTheme.bodySmall?.copyWith(color: context.glass.onGlassMuted);
+    // Truthful state: with counting off, no reel can appear here — say so
+    // instead of promising that opening Reels will populate the list.
+    if (!counting) {
+      return Text(
+        'Counting is off — switch on “Count short videos” under Appearance '
+        'to keep this up to date.',
+        style: muted,
+      );
+    }
     if (apps.isEmpty) {
       return Text(
         'No reels counted yet — open Reels or Shorts and they’ll appear here.',
-        style: Theme.of(
-          context,
-        ).textTheme.bodySmall?.copyWith(color: context.glass.onGlassMuted),
+        style: muted,
       );
     }
     final max = apps.first.count.clamp(1, 1 << 30);

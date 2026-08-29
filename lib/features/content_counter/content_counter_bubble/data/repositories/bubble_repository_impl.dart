@@ -1,3 +1,4 @@
+import 'package:detoxo/core/constants/channel_constants.dart';
 import 'package:detoxo/core/platform_channels/engine_channel.dart';
 import 'package:detoxo/features/content_counter/content_counter_bubble/domain/repositories/bubble_repository.dart';
 
@@ -10,7 +11,8 @@ class BubbleRepositoryImpl implements BubbleRepository {
   final EngineChannel _channel;
 
   @override
-  Future<bool> canShow() => _channel.canDrawOverlays();
+  Future<bool?> canShow() =>
+      _channel.invokeBoolOrNull(ChannelMethods.canDrawOverlays);
 
   @override
   Future<void> requestPermission() => _channel.requestOverlay();

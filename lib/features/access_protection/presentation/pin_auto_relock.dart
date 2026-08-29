@@ -11,7 +11,8 @@ import 'package:go_router/go_router.dart';
 /// `requirePin` — so navigation state, open dialogs and sheets survive
 /// underneath, and the system back button is blocked by the lock's `PopScope`.
 ///
-/// The cold-start launch gate stays in the splash; this only handles resume.
+/// The cold-start launch gate is the router redirect (`AppGate`); this only
+/// handles resume.
 class PinAutoRelock extends StatefulWidget {
   const PinAutoRelock({required this.router, required this.child, super.key});
 

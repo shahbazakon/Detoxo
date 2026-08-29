@@ -1,27 +1,34 @@
 package com.errorxperts.detoxo.accessibility
 
 import android.accessibilityservice.AccessibilityService
+import android.accessibilityservice.AccessibilityServiceInfo
 import android.app.ActivityManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.admin.DevicePolicyManager
+import android.content.BroadcastReceiver
 import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
+import android.provider.Settings
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityManager
 import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.errorxperts.detoxo.R
 import com.errorxperts.detoxo.admin.DetoxoDeviceAdminReceiver
 import com.errorxperts.detoxo.engine.BrowserUrlExtractor
@@ -30,10 +37,20 @@ import com.errorxperts.detoxo.engine.ContentCounter
 import com.errorxperts.detoxo.engine.DateKeys
 import com.errorxperts.detoxo.engine.DetectionConfig
 import com.errorxperts.detoxo.engine.DetectorRule
+import com.errorxperts.detoxo.engine.NudgeDecision
+import com.errorxperts.detoxo.engine.NudgeTracker
 import com.errorxperts.detoxo.engine.PlatformRule
+import com.errorxperts.detoxo.engine.ReelTracker
+import com.errorxperts.detoxo.engine.LimitReconciler
+import com.errorxperts.detoxo.engine.RuleEngine
 import com.errorxperts.detoxo.engine.ServiceEventBus
+import com.errorxperts.detoxo.engine.SuppressionDecision
+import com.errorxperts.detoxo.engine.UnblockRegistry
 import com.errorxperts.detoxo.engine.WebBlockEngine
 import com.errorxperts.detoxo.engine.recycleSafe
+import com.errorxperts.detoxo.overlay.BlockScreenOverlay
+import com.errorxperts.detoxo.overlay.BlockScreenPayload
+import com.errorxperts.detoxo.overlay.NudgeOverlay
 import com.errorxperts.detoxo.receivers.WatchdogJobService
 import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentHashMap
@@ -77,6 +94,34 @@ class DetoxoAccessibilityService : AccessibilityService() {
      */
     fun refreshProtectedPackages() {
         protectedPkgs = store.protectedPackages
+        // The nudge's watch list is derived by subtracting this set, so it has
+        // to be recomputed here too — protecting an app must take the nudge off
+        // it immediately, not at the next unrelated settings push.
+        refreshNudgeConfig()
+    }
+
+    /**
+     * Whether [pkg]'s notifications may be cancelled right now — the single
+     * question `DetoxoNotificationListener` asks, on a callback that fires for
+     * every notification on the device.
+     *
+     * Reads only the @Volatile mirrors above and the in-memory [ruleEngine]:
+     * no SharedPreferences, no Dart round-trip, no allocation. The decision
+     * itself lives in [SuppressionDecision], which is Android-free so it can be
+     * unit-tested — this service cannot.
+     */
+    fun shouldSuppressNotification(pkg: String): Boolean {
+        if (!suppressNotifications || !masterOn) return false
+        val now = System.currentTimeMillis()
+        return SuppressionDecision.shouldSuppress(
+            pkg = pkg,
+            ownPkg = packageName,
+            protectedPkgs = protectedPkgs,
+            blockedApps = blockedApps,
+            rules = ruleEngine,
+            now = now,
+            paused = now < pausedUntil,
+        )
     }
 
     private val lastEventByPackage = ConcurrentHashMap<String, Long>()
@@ -98,6 +143,34 @@ class DetoxoAccessibilityService : AccessibilityService() {
      */
     @Volatile private var homePkgs: Set<String> = emptySet()
 
+    // ── Block screen (intervention wall) ─────────────────────────────────────
+    /**
+     * Packages of the enabled accessibility services (TalkBack, Switch Access…).
+     * Their menus foreground under their own package; a standing block screen
+     * must not read that as "the user left". Refreshed by [reload].
+     */
+    @Volatile private var a11yPkgs: Set<String> = emptySet()
+
+    /**
+     * The package that was in front before the current one — where the
+     * engine's BACK may land (a reel opened from a share link returns to the
+     * sharing app). A reel / website wall stays over it (EVO-026).
+     */
+    @Volatile private var prevForegroundPkg: String? = null
+
+    /**
+     * Screen-off takes a standing wall — and a standing nudge card — down. The
+     * MainActivity receiver cannot do it: it lives with the UI, which is dead
+     * exactly when the wall is up.
+     */
+    private val screenOffReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            BlockScreenOverlay.hide()
+            NudgeOverlay.hide()
+        }
+    }
+    private var screenOffRegistered = false
+
     /**
      * Cheap refresh for pushAppBlocklist (mirrors [refreshProtectedPackages]).
      * Re-resolves the launcher guard too — the user may have switched
@@ -113,6 +186,115 @@ class DetoxoAccessibilityService : AccessibilityService() {
         webEngine.setBlocklist(store.webBlocklistJson)
     }
 
+    /**
+     * Cheap refresh for pushTemporaryUnblocks (M8). Also called from [reload],
+     * so a reboot or a service reconnect re-anchors every grant's monotonic
+     * deadline against the surviving wall stamp — without that second caller
+     * every grant would silently die at reboot.
+     */
+    fun refreshTemporaryUnblocks() {
+        unblocks.setGrants(
+            store.temporaryUnblocksJson,
+            System.currentTimeMillis(),
+            SystemClock.elapsedRealtime(),
+        )
+    }
+
+    /**
+     * M8: is [pkg] temporarily unblocked right now?
+     *
+     * One volatile read for the (overwhelmingly common) no-grants case, so the
+     * elapsedRealtime call only happens for a user who actually holds a grant.
+     * Consulted by the App Blocker arm and the NON-strict package rule arm —
+     * never by the strict arm between them, and never before the cheaper guards
+     * those arms already apply, so a grant-holder does not pay for it on every
+     * event of every app.
+     */
+    private fun appUnblocked(pkg: String): Boolean {
+        val nowE = SystemClock.elapsedRealtime()
+        return unblocks.hasAny(UnblockRegistry.TYPE_APP, nowE) &&
+            unblocks.isUnblocked(UnblockRegistry.TYPE_APP, pkg, nowE)
+    }
+
+    // ── Soft nudge ────────────────────────────────────────────────────────────
+    /**
+     * The advisory dwell nudge. Not a blocker: it never returns, never presses
+     * BACK and never touches block state — it only reads the foreground package
+     * off an event that has already been dispatched, so it adds nothing to the
+     * tree walk. Rebuilt on each config push because its tuning is constructor
+     * state; the live session is meant to die with it.
+     */
+    private val nudge = NudgeTracker()
+
+    /**
+     * The app the nudge considers foreground. [foregroundPkg] cannot be used
+     * directly: it latches the IME's package when the soft keyboard opens, and
+     * resolving the IME costs a binder read that the per-event nudge tick must
+     * not pay. Latched here on window changes, where the answer is already
+     * computed for the counter.
+     */
+    @Volatile private var nudgeForegroundPkg: String? = null
+
+    /** Own throttle stamp for the nudge tick — see the call site. */
+    private var lastNudgeTickMs = 0L
+
+    /**
+     * Cheap refresh for pushNudgeConfig (mirrors [refreshProtectedPackages]).
+     *
+     * Reconfigures the tracker **in place** — `pushSettings` lands here on
+     * every resume and every settings write, and rebuilding it handed the user
+     * a fresh daily budget each time (see [NudgeTracker.configure]).
+     *
+     * The protected subtraction is the nudge's second privacy anchor: even if
+     * the foreground latch were wrong, a protected app cannot be in the set the
+     * machine will act on. Also re-run from [refreshProtectedPackages] so the
+     * two sets can never drift apart.
+     */
+    fun refreshNudgeConfig() {
+        nudge.configure(
+            enabled = store.nudgeEnabled,
+            packages = store.nudgePackages - protectedPkgs,
+            thresholdStepMs = store.nudgeStepMs,
+            dailyCap = store.nudgeDailyCap,
+        )
+        if (!store.nudgeEnabled) NudgeOverlay.hide()
+    }
+
+    /** EVO-029: whether the watchdog has any rule budget worth re-measuring. */
+    fun hasPendingRuleLimits(): Boolean = ruleEngine.hasPendingLimits()
+
+    /**
+     * EVO-029: flip every pending rule limit whose budget today's measurements
+     * say is used up. True when something actually changed, so the caller only
+     * notifies Dart on a real flip.
+     */
+    fun markRuleLimitsSpent(
+        usageMsByPackage: Map<String, Long>,
+        opensByPackage: Map<String, Int>,
+    ): Boolean = ruleEngine.markSpent(
+        LimitReconciler.spentIds(ruleEngine.pendingLimits(), usageMsByPackage, opensByPackage),
+    )
+
+    /** Cheap refresh for pushRules: the snapshot + the boundary mirror only. */
+    fun refreshRules() {
+        ruleEngine.setSnapshot(store.rulesJson)
+        nextBoundaryMs = store.nextBoundaryMs
+    }
+
+    /**
+     * Posts `ruleBoundary` once the pushed boundary has passed — called on
+     * every window-state change and from the watchdog tick — then clears it so
+     * it fires once; Dart's re-push arms the next one. A dead Dart drops the
+     * event; the next resume re-pushes regardless.
+     */
+    fun checkRuleBoundary(now: Long) {
+        val boundary = nextBoundaryMs
+        if (boundary <= 0L || now < boundary) return
+        nextBoundaryMs = 0L
+        store.nextBoundaryMs = 0L
+        ServiceEventBus.post("ruleBoundary", mapOf("atMs" to boundary))
+    }
+
     // ── Hot-path settings cache ──────────────────────────────────────────────
     // Mirrors of the per-event settings flags, same pattern as [protectedPkgs]:
     // the event path touches no SharedPreferences. Safe because every write
@@ -121,6 +303,9 @@ class DetoxoAccessibilityService : AccessibilityService() {
     @Volatile private var pausedUntil = 0L
     @Volatile private var activePlan = ""
     @Volatile private var enabledPlatformIds: Set<String> = emptySet()
+    // Read on the notification listener's callback, not this service's event
+    // path — same no-prefs-per-callback contract (see [shouldSuppressNotification]).
+    @Volatile private var suppressNotifications = false
 
     // ── Conscious bank cache + write batching ────────────────────────────────
     // The 1 Hz accountant used to do two prefs .apply() per tick (anchor +
@@ -145,13 +330,37 @@ class DetoxoAccessibilityService : AccessibilityService() {
     // so CommandHandler can reach it via the service instance.
     val contentCounter by lazy { ContentCounter(this) }
     private val lastCountEventByPackage = ConcurrentHashMap<String, Long>()
+    // Consecutive counting-pass misses per package, cycling 0..DFS_SKIP: the
+    // stage-3 DFS runs only at 0 (see countContent). Main thread only.
+    private val countMisses = HashMap<String, Int>()
+    // Scroll-field calibration log switch, read once per bind (a property
+    // lookup per raw scroll event would otherwise sit on the pre-throttle path).
+    private val scrollDebug = Log.isLoggable(TAG, Log.DEBUG)
+
+    // ── Temporary unblocks (M8) ──────────────────────────────────────────────
+    // Per-target grants ("Instagram for 15 minutes"): consulted at the App
+    // Blocker arm, the non-strict rule arms, the reel loop and the web engine —
+    // and DELIBERATELY NOT at the strict arm below. That absence is the whole
+    // guarantee that a one-tap unblock cannot lift a rule the user marked
+    // Strict (or Locked, which implies it); no wire flag can be forged into it.
+    private val unblocks = UnblockRegistry()
 
     // ── Website blocking ──────────────────────────────────────────────────────
-    private val webEngine by lazy { WebBlockEngine(this) }
+    private val webEngine by lazy { WebBlockEngine(this, unblocks) }
     // Last seen host per browser package — avoids re-pressing back on a host that
     // is still on screen while the back navigation settles.
     private val lastUrlByPkg = ConcurrentHashMap<String, String>()
     @Volatile private var lastWebBlockTime = 0L
+
+    // ── Rules (schedules / daily limits) ──────────────────────────────────────
+    // The snapshot Dart pushes via pushRules: flat targets + absolute windows,
+    // held in memory by RuleEngine (never re-read from prefs per event).
+    // Checked BELOW the pause gate by design — a Pause or emergency pass lifts
+    // rules the way it lifts reel and web blocking; App Blocker locks above the
+    // gate stay unconditional. `nextBoundaryMs` mirrors the prefs key so the
+    // per-window-change boundary check is one long compare.
+    private val ruleEngine by lazy { RuleEngine() }
+    @Volatile private var nextBoundaryMs = 0L
 
     // ── Conscious (earn-as-you-abstain) ──────────────────────────────────────
     // A 1 Hz accountant runs while the active plan is Conscious so the bank keeps
@@ -160,18 +369,32 @@ class DetoxoAccessibilityService : AccessibilityService() {
     private var consciousRunning = false
     @Volatile private var lastReelAtMs = 0L
 
+    /**
+     * The reel surface that last set [lastReelAtMs]. The drain-to-empty wall used
+     * to name the foreground package's FIRST reel platform, which for a
+     * multi-surface app is often not the one being watched — and since M8 that
+     * `referenceId` is what an "Unblock for a while" tap grants, so the user
+     * would have bought a grant for a surface they were not on. Cleared
+     * wherever [lastReelAtMs] is.
+     */
+    @Volatile private var lastReelPlatformId = ""
+
     // ── One Reel / Unblock (allow N reels, then block) ───────────────────────
     // Runtime-only dwell state (meaningless across a service restart); the
     // consumed count is persisted in ConfigStore so a restart keeps the user
     // blocked until an explicit re-tap, and these self-correct from it.
-    //  - `lastScrollAtMs`  : a reel-advance scroll (captured pre-throttle).
+    //  - `lastScrollAtMs`  : a reel-advance scroll (captured pre-throttle). Only
+    //    a scroll whose settled pager page differs from `oneReelPage` stamps it
+    //    (`ReelTracker.settledPage`), so mid-fling frames, comment-sheet and
+    //    caption scrolls, and a snap-back onto the same reel never do.
     //  - `reelViewStartMs` : when the current reel view began (0 = none/fresh).
     //  - `reelViewCounted` : the current reel already cost one count (loop-safe).
-    //  - `lastReelCountMs` : when the last reel was counted (debounces in-reel
-    //    scrolls, e.g. opening comments, from being read as a reel advance).
+    //  - `lastReelCountMs` : when the last reel was counted (second guard against
+    //    an in-reel scroll being read as a reel advance).
     // A reel counts toward the allowance only after MIN_VIEW_MS (2s) of dwell, so
     // a quick flick-through or a single looping reel costs at most one count.
     @Volatile private var lastScrollAtMs = 0L
+    @Volatile private var oneReelPage = ReelTracker.NO_INDEX
     @Volatile private var reelViewStartMs = 0L
     @Volatile private var reelViewCounted = false
     @Volatile private var lastReelCountMs = 0L
@@ -192,6 +415,15 @@ class DetoxoAccessibilityService : AccessibilityService() {
         store = ConfigStore(this)
         store.serviceEverConnected = true
         reload()
+        if (!screenOffRegistered) {
+            ContextCompat.registerReceiver(
+                this,
+                screenOffReceiver,
+                IntentFilter(Intent.ACTION_SCREEN_OFF),
+                ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
+            screenOffRegistered = true
+        }
         startAsForeground()
         // Arm the protection watchdog (idempotent): once the user had a live
         // service, a later silent death gets detected and surfaced. Connecting
@@ -209,18 +441,34 @@ class DetoxoAccessibilityService : AccessibilityService() {
         protectedPkgs = store.protectedPackages
         blockedApps = store.blockedAppPackages
         homePkgs = homePackages()
+        a11yPkgs = accessibilityPackages()
         masterOn = store.masterEnabled
         pausedUntil = store.pauseUntil
         activePlan = store.activePlan
         enabledPlatformIds = store.enabledPlatforms
+        suppressNotifications = store.suppressNotifications
         // Settle any accrued-but-unwritten bank before re-reading, so a config
         // push mid-tick can't roll the cache back to a stale stored value.
         flushConsciousBank(force = true)
         consciousBank = store.consciousBankMs
         webEngine.setBlocklist(store.webBlocklistJson)
         webEngine.setAdultEnabled(store.blockAdultWebsites)
+        refreshTemporaryUnblocks()
+        refreshRules()
+        refreshNudgeConfig()
         syncConscious()
         syncReelBubble()
+        // A Pause or protection-off lifts every block, so a standing wall goes too.
+        if (!masterOn || System.currentTimeMillis() < pausedUntil) BlockScreenOverlay.hide()
+    }
+
+    private fun accessibilityPackages(): Set<String> = try {
+        val am = getSystemService(Context.ACCESSIBILITY_SERVICE) as AccessibilityManager
+        am.getEnabledAccessibilityServiceList(AccessibilityServiceInfo.FEEDBACK_ALL_MASK)
+            .mapNotNull { it.resolveInfo?.serviceInfo?.packageName }
+            .toSet()
+    } catch (_: Throwable) {
+        emptySet()
     }
 
     private fun homePackages(): Set<String> = try {
@@ -254,25 +502,68 @@ class DetoxoAccessibilityService : AccessibilityService() {
 
         matchMemo.clear()
         val pkgProtected = isProtected(pkg)
+        // One clock read for the whole event: the boundary check, the pause
+        // gate, the rules arm and the throttle below all used to take their own.
+        val nowMs = System.currentTimeMillis()
 
         // Track the foreground app for the Conscious accountant (every package,
         // including ours). Leaving a reel-bearing app for one without reel
         // surfaces immediately ends "watching" so the bank can start earning.
         if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            foregroundPkg = pkg
+            if (pkg != foregroundPkg) {
+                prevForegroundPkg = foregroundPkg
+                foregroundPkg = pkg
+            }
+            // A rule window may have opened or closed — one long compare.
+            checkRuleBoundary(nowMs)
+            // The soft keyboard's window carries the IME's package: to the wall,
+            // the counter and the nudge that is not a foreground change (typing
+            // a comment must not dismiss a wall, suspend the reel, or end a
+            // stay). ONE resolve for all three — it is a binder read, and the
+            // wall branch below used to make a second one of its own.
+            val isIme = isImePackage(pkg)
+            // A standing block screen comes down when the user actually leaves
+            // the apps it was raised over — not for our own windows, system UI,
+            // an accessibility service's menu, the IME, or the launcher / the
+            // opening app a BACK or HOME just landed on (BlockScreenOverlay
+            // .staysOver). Within that set the wall only learns the foreground
+            // moved, so "Back to X" can become "Dismiss" once X is gone. The
+            // isShowing() short-circuit keeps this free while no wall is up.
+            if (BlockScreenOverlay.isShowing() &&
+                pkg != packageName &&
+                pkg != "com.android.systemui" &&
+                pkg !in a11yPkgs &&
+                !isIme
+            ) {
+                if (BlockScreenOverlay.staysOver(pkg)) {
+                    BlockScreenOverlay.onForeground(pkg)
+                } else {
+                    BlockScreenOverlay.hide()
+                }
+            }
             // A protected app counts as "no reel surfaces" even if it is also in
             // the monitored catalog — protection wins, and the stale "watching"
             // window dies the instant a protected app foregrounds.
             if (pkgProtected || config.platformsFor(pkg).isEmpty()) {
                 lastReelAtMs = 0L
+                lastReelPlatformId = ""
                 reelViewStartMs = 0L // left the reel app → next reel is a fresh view
+                oneReelPage = ReelTracker.NO_INDEX
             }
-            if (contentCounter.isEnabled) {
+            if (contentCounter.isEnabled && !isIme) {
                 contentCounter.onForegroundChanged(
                     pkg,
                     !pkgProtected && config.platformsFor(pkg).any { isReelPlatform(it) },
                 )
             }
+            // A protected app is never a nudgeable foreground. This must be
+            // latched here and not left to the privacy guard below: the guard
+            // keys on `foregroundPkg`, which the IME's own window CLOBBERS
+            // (see the KDoc on [activeWindowProtected]) — so a keystroke inside
+            // a protected app arrives with the guard satisfied while this latch
+            // still pointed at the protected package. Null, not "skip": the
+            // stale value is exactly the thing that must not survive.
+            if (!isIme) nudgeForegroundPkg = if (pkgProtected) null else pkg
             // Privacy: drop the usage window so time inside the protected app
             // can never be attributed to the previously-foreground reel app.
             if (pkgProtected) contentCounter.onProtectedForeground()
@@ -292,21 +583,46 @@ class DetoxoAccessibilityService : AccessibilityService() {
         // the block path below — it never returns and never mutates block state. ──
         if (contentCounter.isEnabled) countContent(event, pkg)
 
+        // ── Soft nudge: advisory, so like the counter it runs above the master
+        // switch and the pause gate — the user asked to be told how long they
+        // have been somewhere, which is true whether or not blocking is on. ──
+        // Throttled on its own stamp — the map at the block throttle below is
+        // keyed on the EVENT's package, and the nudge is driven by the latched
+        // foreground one. The dense heartbeat the idle rule needs is dense
+        // relative to IDLE_TIMEOUT_MS (60 s), so ~6.7 Hz still leaves a 400×
+        // margin while cutting the per-event work inside a watched app.
+        if (nudge.enabled && nowMs - lastNudgeTickMs >= THROTTLE_MS) {
+            lastNudgeTickMs = nowMs
+            tickNudge(nowMs)
+        }
+
         if (!masterOn) return
 
-        // Custom whole-app block — checked ABOVE the pause gate: the App
-        // Blocker UI presents locks as unconditional, so a Pause taken for
-        // reels must not quietly unlock a fully-locked app. Anchored to
-        // the FOREGROUND — a blocked app's non-foreground windows (PiP, its own
-        // overlays) still emit content-changed events under its packageName,
-        // and acting on those would HOME-bounce the user out of unrelated
-        // apps. The foregroundPkg leg still bounces someone already inside
-        // the app when the block lands; the debounce caps the rate.
+        // Custom whole-app block — checked ABOVE the pause gate: a Pause taken
+        // for reels must not quietly unlock a fully-locked app. A per-target
+        // grant DOES lift it, and that is the point of M8: "Unblock Instagram
+        // for 15 minutes" has to work from an app-block wall and from the
+        // blocklist row, or the only way in is turning protection off entirely.
+        // A Pause still does not. Anchored to the FOREGROUND — a blocked app's
+        // non-foreground windows (PiP, its own overlays) still emit
+        // content-changed events under its packageName, and acting on those
+        // would HOME-bounce the user out of unrelated apps. The foregroundPkg
+        // leg still bounces someone already inside the app when the block
+        // lands; the debounce caps the rate.
         if (pkg in blockedApps &&
             (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
-                pkg == foregroundPkg)
+                pkg == foregroundPkg) &&
+            !appUnblocked(pkg)
         ) {
-            onAppBlocked(pkg)
+            // A grant lifts THIS arm, but never the strict arm below it. So if
+            // a strict (or locked) rule covers the package too, the wall must
+            // not offer relief it cannot deliver: the user would spend the tap,
+            // get the grant, and be bounced by the very next event with no
+            // button and no explanation. Resolved only on the block path, which
+            // is already debounced.
+            val strictToo = ruleEngine.hasStrictRules() &&
+                ruleEngine.blockingForPackage(pkg, nowMs, strictOnly = true) != null
+            onAppBlocked(pkg, offersUnblock = !strictToo)
             return
         }
 
@@ -314,20 +630,88 @@ class DetoxoAccessibilityService : AccessibilityService() {
         // locks above stay enforced) until pauseUntil, after which the active
         // plan resumes. Gated purely on the clock so it works regardless of the
         // pushed plan name.
-        if (System.currentTimeMillis() < pausedUntil) return
+        // EVO-030: strict rules run ABOVE the pause gate — the user opted them
+        // in precisely so a Pause cannot lift them. Everything else about the
+        // arm is identical to the one below; only the gate placement differs.
+        //
+        // M8: this arm deliberately does NOT read `appUnblocked`. A locked rule
+        // is pushed as strict, so the only thing that lifts one is an override,
+        // which Dart expresses by splitting that rule's own windows before the
+        // push — never by minting a grant. `offersUnblock = false` on the wall
+        // it raises, so the button is not even offered.
+        if (ruleEngine.hasStrictRules() &&
+            (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+                pkg == foregroundPkg)
+        ) {
+            val strict = ruleEngine.blockingForPackage(pkg, nowMs, strictOnly = true)
+            if (strict != null) {
+                onAppBlocked(pkg, strict.reason, strict.activeUntil(nowMs), offersUnblock = false)
+                return
+            }
+        }
+
+        // A Pause suspends reel/web blocking. It normally returns here — but a
+        // STRICT rule has to survive it, and that decision is made further down:
+        // for a reel surface inside the detector loop, for a website inside the
+        // browser arm. Either one has to be allowed to run, so this gate opens
+        // for both; `paused` then narrows each pass to strict entries only.
+        //
+        // Both legs are load-bearing. Gating on platforms alone silently voided
+        // the host half: a locked rule built from websites or a category carries
+        // no platformIds (a category flattens to packages + domains), so it
+        // returned here and its sites were free for the whole Pause — the exact
+        // gap M8 exists to close.
+        val paused = nowMs < pausedUntil
+        if (paused &&
+            !ruleEngine.hasStrictPlatformRules() &&
+            !ruleEngine.hasStrictHostRules()
+        ) {
+            return
+        }
+
+        // Rules: a schedule window or a spent daily limit covering this app
+        // (the pushRules snapshot). Below the pause gate by design — see the
+        // ruleEngine field. Foreground-anchored like the App Blocker arm above,
+        // and before the throttle so a WINDOW_STATE_CHANGED is never swallowed.
+        // Gated on hasPackageRules, NOT hasAnyRules: a user with only a global
+        // Daily Limit has a (meter) entry and no package rule at all, and this
+        // arm runs above the throttle on essentially every foreground event.
+        if (!paused && ruleEngine.hasPackageRules() &&
+            (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+                pkg == foregroundPkg) &&
+            !appUnblocked(pkg)
+        ) {
+            val rule = ruleEngine.blockingForPackage(pkg, nowMs)
+            if (rule != null) {
+                onAppBlocked(pkg, rule.reason, rule.activeUntil(nowMs))
+                return
+            }
+        }
 
         // One Reel / Unblock: capture reel-advance scrolls BEFORE the throttle
         // below. A scroll swallowed by the 150 ms throttle would leave the next
-        // reel looking like the same one and leak it past the allowance.
-        if (activePlan == PLAN_ONE_REEL &&
+        // reel looking like the same one and leak it past the allowance. Only a
+        // scroll that lands on a different pager page is an advance; a
+        // multi-item list (comments) never is, an unindexed view always is.
+        // `!paused` for the same reason as the browser branch: a Pause never
+        // used to reach this, and a strict reel rule must not start consuming
+        // One Reel allowance while blocking is suspended.
+        if (!paused &&
+            activePlan == PLAN_ONE_REEL &&
             event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED &&
             config.platformsFor(pkg).isNotEmpty()
         ) {
-            lastScrollAtMs = System.currentTimeMillis()
+            val page = ReelTracker.settledPage(event.fromIndex, event.toIndex)
+            if (page != ReelTracker.IGNORE &&
+                (page == ReelTracker.NO_INDEX || page != oneReelPage)
+            ) {
+                lastScrollAtMs = System.currentTimeMillis()
+                oneReelPage = page
+            }
         }
 
         // Per-package throttle.
-        val now = System.currentTimeMillis()
+        val now = nowMs
         val last = lastEventByPackage[pkg] ?: 0L
         if (now - last < THROTTLE_MS) return
         lastEventByPackage[pkg] = now
@@ -337,11 +721,21 @@ class DetoxoAccessibilityService : AccessibilityService() {
         // reel detection below is untouched. A browser carries no reel surfaces,
         // so we return either way.
         if (BrowserUrlExtractor.isBrowser(pkg)) {
-            if (webEngine.hasAnyRules() &&
+            // A Pause still lifts the user's own website blocklist and every
+            // non-strict host rule — its shipped meaning, unchanged.
+            //
+            // M8 closes EVO-030's documented scope gap: a STRICT host rule now
+            // survives a Pause, exactly like the reel loop below. Without this a
+            // locked rule (which is pushed as strict) would cost an override on
+            // its apps and reel feeds while a 2-minute Pause opened its websites
+            // for free — and `strictOnly = paused` inside `handleBrowser`
+            // narrows the pass to opted-in entries, so nothing else changes.
+            if ((!paused || ruleEngine.hasStrictHostRules()) &&
+                (webEngine.hasAnyRules() || ruleEngine.hasHostRules()) &&
                 (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
                     event.eventType == AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED)
             ) {
-                handleBrowser(pkg)
+                handleBrowser(pkg, paused)
             }
             return
         }
@@ -355,16 +749,106 @@ class DetoxoAccessibilityService : AccessibilityService() {
         try {
             if (activeWindowProtected(root)) return
 
+            // 0 when no REEL grant is live, which the loop reads as "check
+            // nothing" — one clock read for the whole pass either way.
+            val nowElapsed = SystemClock.elapsedRealtime().let {
+                if (unblocks.hasAny(UnblockRegistry.TYPE_REEL, it)) it else 0L
+            }
+
             for (platform in platforms) {
                 if (platform.detectionType != "LEGACY" && platform.detectionType != "OVERLAY") continue
                 // Respect user enable/disable; fall back to defaultStatus if unset.
                 val isOn = if (enabled.isEmpty()) platform.defaultStatus
                 else enabled.contains(platform.platformId)
                 if (!isOn) continue
+                // M8: is this reel surface temporarily unblocked? Resolved per
+                // platform, consumed below — a grant lifts the plan and a
+                // non-strict rule, never a strict (and therefore never a
+                // locked) one. Counting is unaffected: the awareness pass ran
+                // above this branch, so a granted reel is still counted.
+                val reelUnblocked = nowElapsed != 0L &&
+                    unblocks.isUnblocked(
+                        UnblockRegistry.TYPE_REEL,
+                        platform.platformId,
+                        nowElapsed,
+                    )
 
                 for (detector in platform.detectors) {
                     if (detector.viewDetector != "FINDBYID" && detector.viewDetector != "VIEWID_RES_NAME") continue
-                    if (matchesMemo(root, event, detector, pkg)) {
+                    if (matchesMemo(root, event, detector)) {
+                        // The meter's prefs read happens only when a meter entry
+                        // exists, and only here — after a match.
+                        val meterMs =
+                            if (ruleEngine.hasReelMeter()) contentCounter.timeTodayMs(now) else 0L
+                        // STRICT FIRST, mirroring the package arm above the pause
+                        // gate. `blockingForPlatform` returns the FIRST covering
+                        // entry and the snapshot is ordered by `createdAtMs`, so
+                        // an older non-strict rule would otherwise mask a newer
+                        // strict — and therefore a LOCKED — one: its wall would
+                        // offer "Unblock for a while", and the grant that tap
+                        // mints would lift the locked rule for free. Resolving
+                        // strict on its own pass makes the guarantee independent
+                        // of the order the user happened to create rules in.
+                        val strictRule = if (ruleEngine.hasStrictPlatformRules()) {
+                            ruleEngine.blockingForPlatform(
+                                platform.platformId,
+                                now,
+                                meterMs,
+                                strictOnly = true,
+                            )
+                        } else {
+                            null
+                        }
+                        if (strictRule != null) {
+                            onDetected(
+                                pkg,
+                                platform.platformId,
+                                detector,
+                                ruleReason = strictRule.reason,
+                                ruleUnlocksAtMs = strictRule.activeUntil(now),
+                                // A grant can never lift this, so never offer one.
+                                offersUnblock = false,
+                            )
+                            if (detector.haltOnDetect) return
+                            continue
+                        }
+                        // Everything below here is lifted by a Pause. We are past
+                        // the gate solely to give a strict rule its chance above;
+                        // nothing below — a non-strict rule, Conscious, One Reel,
+                        // the plan — may fire, or a Pause would stop lifting reel
+                        // blocking. `continue`, not `return`: another platform may
+                        // carry the strict rule this one lacks.
+                        if (paused) continue
+                        // A non-strict schedule window or the spent daily reel
+                        // limit blocks this surface whatever the plan below would
+                        // allow — unless a grant lifts it, which is exactly the
+                        // set a Pause lifts too.
+                        val rule = if (ruleEngine.hasAnyRules()) {
+                            ruleEngine.blockingForPlatform(platform.platformId, now, meterMs)
+                        } else {
+                            null
+                        }
+                        if (rule != null && !reelUnblocked) {
+                            onDetected(
+                                pkg,
+                                platform.platformId,
+                                detector,
+                                ruleReason = rule.reason,
+                                ruleUnlocksAtMs = rule.activeUntil(now),
+                            )
+                            if (detector.haltOnDetect) return
+                            continue
+                        }
+                        // M8: nothing strict is blocking this surface and the
+                        // plan below would. The grant lifts it — and clearing
+                        // the watch stamp drops the accountant into its existing
+                        // "lingering in a reel app" branch, which neither drains
+                        // nor accrues, so a granted reel is free but not earning.
+                        if (reelUnblocked) {
+                            lastReelAtMs = 0L
+                            lastReelPlatformId = ""
+                            return
+                        }
                         // Conscious mode: a reel is on screen. While there's allowance,
                         // mark "watching" (so the accountant drains the bank) and let
                         // it play. With an empty bank we leave "watching" untouched and
@@ -372,6 +856,7 @@ class DetoxoAccessibilityService : AccessibilityService() {
                         // abstaining and the bank starts refilling.
                         if (activePlan == PLAN_CONSCIOUS && consciousBank > 0L) {
                             lastReelAtMs = now
+                            lastReelPlatformId = platform.platformId
                             return
                         }
                         // One Reel / Unblock: allow while within the allowance, else
@@ -402,23 +887,23 @@ class DetoxoAccessibilityService : AccessibilityService() {
         root: AccessibilityNodeInfo,
         event: AccessibilityEvent,
         detector: DetectorRule,
-        pkg: String,
-    ): Boolean = matchMemo.getOrPut(detector) { matches(root, event, detector, pkg) }
+    ): Boolean = matchMemo.getOrPut(detector) { matches(root, event, detector) }
 
+    /**
+     * [deep] = false runs stages 1–2 only (the counting pass's DFS back-off,
+     * EVO-021). Such a result is partial, so callers must NOT memoise it — a
+     * negative could otherwise be reused by the block pass.
+     */
     private fun matches(
         root: AccessibilityNodeInfo,
         event: AccessibilityEvent,
         detector: DetectorRule,
-        pkg: String,
+        deep: Boolean = true,
     ): Boolean {
-        // Fully-qualified target ids, built ONCE per call — stage 3 visits up
-        // to MAX_NODES nodes, and a per-node "$pkg$id" concat was measurable
-        // allocation churn on the hottest path.
-        val targets = if (detector.viewDetector == "VIEWID_RES_NAME") {
-            detector.identifiers
-        } else {
-            detector.identifiers.map { "$pkg$it" }
-        }
+        // Fully-qualified target ids, built once at config parse — stage 3
+        // visits up to MAX_NODES nodes, and a per-node "$pkg$id" concat was
+        // measurable allocation churn on the hottest path.
+        val targets = detector.qualifiedIds
 
         // Stage 1: the event source itself. (Every obtained node is recycled
         // before returning — matches() only ever answers a boolean.)
@@ -447,6 +932,8 @@ class DetoxoAccessibilityService : AccessibilityService() {
                 if (found) return true
             }
         }
+
+        if (!deep) return false
 
         // Stage 3: bounded DFS over the tree. The passed-in root is the caller's
         // to manage; every child obtained here is recycled exactly once.
@@ -492,17 +979,53 @@ class DetoxoAccessibilityService : AccessibilityService() {
         // math on every event; our own package is already excluded upstream.
         contentCounter.onAppActivity(pkg)
 
-        // A scroll is the closest proxy to "advanced to the next reel" (cheap,
-        // no tree walk); the counter debounces these itself.
+        // A scroll carries the pager's own visible-page range — the reel's
+        // identity — for free (no tree walk); the counter settles + classifies
+        // it. Forwarded pre-throttle: the last event of a fling is the one that
+        // matters. `adb shell setprop log.tag.DetoxoService DEBUG` (then re-bind
+        // the service) logs the raw fields for per-app calibration.
         if (event.eventType == AccessibilityEvent.TYPE_VIEW_SCROLLED) {
-            contentCounter.onScroll(pkg)
+            val deltaY = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) event.scrollDeltaY else 0
+            val isPager = pagerVerdict(event, platforms)
+            if (scrollDebug) {
+                Log.d(
+                    TAG,
+                    "scroll $pkg from=${event.fromIndex} to=${event.toIndex} " +
+                        "n=${event.itemCount} dy=$deltaY cls=${event.className} pager=$isPager",
+                )
+            }
+            contentCounter.onScroll(pkg, event.fromIndex, event.toIndex, deltaY, isPager)
         }
 
-        // Throttle the (more expensive) surface detection per package.
+        // Throttle the (more expensive) surface detection per package. Surface
+        // presence changes on screen transitions, not per frame, so this pass
+        // checks at a slower cadence than the block path — except a window
+        // state change, which always checks (reel entry / exit latency).
         val now = System.currentTimeMillis()
         val last = lastCountEventByPackage[pkg] ?: 0L
-        if (now - last < THROTTLE_MS) return
+        if (event.eventType != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+            now - last < COUNT_THROTTLE_MS
+        ) {
+            return
+        }
         lastCountEventByPackage[pkg] = now
+
+        // DFS back-off (EVO-021): on a non-reel screen (the feed) every check
+        // used to end in a full stage-3 walk (≤ MAX_NODES binder reads) just to
+        // learn "still no reel". After a miss, the next DFS_SKIP checks run
+        // stages 1–2 only — stage 2 (findAccessibilityNodeInfosByViewId under
+        // flagReportViewIds) resolves any real View by id, so a reel surface is
+        // still seen at the 400 ms cadence. A window change always checks deep.
+        // Shallow results bypass the memo (see matches), so the block pass —
+        // which never backs off — still gets its full answer.
+        // ponytail: a surface only the DFS finds (id not resolvable through the
+        // app's own Resources, e.g. a split-module id) is seen ≤ DFS_SKIP checks
+        // late (≤ 2 s), and a transient deep miss on it can end the reel session.
+        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+            countMisses.remove(pkg)
+        }
+        val misses = countMisses[pkg] ?: 0
+        val deep = misses == 0
 
         val root = rootInActiveWindow ?: return
         try {
@@ -515,12 +1038,19 @@ class DetoxoAccessibilityService : AccessibilityService() {
                     ) {
                         continue
                     }
-                    if (matchesMemo(root, event, detector, pkg)) {
+                    val hit = if (deep) {
+                        matchesMemo(root, event, detector)
+                    } else {
+                        matches(root, event, detector, deep = false)
+                    }
+                    if (hit) {
+                        countMisses.remove(pkg)
                         contentCounter.onReelSurfaceSeen(pkg)
                         return
                     }
                 }
             }
+            countMisses[pkg] = (misses + 1) % (DFS_SKIP + 1)
             // We actively checked a reel app's window and found NO reel surface —
             // the user is on a non-reel screen (e.g. the feed). Distinct from "no
             // event" (passive watching), which never reaches here and keeps the
@@ -529,6 +1059,37 @@ class DetoxoAccessibilityService : AccessibilityService() {
         } finally {
             root.recycleSafe()
         }
+    }
+
+    /**
+     * EVO-024: is the scrolled view the platform's declared reel pager? `null`
+     * when no platform of this package declares a `pagerViewId` (the common
+     * case — costs nothing) or when the event carries no source; otherwise one
+     * `getSource()` binder read per scroll event, compared against the
+     * declared id(s). Only the awareness counter consumes the verdict.
+     */
+    private fun pagerVerdict(event: AccessibilityEvent, platforms: List<PlatformRule>): Boolean? {
+        var declared = false
+        for (p in platforms) if (p.pagerViewId != null) { declared = true; break }
+        if (!declared) return null
+        val source = event.source ?: return null
+        val sourceId = try {
+            source.viewIdResourceName
+        } finally {
+            source.recycleSafe()
+        }
+        for (p in platforms) if (p.pagerViewId != null && p.pagerViewId == sourceId) return true
+        return false
+    }
+
+    /**
+     * Whether [pkg] is the currently selected soft keyboard. Its window emits
+     * WINDOW_STATE_CHANGED under its own package; read on those events only
+     * (rare), uncached because the user can switch keyboards at any time.
+     */
+    private fun isImePackage(pkg: String): Boolean {
+        val ime = Settings.Secure.getString(contentResolver, Settings.Secure.DEFAULT_INPUT_METHOD)
+        return ime != null && pkg == ime.substringBefore('/')
     }
 
     /** A detectable reel/short surface (excludes feed / stories / status surfaces). */
@@ -547,7 +1108,7 @@ class DetoxoAccessibilityService : AccessibilityService() {
      * and reports it. Debounced per-host so a content-change storm on the same
      * blocked page produces at most one back press per window.
      */
-    private fun handleBrowser(pkg: String) {
+    private fun handleBrowser(pkg: String, paused: Boolean = false) {
         val root = rootInActiveWindow ?: return
         val host: String
         try {
@@ -561,8 +1122,18 @@ class DetoxoAccessibilityService : AccessibilityService() {
         } finally {
             root.recycleSafe()
         }
-        val match = webEngine.matchHost(host)
-        if (match == null) {
+        // During a Pause we are only here to let a STRICT host rule match, so the
+        // user's own blocklist (which a Pause has always lifted) is skipped
+        // entirely and the rule pass is narrowed to opted-in entries.
+        val match = if (paused) null else webEngine.matchHost(host)
+        // A website schedule (pushRules) is checked after the user's blocklist
+        // and the adult set; its hit is named like a RULE hit, with its reason.
+        val rule = if (match == null) {
+            ruleEngine.blockingForHost(host, System.currentTimeMillis(), strictOnly = paused)
+        } else {
+            null
+        }
+        if (match == null && rule == null) {
             lastUrlByPkg[pkg] = host
             return
         }
@@ -575,8 +1146,8 @@ class DetoxoAccessibilityService : AccessibilityService() {
         store.recordWebBlock(dateKey())
         val (today, total) = store.webBlockStats(dateKey())
         // EVO-018: adult-list hits are counted but never named — the host is
-        // left out of the event (Dart's per-host tally / "Most blocked" skip it)
-        // and out of the toast. User-rule hits stay attributable.
+        // left out of the event (Dart's per-host tally / "Most blocked" skip it),
+        // out of the toast and off the wall. User-rule hits stay attributable.
         val adult = match == WebBlockEngine.Match.ADULT
         val payload = HashMap<String, Any?>(6)
         payload["source"] = if (adult) "ADULT" else "RULE"
@@ -588,32 +1159,87 @@ class DetoxoAccessibilityService : AccessibilityService() {
         // Never log the host: it's accessibility-derived browsing data and
         // release logcat is readable by adb / OEM log collectors.
         Log.i(TAG, "web-blocked in $pkg")
-        // EVO-011: make the intervention legible — attribute the bounce.
-        // ponytail: plain text toast; upgrade path is an overlay block chip.
-        Toast.makeText(
-            this,
-            if (adult) getString(R.string.toast_blocked_adult) else getString(R.string.toast_blocked, host),
-            Toast.LENGTH_SHORT,
-        ).show()
+        // EVO-011: make the intervention legible — the wall attributes the
+        // bounce; the toast is the fallback when no wall can be raised.
+        val shown = raiseWall(
+            BlockScreenPayload(
+                referenceType = BlockScreenPayload.TYPE_WEBSITE,
+                referenceId = if (adult) "" else host,
+                displayName = if (adult) "" else host,
+                appLabel = appLabel(pkg),
+                packageName = pkg,
+                blockReason = when {
+                    adult -> BlockScreenPayload.REASON_ADULT
+                    rule != null -> rule.reason
+                    else -> BlockScreenPayload.REASON_WEB_RULE
+                },
+                // M8: offer "Unblock for a while" only when a grant could
+                // actually free this host. A strict rule is never liftable, and
+                // a host on BOTH the user's blocklist and the 18+ set wins its
+                // match on the rule arm — so the button would mint a grant and
+                // the next visit would still be blocked, now unnamed. ADULT
+                // hits are already forced false by `sanitised()` (EVO-018).
+                offersUnblock = when {
+                    adult -> false
+                    rule != null -> false
+                    else -> !webEngine.matchesAdult(host)
+                },
+            ),
+            backStaysOver(pkg),
+            raisedOver = pkg,
+        )
+        if (!shown) {
+            Toast.makeText(
+                this,
+                if (adult) getString(R.string.toast_blocked_adult) else getString(R.string.toast_blocked, host),
+                Toast.LENGTH_SHORT,
+            ).show()
+        }
         pressBackWithRateLimit()
     }
 
     // ---- Block execution ---------------------------------------------------
 
-    private fun onDetected(pkg: String, platformId: String, detector: DetectorRule) {
+    /**
+     * [ruleReason] set = a rule (SCHEDULE / DAILY_LIMIT) forced this block over
+     * the plan. [offersUnblock] false = a strict rule did, and a per-target
+     * grant can never lift one, so the wall must not offer the button (M8).
+     */
+    private fun onDetected(
+        pkg: String,
+        platformId: String,
+        detector: DetectorRule,
+        ruleReason: String? = null,
+        ruleUnlocksAtMs: Long = -1L,
+        offersUnblock: Boolean = true,
+    ) {
         val now = System.currentTimeMillis()
         if (now - lastBlockTime <= BLOCK_DEBOUNCE_MS) return
         lastBlockTime = now
 
-        val mode = resolveBlockMode(detector)
+        var mode = resolveBlockMode(detector)
+        // A rule must bounce: the count-only NONE mode falls back to a BACK press.
+        if (ruleReason != null && mode == "NONE") mode = "PRESS_BACK"
         store.recordBlock(dateKey())
         val (today, total, _) = store.blockStats(dateKey())
         ServiceEventBus.post(
             "blocked",
             mapOf("package" to pkg, "platformId" to platformId, "mode" to mode,
-                "today" to today, "total" to total),
+                "today" to today, "total" to total,
+                "reason" to (ruleReason ?: BlockScreenPayload.REASON_PLAN)),
         )
         Log.i(TAG, "blocked $platformId in $pkg via $mode")
+
+        // The wall accompanies the navigation below, never replaces it: with
+        // no overlay grant the user is still bounced. NONE navigates nowhere —
+        // a wall over a still-playing reel would be a trap, so it gets none.
+        if (mode != "NONE") {
+            raiseWall(
+                reelPayload(pkg, platformId, ruleReason, ruleUnlocksAtMs, offersUnblock),
+                backStaysOver(pkg),
+                raisedOver = pkg,
+            )
+        }
 
         when (mode) {
             "KILL_APP" -> { blockVibrate(); performBackInternal(); killApp(pkg) }
@@ -706,10 +1332,182 @@ class DetoxoAccessibilityService : AccessibilityService() {
 
     private fun dateKey(): String = DateKeys.today()
 
+    // ---- Block screen (intervention wall) ----------------------------------
+
+    /**
+     * Raises the wall for a block that is about to be navigated away from.
+     * False when the wall is switched off or the overlay grant is missing —
+     * the caller then keeps its legacy toast. Only ever called inside one of
+     * the debounced block regions, so it never re-adds per event.
+     */
+    private fun raiseWall(payload: BlockScreenPayload, over: Set<String>, raisedOver: String): Boolean {
+        // Two interventions for one moment is worse than either. `tickNudge`
+        // guards the other direction, but it runs EARLIER in this same event —
+        // so without this a standing card outlives the block and, being added
+        // later, sits above the wall taking taps through its NOT_TOUCH_MODAL
+        // window.
+        NudgeOverlay.hide()
+        return BlockScreenOverlay.show(this, payload.sanitised(), over, raisedOver = raisedOver)
+    }
+
+    // ---- Soft nudge --------------------------------------------------------
+
+    /**
+     * Advances the dwell machine on every event and renders whatever it asks
+     * for. Driven from EVERY accessibility event rather than only the window
+     * changes, because the idle timeout needs a dense heartbeat — window
+     * changes alone are far too sparse inside a feed, and the machine would
+     * read a user who is simply scrolling as one who left.
+     *
+     * The package is the latched [nudgeForegroundPkg], not the event's own: a
+     * background app's content-changed event carries its package while the user
+     * is somewhere else entirely, and the identity of a stay must only ever move
+     * on a real window change.
+     */
+    private fun tickNudge(nowMs: Long) {
+        // Two interventions for one moment is worse than either: while the wall
+        // is up the nudge stays silent and any standing card comes down.
+        if (BlockScreenOverlay.isShowing()) {
+            NudgeOverlay.hide()
+            return
+        }
+        when (val decision = nudge.tick(nudgeForegroundPkg, nowMs, DateKeys.today(nowMs))) {
+            is NudgeDecision.Show -> showNudge(decision)
+            NudgeDecision.Dismiss -> NudgeOverlay.hide()
+            NudgeDecision.None -> Unit
+        }
+    }
+
+    private fun showNudge(show: NudgeDecision.Show) {
+        val shown = NudgeOverlay.show(
+            context = this,
+            label = appLabel(show.pkg),
+            elapsedMs = show.elapsedMs,
+            onDismissed = { nudge.onDismissed() },
+            // The user's own tap, not an enforcement action: the nudge still
+            // never presses BACK and never bounces anyone. It just makes the
+            // exit one tap away at the moment they are deciding.
+            onLeave = { BlockScreenOverlay.goHome(this) },
+        )
+        if (!shown) {
+            // No overlay grant: nothing was rendered, so re-arm — and report
+            // nothing, because nothing happened. (The crossing still counts
+            // against the day's budget; without the grant every attempt fails
+            // anyway, so there is no state worth unwinding.)
+            nudge.onDismissed()
+            return
+        }
+        ServiceEventBus.post(
+            "nudgeShown",
+            mapOf(
+                "package" to show.pkg,
+                "elapsedMs" to show.elapsedMs,
+                "thresholdMs" to show.thresholdMs,
+            ),
+        )
+    }
+
+    private fun appLabel(pkg: String): String = try {
+        packageManager.getApplicationLabel(packageManager.getApplicationInfo(pkg, 0)).toString()
+    } catch (_: Throwable) {
+        pkg
+    }
+
+    /** The surface's own name ("Instagram Reels"); the app label when unnamed. */
+    private fun platformName(pkg: String, platformId: String): String =
+        config.platformsFor(pkg).firstOrNull { it.platformId == platformId }
+            ?.platformName?.ifBlank { null } ?: appLabel(pkg)
+
+    /**
+     * The wall for a block on a reel surface — the two reel sites share it.
+     * [reason] (SCHEDULE / DAILY_LIMIT) replaces PLAN for a rule block;
+     * `sanitised()` then drops the plan chip, which would lie.
+     */
+    private fun reelPayload(
+        pkg: String,
+        platformId: String,
+        reason: String? = null,
+        unlocksAtMs: Long = -1L,
+        offersUnblock: Boolean = true,
+    ): BlockScreenPayload =
+        BlockScreenPayload(
+            referenceType = BlockScreenPayload.TYPE_REEL,
+            referenceId = platformId,
+            displayName = platformName(pkg, platformId),
+            appLabel = appLabel(pkg),
+            packageName = pkg,
+            blockReason = reason ?: BlockScreenPayload.REASON_PLAN,
+            plan = activePlan,
+            allowance = store.reelAllowance,
+            // -1 = "don't print": a switched-off counter has a stale number.
+            todayCount = if (contentCounter.isEnabled) contentCounter.todayCount() else -1,
+            allowanceLeft = if (activePlan == PLAN_ONE_REEL) {
+                (store.reelAllowance - store.reelsConsumed).coerceAtLeast(0)
+            } else {
+                -1
+            },
+            bankMs = if (activePlan == PLAN_CONSCIOUS) consciousBank else -1L,
+            // EVO-028: only a rule block has a window edge to name.
+            unlocksAtMs = unlocksAtMs,
+            // M8: false when a STRICT rule raised this wall — a grant cannot
+            // lift one, so offering the button would promise what it cannot do.
+            offersUnblock = offersUnblock,
+        )
+
+    /**
+     * What an app-block wall stays over: the bounced app plus the launcher its
+     * HOME lands on. `resolveActivity` hands back the resolver ("android")
+     * while no default launcher is chosen — every HOME-capable package then.
+     */
+    private fun appBlockStaysOver(pkg: String): Set<String> {
+        val home = try {
+            packageManager.resolveActivity(
+                Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME),
+                PackageManager.MATCH_DEFAULT_ONLY,
+            )?.activityInfo?.packageName
+        } catch (_: Throwable) {
+            null
+        }
+        return if (home != null && home != "android") setOf(pkg, home) else homePkgs + pkg
+    }
+
+    /**
+     * What a reel / website wall stays over: the app itself plus wherever the
+     * engine's BACK can land — every launcher, and the app it was opened from
+     * (EVO-026). Our own windows, System UI and the IME never count as "from".
+     */
+    private fun backStaysOver(pkg: String): Set<String> {
+        val s = HashSet<String>(homePkgs.size + 2)
+        s += homePkgs
+        s += pkg
+        prevForegroundPkg?.let {
+            if (it != pkg && it != packageName && it != "com.android.systemui" && !isImePackage(it)) s += it
+        }
+        return s
+    }
+
+    private fun tearDownOverlays() {
+        BlockScreenOverlay.hide()
+        NudgeOverlay.hide()
+        if (screenOffRegistered) {
+            screenOffRegistered = false
+            runCatching { unregisterReceiver(screenOffReceiver) }
+        }
+    }
+
     // ---- Custom whole-app blocks -------------------------------------------
 
-    /** Bounce a custom-blocked app HOME (BACK would just navigate within it). */
-    private fun onAppBlocked(pkg: String) {
+    /**
+     * Bounce a blocked app HOME (BACK would just navigate within it). [reason]
+     * is APP_BLOCK for an App Blocker lock, SCHEDULE / DAILY_LIMIT for a rule;
+     * both share the HOME debounce.
+     */
+    private fun onAppBlocked(
+        pkg: String,
+        reason: String = BlockScreenPayload.REASON_APP_BLOCK,
+        unlocksAtMs: Long = -1L,
+        offersUnblock: Boolean = true,
+    ) {
         // Belt-and-braces: Dart filters these, but a stale push must never
         // bounce the launcher, system UI, Detoxo itself, or a protected app.
         if (isProtected(pkg) || pkg == packageName || pkg in homePkgs ||
@@ -723,22 +1521,38 @@ class DetoxoAccessibilityService : AccessibilityService() {
 
         store.recordBlock(dateKey())
         val (today, total, _) = store.blockStats(dateKey())
+        val token = if (reason == BlockScreenPayload.REASON_APP_BLOCK) "app_block" else "rule"
         ServiceEventBus.post(
             "blocked",
             mapOf(
-                "package" to pkg, "platformId" to "app_block", "mode" to "HOME",
-                "today" to today, "total" to total,
+                "package" to pkg, "platformId" to token, "mode" to "HOME",
+                "today" to today, "total" to total, "reason" to reason,
             ),
         )
-        Log.i(TAG, "blocked app_block in $pkg via HOME")
-        val label = try {
-            packageManager.getApplicationLabel(
-                packageManager.getApplicationInfo(pkg, 0),
-            ).toString()
-        } catch (_: Throwable) {
-            pkg
+        Log.i(TAG, "blocked $token in $pkg via HOME")
+        val label = appLabel(pkg)
+        // The wall stays over the launcher the HOME below lands on, until the
+        // user acts on it; the toast is the fallback when it cannot be raised.
+        val shown = raiseWall(
+            BlockScreenPayload(
+                referenceType = BlockScreenPayload.TYPE_APP,
+                referenceId = pkg,
+                displayName = label,
+                appLabel = label,
+                packageName = pkg,
+                blockReason = reason,
+                // EVO-028: -1 for an App Blocker lock (it has no end), the
+                // window edge for a rule.
+                unlocksAtMs = unlocksAtMs,
+                // M8: false only when a STRICT rule raised this wall.
+                offersUnblock = offersUnblock,
+            ),
+            appBlockStaysOver(pkg),
+            raisedOver = pkg,
+        )
+        if (!shown) {
+            Toast.makeText(this, getString(R.string.toast_blocked, label), Toast.LENGTH_SHORT).show()
         }
-        Toast.makeText(this, getString(R.string.toast_blocked, label), Toast.LENGTH_SHORT).show()
         blockVibrate()
         performGlobalAction(GLOBAL_ACTION_HOME)
     }
@@ -755,6 +1569,7 @@ class DetoxoAccessibilityService : AccessibilityService() {
                 // (the persisted bank carries over; the elapsed clock restarts).
                 consciousAnchorMs = System.currentTimeMillis()
                 lastReelAtMs = 0L
+                lastReelPlatformId = ""
                 consciousHandler.removeCallbacks(consciousTick)
                 consciousHandler.postDelayed(consciousTick, CONSCIOUS_TICK_MS)
                 emitConsciousState()
@@ -827,11 +1642,19 @@ class DetoxoAccessibilityService : AccessibilityService() {
             return
         }
 
+        // M8 needs no case here. The block loop clears `lastReelAtMs` on the
+        // granted arm, which lands in the "lingering in a reel app" branch
+        // below: no drain, no accrue — the freeze, exactly. Freezing per
+        // PACKAGE instead would stop the bank draining for every OTHER surface
+        // in the same app (Stories while Reels is granted), which is a free
+        // ride the user never bought.
+
         // Protected app foreground: freeze the bank and drop any stale
         // "watching" so this 1 Hz timer can never BACK-press into it (the
         // WATCH_STALE_MS window would otherwise survive a reel→bank switch).
         if (isProtected(foregroundPkg)) {
             lastReelAtMs = 0L
+            lastReelPlatformId = ""
             flushConsciousBank()
             emitConsciousState()
             return
@@ -849,6 +1672,22 @@ class DetoxoAccessibilityService : AccessibilityService() {
             if (bank <= 0L) {
                 bank = 0L
                 lastReelAtMs = 0L
+                // The drain-to-empty boot IS the Conscious moment: raise the
+                // wall here, not only on the next detection event.
+                foregroundPkg?.takeUnless { isProtected(it) }?.let { fg ->
+                    // The surface that actually drained the bank — since M8 this
+                    // id is what an Unblock tap grants, so guessing the package's
+                    // first reel platform would sell the wrong one. With no
+                    // stamp (a service restart mid-drain) offer no button rather
+                    // than one that grants nothing.
+                    val pid = lastReelPlatformId
+                    raiseWall(
+                        reelPayload(fg, pid, offersUnblock = pid.isNotEmpty()).copy(bankMs = 0L),
+                        backStaysOver(fg),
+                        raisedOver = fg,
+                    )
+                }
+                lastReelPlatformId = ""
                 pressBackWithRateLimit() // allowance spent → boot the reel
             }
         } else if (!inReelApp) {
@@ -900,16 +1739,19 @@ class DetoxoAccessibilityService : AccessibilityService() {
      * (2s) — so a quick flick-through and a single looping reel each cost at most
      * one. Reels are delimited by scrolls (consecutive reels share the same
      * continuously-visible view-id, so a scroll is the "moved to the next reel"
-     * signal), but a scroll only counts as an advance once ≥ 2s have passed since
-     * the last count — this debounces in-reel scrolls (opening comments/captions)
-     * so they don't burn the allowance or block the reel you're still watching.
+     * signal) — only a scroll that lands on a different pager page stamps
+     * `lastScrollAtMs` (see the pre-throttle capture), and it only counts as an
+     * advance once ≥ 2s have passed since the last count. Together these keep
+     * in-reel scrolls (opening comments/captions, a snap-back) from burning the
+     * allowance or blocking the reel you're still watching.
      * The currently-playing reel is NEVER blocked; only a fresh reel that appears
      * after the allowance is spent is blocked (which drives the Dart auto-revert).
      *
-     * ponytail: reel identity is heuristic (scroll + 2s dwell, no per-reel id). A
-     * spurious scroll > 2s after a count can still be misread as an advance, and a
-     * fast scroll within 2s of a count is absorbed into the current reel (a small
-     * leniency). Upgrade path = content-based reel identity.
+     * ponytail: reel identity is the pager page at event time (no settle window,
+     * unlike the awareness counter's ReelTracker) plus the 2s dwell. A spurious
+     * page change > 2s after a count can still be misread as an advance, and a
+     * fast advance within 2s of a count is absorbed into the current reel (a
+     * small leniency). Upgrade path = drive this gate from ReelTracker too.
      */
     private fun allowReelOrBlock(now: Long): Boolean {
         // A fresh reel view: session/app start, or a real scroll-advance (≥ 2s
@@ -960,6 +1802,7 @@ class DetoxoAccessibilityService : AccessibilityService() {
         reelViewCounted = false
         lastReelCountMs = 0L
         lastScrollAtMs = 0L
+        oneReelPage = ReelTracker.NO_INDEX
         reload()
         emitReelSessionState(blocked = false)
     }
@@ -1029,6 +1872,7 @@ class DetoxoAccessibilityService : AccessibilityService() {
         consciousHandler.removeCallbacks(consciousTick)
         flushConsciousBank(force = true)
         runCatching { contentCounter.dispose() }
+        tearDownOverlays()
         ServiceEventBus.post("serviceStatus", mapOf("running" to false))
         return super.onUnbind(intent)
     }
@@ -1048,6 +1892,7 @@ class DetoxoAccessibilityService : AccessibilityService() {
         consciousHandler.removeCallbacks(consciousTick)
         flushConsciousBank(force = true)
         runCatching { contentCounter.dispose() }
+        tearDownOverlays()
         super.onDestroy()
     }
 
@@ -1056,6 +1901,24 @@ class DetoxoAccessibilityService : AccessibilityService() {
         private const val CHANNEL_ID = "detoxo_protection_channel"
         private const val NOTIF_ID = 1125
         private const val THROTTLE_MS = 150L
+
+        /**
+         * Cadence of the awareness counter's surface check (its own throttle
+         * map; WINDOW_STATE_CHANGED bypasses it). Slower than the block path's
+         * [THROTTLE_MS] — which is untouched — because a stage-3 miss on a
+         * non-reel screen (the feed) is a full DFS, and a reel's dwell is
+         * anchored to the scroll event, not to this check, so the cadence
+         * never shifts a measurement. Both passes still share one tree walk
+         * per event through the detector memo.
+         */
+        private const val COUNT_THROTTLE_MS = 400L
+
+        /**
+         * Counting-pass checks that skip the stage-3 DFS after a miss before
+         * the next full walk (EVO-021). 4 → the DFS runs at most every 5th
+         * check (2 s) on a non-reel screen instead of every check.
+         */
+        private const val DFS_SKIP = 4
         private const val BLOCK_DEBOUNCE_MS = 1200L
         private const val BACK_RATE_LIMIT_MS = 1100L
         private const val MAX_NODES = 12000
@@ -1065,8 +1928,9 @@ class DetoxoAccessibilityService : AccessibilityService() {
 
         /**
          * A reel must be watched this long (2s) to count toward the One Reel /
-         * Unblock allowance — matching the awareness counter's dwell so a quick
-         * flick-through or a single looping reel costs at most one count.
+         * Unblock allowance, so a quick flick-through or a single looping reel
+         * costs at most one count. Deliberately longer than the awareness
+         * counter's 1s "seen" dwell: an allowance is spent on reels *watched*.
          */
         private const val MIN_VIEW_MS = 2000L
 

@@ -3,6 +3,8 @@ package com.errorxperts.detoxo.engine
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
+import android.os.SystemClock
 import com.errorxperts.detoxo.overlay.ContentCounterBubble
 import com.errorxperts.detoxo.widget.ContentCounterWidgetProvider
 
@@ -16,11 +18,18 @@ import com.errorxperts.detoxo.widget.ContentCounterWidgetProvider
  * side-effect-free pass placed before the block logic, so it tallies reels
  * whether or not blocking is enabled, paused, or master-off.
  *
- * Distinct-reel heuristic (dwell-based, to avoid random inflation):
- *  - A reel is counted ONLY after its surface has been on screen for
- *    [MIN_VIEW_MS] (2s) — actually watched, not flicked past.
- *  - A scroll ends the current reel's dwell; the next detected surface starts a
- *    fresh window. Lingering on one reel counts it once.
+ * Distinct-reel rule (identity + dwell; the state machine is [ReelTracker]):
+ *  - A reel is identified by its settled pager page (from the scroll event's
+ *    own fromIndex/toIndex) within one continuous stay on a reel surface, so a
+ *    snap-back, a comments-sheet scroll, a caption expand or a quick detour to
+ *    another app can never count the same reel twice.
+ *  - It is counted once it has been the current page for [MIN_VIEW_MS] with no
+ *    leave-evidence — stopped on, not flicked past. Passive, event-quiet
+ *    playback counts; a device that fell asleep pauses the dwell instead.
+ *  - Leave-evidence: the next settled page, a checked window without a reel
+ *    surface (after [HIDE_GRACE_MS]), another app in the foreground, the
+ *    counter being disabled. A reel that had earned its dwell when it is left
+ *    is counted then (belt and braces for a late timer).
  *
  * Bubble visibility:
  *  - SHOWN while a reel/short surface is on screen; stays up the whole time you
@@ -38,14 +47,23 @@ class ContentCounter(private val context: Context) {
 
     private val store = ContentCounterStore(context)
     private val bubble by lazy { ContentCounterBubble(context) }
+    private val power by lazy {
+        context.getSystemService(Context.POWER_SERVICE) as PowerManager
+    }
     private val handler = Handler(Looper.getMainLooper())
-    private val dwellRunnable = Runnable { onDwellElapsed() }
-    private val hideRunnable = Runnable { hideBubble() }
+    private val tracker = ReelTracker(MIN_VIEW_MS) { count(it) }
+    private val tickRunnable = Runnable {
+        tracker.tick(mono(), power.isInteractive)
+        syncTimer()
+    }
+    private val hideRunnable = Runnable {
+        hideBubble()
+        tracker.leave(mono())
+        syncTimer()
+    }
+    private val widgetRunnable = Runnable { pushWidgetNow(store.snapshot(dateKey())) }
 
     private var lastReelSurfaceAtMs = 0L
-    private var reelActive = false
-    private var reelCounted = false
-    private var currentReelPkg: String? = null
     private var lastForegroundPkg: String? = null
     private var bubbleVisible = false
     private var hidePending = false
@@ -68,11 +86,34 @@ class ContentCounter(private val context: Context) {
 
     val isEnabled: Boolean get() = store.enabled
 
+    /** Today's reel count (the bubble's number) — read by the block screen. */
+    fun todayCount(): Int = store.todayCount(dateKey())
+
+    /**
+     * Today's reel-watching time in ms — the daily reel limit's native meter
+     * ([RuleEngine]). A detector match recurs continuously while a reel is on
+     * screen, so this ran up to 6.7×/s per matching platform for a value the
+     * counter only writes every [USAGE_FLUSH_MS]; the store read (a keyed
+     * String compare plus a getLong, both lock-guarded) is memoised for exactly
+     * that window, which is the fastest the underlying value can move. The
+     * unflushed tail (≤ USAGE_FLUSH_MS) is not included either way.
+     */
+    fun timeTodayMs(now: Long): Long {
+        if (now - meterReadAtMs in 0 until USAGE_FLUSH_MS) return meterCacheMs
+        meterCacheMs = store.timeTodayMs(dateKey())
+        meterReadAtMs = now
+        return meterCacheMs
+    }
+
+    @Volatile private var meterCacheMs = 0L
+    @Volatile private var meterReadAtMs = Long.MIN_VALUE
+
     /**
      * Foreground app changed. Tracks the current reel app and hides the bubble
      * when the user leaves for another real app. Ignores our own overlay windows
      * and transient system UI so it can't cause a show/hide loop; the bubble is
-     * SHOWN by [onReelSurfaceSeen], not here.
+     * SHOWN by [onReelSurfaceSeen], not here. The reel session is suspended, not
+     * ended — coming back to the same reel resumes it (see [ReelTracker]).
      */
     fun onForegroundChanged(pkg: String, isReelApp: Boolean) {
         if (pkg == context.packageName || pkg in TRANSIENT_PKGS) return
@@ -81,49 +122,64 @@ class ContentCounter(private val context: Context) {
         // app means onAppActivity (and its flush) won't fire again.
         flushUsage()
         lastForegroundPkg = pkg
-        endReel()
-        if (isReelApp && store.enabled) {
-            currentReelPkg = pkg
-            // Wait for an actual reel surface before showing (reel/short context).
-        } else {
-            currentReelPkg = null
-            hideBubble()
+        if (!(isReelApp && pkg == tracker.pkg)) {
+            tracker.suspend(mono())
+            syncTimer()
         }
+        // Any app other than the session's own takes the bubble down — another
+        // reel-capable app's feed included (its non-reel screens are not
+        // leave-evidence for the suspended session, see onNoReelSurface, so
+        // this is the only hide on that path). onReelSurfaceSeen re-shows it
+        // as soon as a reel surface is actually on screen.
+        if (!(isReelApp && store.enabled && pkg == tracker.pkg)) hideBubble()
     }
 
     /** A reel/short surface is on screen for [pkg] right now — show + keep it up. */
     fun onReelSurfaceSeen(pkg: String) {
         if (!store.enabled) return
-        lastReelSurfaceAtMs = now()
-        if (currentReelPkg == null) {
-            currentReelPkg = pkg
-            lastForegroundPkg = pkg
-        }
+        lastReelSurfaceAtMs = mono()
+        lastForegroundPkg = pkg // a reel surface on screen ⇒ pkg is the foreground app
         cancelHide()
         if (store.bubbleEnabled) {
             bubble.show(store.todayCount(dateKey()))
             bubbleVisible = true
         }
-        if (!reelActive) startReel()
+        tracker.surfaceSeen(pkg, mono())
+        syncTimer()
     }
 
     /**
-     * A reel app's window was checked and had NO reel surface (e.g. the feed).
-     * Schedule a short-grace hide (once) so between-reel transitions don't
-     * flicker but leaving reels does hide the bubble. Passive watching never
-     * reaches here (no event = no check), so it stays visible.
+     * A monitored app's window was checked and had NO reel surface (e.g. the
+     * feed). For the session's own app that is leave-evidence: stamp the
+     * current reel's end and schedule a short-grace hide + leave (once), so
+     * between-reel transitions don't flicker or end the reel, but leaving reels
+     * does. Another monitored app's window (a WhatsApp reply, the YouTube
+     * feed) is a detour, already handled by [onForegroundChanged] → suspend,
+     * and must not end the session — else the return would recount the reel.
+     * Passive watching never reaches here (no event = no check), so it stays
+     * visible and keeps dwelling.
      */
     fun onNoReelSurface(pkg: String) {
-        if (!store.enabled || !bubbleVisible || hidePending) return
-        endReel() // no reel on screen → stop the dwell timer
+        if (!store.enabled || hidePending) return
+        if (tracker.active && pkg != tracker.pkg) return
+        if (!bubbleVisible && !tracker.active) return
+        tracker.noSurface(pkg, mono())
+        syncTimer()
         hidePending = true
         handler.postDelayed(hideRunnable, HIDE_GRACE_MS)
     }
 
-    /** A scroll happened in [pkg]: still reel context, but advance the dwell. */
-    fun onScroll(pkg: String) {
-        if (!store.enabled || currentReelPkg == null) return
-        if (reelActive) endReel()
+    /**
+     * A scroll happened in [pkg]. The pager's own [fromIndex]/[toIndex] (visible
+     * adapter positions, -1 when the view reports none) and [deltaY] (API 28+,
+     * else 0) identify the reel; the tracker classifies once the burst settles.
+     * [isPager]: the platform's verdict on the scrolled view when it declares a
+     * `pagerViewId` (EVO-024), null otherwise.
+     */
+    fun onScroll(pkg: String, fromIndex: Int, toIndex: Int, deltaY: Int, isPager: Boolean?) {
+        if (!store.enabled) return
+        tracker.scroll(pkg, fromIndex, toIndex, deltaY, mono(), isPager)
+        syncTimer()
     }
 
     /**
@@ -139,7 +195,7 @@ class ContentCounter(private val context: Context) {
      */
     fun onAppActivity(pkg: String) {
         if (!store.enabled) return
-        val now = now()
+        val now = mono() // awake-time clock: a clock change can't mint usage
         if (pkg == usageActivePkg) {
             val delta = now - usageLastTickMs
             if (delta in 1L until USAGE_ACTIVE_GAP_MS) {
@@ -173,7 +229,8 @@ class ContentCounter(private val context: Context) {
     fun setEnabled(on: Boolean) {
         store.enabled = on
         if (!on) {
-            endReel()
+            tracker.leave(mono()) // count() is gated on the store, so nothing lands
+            syncTimer()
             hideBubble()
         }
     }
@@ -182,7 +239,7 @@ class ContentCounter(private val context: Context) {
         store.bubbleEnabled = on
         if (on) {
             // Reflect immediately if we're currently on a reel surface.
-            if (store.enabled && now() - lastReelSurfaceAtMs < HIDE_GRACE_MS) {
+            if (store.enabled && mono() - lastReelSurfaceAtMs < HIDE_GRACE_MS) {
                 bubble.show(store.todayCount(dateKey()))
                 bubbleVisible = true
                 cancelHide()
@@ -222,8 +279,9 @@ class ContentCounter(private val context: Context) {
     /** Cleanup hook called from the service's onUnbind/onDestroy. */
     fun dispose() {
         flushUsage()
-        handler.removeCallbacks(dwellRunnable)
+        handler.removeCallbacks(tickRunnable)
         handler.removeCallbacks(hideRunnable)
+        handler.removeCallbacks(widgetRunnable)
         bubble.hide()
         bubbleVisible = false
         hidePending = false
@@ -242,37 +300,24 @@ class ContentCounter(private val context: Context) {
         bubbleVisible = false
     }
 
-    // ── Dwell timing (counting) ────────────────────────────────────────────────
+    // ── Tracker timer (settle + dwell) ─────────────────────────────────────────
 
-    private fun startReel() {
-        reelActive = true
-        reelCounted = false
-        handler.removeCallbacks(dwellRunnable)
-        handler.postDelayed(dwellRunnable, MIN_VIEW_MS)
-    }
-
-    private fun endReel() {
-        reelActive = false
-        reelCounted = false
-        handler.removeCallbacks(dwellRunnable)
-    }
-
-    private fun onDwellElapsed() {
-        val pkg = currentReelPkg ?: return
-        if (!reelActive || reelCounted) return
-        // Only count if the reel surface is still fresh — i.e. still watching.
-        if (now() - lastReelSurfaceAtMs > REEL_SURFACE_STALE_MS) return
-        reelCounted = true
-        count(pkg)
+    /** Re-arm the single tracker timer from its earliest deadline (idempotent). */
+    private fun syncTimer() {
+        handler.removeCallbacks(tickRunnable)
+        val due = tracker.nextDueAtMs
+        if (due > 0L) handler.postDelayed(tickRunnable, (due - mono()).coerceAtLeast(0L))
     }
 
     // ── Persistence + fan-out ──────────────────────────────────────────────────
 
     private fun count(pkg: String) {
         if (!store.enabled) return
-        flushUsage() // the event's timeTodayMs must include the pending window
-        store.recordCount(pkg, dateKey())
-        val snap = store.snapshot(dateKey())
+        // One prefs edit for the count AND the pending usage window (the
+        // event's timeTodayMs must include it); the snapshot comes back from
+        // the maps that edit already parsed.
+        val snap = store.recordCount(pkg, dateKey(), pendingUsageMs)
+        pendingUsageMs = 0L
         val today = snap["today"] as? Int ?: 0
         ServiceEventBus.post(
             "contentCounted",
@@ -293,35 +338,60 @@ class ContentCounter(private val context: Context) {
         if (store.bubbleEnabled && bubbleVisible) bubble.onCounted(today)
     }
 
+    /**
+     * Throttled widget push with a trailing flush: a push inside the window is
+     * deferred to the window's end (with a fresh snapshot), never dropped —
+     * two counts <1 s apart are routine (belt-and-braces at settle + the next
+     * dwell), and a dropped last push left the widget one reel behind for hours.
+     */
     private fun pushWidget(snapshot: Map<String, Any?>) {
-        val t = now()
-        if (t - lastWidgetPushMs < WIDGET_MIN_INTERVAL_MS) return
-        lastWidgetPushMs = t
+        handler.removeCallbacks(widgetRunnable)
+        val wait = WIDGET_MIN_INTERVAL_MS - (mono() - lastWidgetPushMs)
+        if (wait > 0L) {
+            handler.postDelayed(widgetRunnable, wait)
+            return
+        }
+        pushWidgetNow(snapshot)
+    }
+
+    private fun pushWidgetNow(snapshot: Map<String, Any?>) {
+        lastWidgetPushMs = mono()
         try {
             ContentCounterWidgetProvider.pushUpdate(context, snapshot)
         } catch (_: Throwable) {
         }
     }
 
-    private fun now() = System.currentTimeMillis()
+    /**
+     * The one clock in here — reel dwell, scroll settling, usage-time deltas
+     * and the widget/bubble throttles. `uptimeMillis` is monotonic (immune to
+     * time changes) and, unlike `elapsedRealtime`, STOPS in deep sleep: it is
+     * the clock the Handler timer runs on, so a phone that slept for hours
+     * mid-reel can't wake up owing a dwell it never showed. Wall time is only
+     * ever read through [dateKey].
+     */
+    private fun mono() = SystemClock.uptimeMillis()
 
     private fun dateKey(): String = DateKeys.today()
 
     private companion object {
-        /** A reel must be on screen this long to count as "watched" (anti-inflation). */
-        const val MIN_VIEW_MS = 2000L
-
-        /** A detection within this window means "still on a reel surface". */
-        const val REEL_SURFACE_STALE_MS = 2000L
+        /**
+         * A reel must be the settled current page this long to count — stopped
+         * on, not flicked past. Identity de-dup lives in [ReelTracker], so this
+         * is a "you saw it" threshold, not a noise filter. The One Reel
+         * allowance keeps its own 2s "watched" dwell in the service.
+         */
+        const val MIN_VIEW_MS = 1000L
 
         /**
          * After a checked frame with no reel surface, wait this long before
-         * hiding — bridges between-reel transitions without flicker, but hides
-         * shortly after the user lands on a non-reel screen.
+         * hiding the bubble and ending the reel — bridges between-reel
+         * transitions without flicker, but hides shortly after the user lands
+         * on a non-reel screen.
          */
         const val HIDE_GRACE_MS = 1500L
 
-        /** Throttle native widget pushes so a count can't hammer the launcher. */
+        /** Throttle native widget pushes (trailing flush) so a count can't hammer the launcher. */
         const val WIDGET_MIN_INTERVAL_MS = 1000L
 
         /**

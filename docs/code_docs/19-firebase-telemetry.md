@@ -47,13 +47,31 @@ tests pass a mock. Living under `lib/core/**`, the layer is freely importable by
 
 | Service | Backing | Key surface |
 |---|---|---|
-| `AnalyticsService` | `FirebaseAnalytics` | Semantic methods (`logPlanChanged`, `logBlockingToggled`, `logPauseStarted/Ended`, `logBlockTriggered`, `logReelsCounted`, `logWebBlocked`, `logScreenView`, `setUserId`), plus `navigatorObserver` (a `FirebaseAnalyticsObserver`). No raw `logEvent` is exposed — the event vocabulary is enforced in one place. |
+| `AnalyticsService` | `FirebaseAnalytics` | Semantic methods (`logPlanChanged`, `logBlockingToggled`, `logPauseStarted/Ended`, `logBlockTriggered`, `logReelsCounted`, `logWebBlocked`, `logBlockScreenAction`, `logOnboardingStep`, `logScreenView`, `setUserId`), plus `navigatorObserver` (a `FirebaseAnalyticsObserver`). No raw `logEvent` is exposed — the event vocabulary is enforced in one place. |
 | `CrashReportingService` | `FirebaseCrashlytics` | `recordError(error, stack, {reason, fatal})`, `setKey`, `setUserId`, `log`, `setCollectionEnabled`, and a **static** `installGlobalHandlers()`. |
 | `PerformanceService` | `FirebasePerformance` | `setCollectionEnabled`, `traceAsync<T>(name, action)` (always stops the trace, even on throw). |
 
 Event and parameter names are constants in `analytics_events.dart` (`AnalyticsEvent.*`,
 `AnalyticsParam.*`) so nothing uses a magic string, and names stay within Firebase's rules
 (`[a-zA-Z][a-zA-Z0-9_]*`, ≤40 chars, no reserved prefix).
+
+### The onboarding funnel
+
+`onboarding_step { step, direction }` fires on every first-run step change.
+`step` is the `OnboardingStepId` wire token (`WELCOME` … `PERMISSIONS`);
+`direction` is `ENTER` (first render or a resume onto a saved step), `FORWARD` or
+`BACK`.
+
+Both halves are load-bearing rather than decorative. Without the `ENTER` event
+the first step never fires at all, so welcome→survey drop-off — the most valuable
+number in the funnel — has no denominator. Without `direction`, a Back tap is the
+same `advance` call as a Next tap and inflates every step total by an unknown
+amount.
+
+**No answer ever leaves the device.** Not the name, not the screen-time band, not
+the picked feeds — only the two enum tokens above. The record that holds those
+answers is also excluded from Android backup (see
+[24-protected-apps.md](24-protected-apps.md)).
 
 ---
 
@@ -135,6 +153,8 @@ the screen-scoped cubits). It switches on the event `type`
 | `blocked` `{platformId, mode, today, total}` | `block_triggered { platform, mode }` | `blocks_today`, `blocks_total` |
 | `contentCounted` | `reels_counted { count }` — **batched** (§below) | — |
 | `webBlocked` `{host, mode, …}` | `web_blocked { mode }` — **host omitted** (§6) | — |
+| `blockScreenAction` `{action, referenceType, referenceId, preview}` | `block_screen_action { action }` — **referenceId omitted** (a host / package), **preview walls skipped** | — |
+| `nudgeShown` `{package, elapsedMs, thresholdMs}` | `nudge_shown { duration_min }` — **package omitted**, and `elapsedMs` too: only the threshold band the user configured is sent | — |
 
 **Reel batching:** short videos count at high frequency, so instead of one event per reel the
 reporter accumulates and flushes an aggregate `reels_counted { count }` after **25 reels** or **30 s**
@@ -205,6 +225,23 @@ When adding an event, keep values to enums/counts/durations — no free-form use
 | Cloud sink for the local block-event `AnalyticsRepository` | Still not wired — that buffer remains on-device (doc 12) |
 
 ---
+
+## Redaction at the Crashlytics bridge
+
+`AppLogger.onError` forwards a *message and an error object* to
+`crash.recordError`. That object is the one thing in the app that crosses the
+network boundary without being written for the wire, and `FormatException`
+carries a ~78-character window of **the string it failed to parse**. Five
+repositories log a decode failure as `AppLogger.e(msg, e)`, and the blobs are
+the user's own data — the protected-apps list, per-app screen time, the rules'
+blocked hosts and packages, app settings.
+
+`FirebaseServices.offDevice` therefore reduces a `FormatException` to its type,
+message and offset before it is recorded; everything else passes through
+untouched, because the leak is specific to exceptions that carry their input.
+Local `debugPrint` keeps the full detail — only the uploaded path is scrubbed.
+Pinned by `test/crash_redaction_test.dart`, which asserts both that the raw
+exception leaks and that the redacted one does not.
 
 ## Source files
 

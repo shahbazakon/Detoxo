@@ -3,6 +3,9 @@
     <string name="app_name">Detoxo</string>
     <string name="accessibility_service_description">Detoxo uses the Accessibility Service to detect short-form video (reels, shorts) in your apps and block it so you can stay focused. It reads on-screen content only to find and block distracting feeds; it does not collect or transmit your screen content.</string>
     <string name="accessibility_service_summary">Detect and block reels, shorts and infinite feeds.</string>
+    <!-- Shown in Android's "Notification access" list. Says what the grant is
+         used for, since that system screen offers no other explanation. -->
+    <string name="notification_listener_label">Detoxo Notification Silence</string>
     <string name="device_admin_label">Detoxo Uninstall Protection</string>
     <string name="device_admin_description">Prevents the app from being removed while protection is active.</string>
     <string name="cc_widget_description">Reel counter</string>
@@ -12,6 +15,74 @@
     <string name="toast_blocked">%1$s is blocked by Detoxo</string>
     <!-- EVO-018: adult-list (18+) hits are never named on screen. -->
     <string name="toast_blocked_adult">Adult site blocked by Detoxo</string>
+
+    <!-- The block screen (intervention wall). The headline reuses the two
+         toast strings above so wall and toast copy can never drift. Plan
+         labels are NOT resources: `planLabel()` in BlockScreenRenderer.kt is
+         a pure function so a JVM test can pin the legacy Conscious wire token
+         to its "Conscious" label. -->
+    <!-- The soft nudge card. Advisory, never accusatory: it states the elapsed
+         time and asks a question, because the user opted into being told, not
+         into being told off.
+
+         The body asserts NOTHING about what the user is doing. The dwell
+         machine measures time in the app and walks no nodes (see
+         NudgeTracker), so it cannot know whether they are scrolling, reading a
+         DM or on a call — and telling a user on a video call that they are
+         "still scrolling" spends the trust the honest-numbers pitch earns.
+         The title carries the one fact the engine actually has. -->
+    <string name="nudge_title">%1$s · %2$d min</string>
+    <string name="nudge_body">Good time to put it down?</string>
+    <string name="nudge_dismiss">Dismiss</string>
+    <!-- The card's single action: the user leaves, on their own tap. The
+         engine still never blocks for a nudge. -->
+    <string name="nudge_leave">Leave</string>
+    <!-- Whole-card label for TalkBack; activating the card dismisses it. -->
+    <string name="nudge_card_a11y">%1$s for %2$d minutes. Tap to dismiss.</string>
+
+    <string name="wall_this_app">This app</string>
+    <string name="wall_reason_block_all">Block All is on</string>
+    <string name="wall_reason_conscious">Your Conscious time bank is empty</string>
+    <string name="wall_reason_one_reel">You’ve watched your reel</string>
+    <string name="wall_reason_unblock">You’ve watched your %1$d reels</string>
+    <string name="wall_reason_app_block">Locked in your App blocker</string>
+    <string name="wall_reason_web_rule">On your website blocklist</string>
+    <string name="wall_reason_adult">Adult content (18+)</string>
+    <string name="wall_reason_daily_limit">Your daily limit is used up</string>
+    <string name="wall_reason_schedule">Blocked by a schedule</string>
+    <!-- EVO-028: the same two reasons, when the rule window names a release time. -->
+    <string name="wall_reason_daily_limit_until">Your daily limit is used up · Resets at %1$s</string>
+    <string name="wall_reason_schedule_until">Blocked by a schedule · Unlocks at %1$s</string>
+    <plurals name="wall_count_today">
+        <item quantity="one">%d reel today</item>
+        <item quantity="other">%d reels today</item>
+    </plurals>
+    <string name="wall_bank">%1$s left in your bank</string>
+    <plurals name="wall_allowance_left">
+        <item quantity="one">%d reel left</item>
+        <item quantity="other">%d reels left</item>
+    </plurals>
+    <string name="wall_go_home">Go home</string>
+    <string name="wall_got_it">Got it</string>
+    <string name="wall_open_app">Open Detoxo</string>
+    <string name="wall_back_to">Back to %1$s</string>
+    <!-- EVO-025: the ghost exit while its countdown runs ("Back to Instagram · 5"). -->
+    <string name="wall_countdown">%1$s · %2$d</string>
+    <!-- EVO-026: the ghost exit once the foreground has already left the blocked app. -->
+    <string name="wall_dismiss">Dismiss</string>
+    <!-- "Allow"/"Resume" is the one vocabulary for per-target unblocks: the
+         sheet this opens says "Allow X for…", the toast says "allowed", and
+         both blocklist rows say Allow / Resume. -->
+    <string name="wall_unblock">Allow for a while</string>
+    <!-- EVO-050: the duration chips, asked on the wall itself. -->
+    <string name="wall_unblock_minutes">%1$d min</string>
+    <!-- EVO-027: foreground transitions into the app since local midnight (usage layer). -->
+    <plurals name="wall_opens_today">
+        <item quantity="one">%1$s opened %2$d time today</item>
+        <item quantity="other">%1$s opened %2$d times today</item>
+    </plurals>
+    <!-- EVO-034: what the reach cost, beside how often it happened. -->
+    <string name="wall_time_today">%1$s today in %2$s</string>
     <string name="fgs_channel_name">Detoxo Service Status</string>
     <string name="fgs_channel_description">Focus protection active</string>
     <string name="fgs_title">Detoxo is active</string>

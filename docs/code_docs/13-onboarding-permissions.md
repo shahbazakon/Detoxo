@@ -1,105 +1,136 @@
 # Onboarding & Permission Funnel
 
-How a first-run Detoxo user gets from cold launch to a working blocker: the value-prop onboarding intro, the guided runtime-permission funnel, and the exact splash-screen gate that decides which of those (if any) to show.
+How a first-run Detoxo user gets from cold launch to a working blocker: the persisted onboarding step machine, the guided runtime-permission funnel, and the single router `redirect` that decides which of those (if any) to show.
 
-The whole flow is driven **imperatively from the splash screen** after app state loads — there is no `go_router` `redirect`. The router's `initialLocation` is always `/` (splash); the splash then `context.go(...)`s to the right destination.
+Gating is **declarative**: one `redirect` on the `GoRouter`, reading `AppGate`. It is no longer performed imperatively from the splash screen. See [01-overview-architecture.md](01-overview-architecture.md) §3–§4 for the gate itself; this doc covers what onboarding *produces*.
 
 ---
 
-## 1. The splash gate (source of truth)
+## 1. The gate (source of truth)
 
-`lib/app/splash_screen.dart` boots the app and routes. On the first post-frame callback it runs `_bootstrap()`:
-
-1. **Load state in parallel** (`Future.wait`) — only what the routing decision reads:
-   - `SettingsCubit.bootstrap()` — app settings (incl. the `onboarded` flag)
-   - `PermissionsCubit.refresh()` — current permission statuses
-   - `PinCubit.load()` — PIN configuration
-
-   `TargetsCubit.load()` is the slow leg (native config push + installed-package scan) and stays **off the critical path**: it is awaited only on a first run (for the seeding below) and fired `unawaited` otherwise.
-2. **First-run seeding of the enabled set.** If `settings.state.enabledPlatformIds` is empty, it awaits `targets.load()` and seeds from every target that is both `defaultEnabled` and `isInstalled` (via `settings.setEnabledPlatforms(...)`). Apps the user doesn't have are never pre-enabled.
-3. **Content-counter widget refresh** (fire-and-forget, never blocks routing): `_refreshReelCounterWidget()` reads `ContentCounterRepository.current()` and pushes it to the home-screen widget via `HomeWidgetRepository.pushSnapshot(...)`. The reel counter runs natively and is on by default, independent of blocking.
-4. **Blocklist drift repair** (fire-and-forget): `syncEngineBlocklists()` (`lib/app/engine_sync.dart`) pushes the protected apps, the merged web blocklist and the whole-app blocks to the native engine so it matches Dart without any screen ever being opened. The same shared helper is the resume path's heavy leg ([12](12-analytics-notifications-resilience.md) §3.2) — the splash no longer carries its own copy of the trio.
-
-Then the gate, **in this exact order**:
+`lib/app/splash_screen.dart` renders the brand moment and calls `runBootstrap(context)` (`lib/app/bootstrap.dart`). It does **not** route. The bootstrap hydrates settings / permissions / PIN, seeds the enabled-platform set on a first run, then opens `AppGate` — and the router's `redirect` takes it from there, in this order:
 
 | # | Condition | Route | Notes |
 |---|-----------|-------|-------|
-| 1 | `!settings.state.onboarded` | `Routes.onboarding` (`/onboarding`) | Haven't seen the intro yet |
-| 2 | `pin.state.isConfigured && pin.state.guards(PinScope.app)` | `Routes.pinLock` (`/pin/lock`) | An **app-scope** PIN is set |
-| 3 | `!permissions.allRequiredGranted` | `Routes.permissions` (`/permissions`) | Missing a required permission |
-| 4 | (else) | `Routes.home` (`/home`) | Fully set up |
+| 0 | `!ready` | `Routes.splash` (`/`) | Bootstrap unfinished; nothing routes on unloaded state |
+| 1 | `!supported` | `Routes.unsupported` (`/unsupported`) | `PlatformCapabilities.isBlockingPreviewOnly` — iOS / web |
+| 2 | `!onboarded` | `Routes.onboarding` (`/onboarding`) | Hasn't finished the first run |
+| 3 | `pinLocked` | `Routes.pinLock` (`/pin/lock`) | An **app-scope** PIN is set |
+| 4 | `!permissionsOk` | `Routes.permissions` (`/permissions`) | Missing a required permission |
+| 5 | (else) | `Routes.home` (`/home`) | Fully set up |
 
-So the canonical funnel is **onboarding → PIN lock → permissions → home**. Each stage is checked only if the earlier ones passed; the first failing condition wins and returns.
+So the canonical funnel is **onboarding → PIN lock → permissions → home**. The first failing condition wins.
 
 Notes on the gate:
 
-- **`onboarded`** is a boolean on `AppSettings` (`lib/features/blocking/shared/domain/entities/app_settings.dart`), persisted through the settings store.
-- **PIN gate** uses `PinConfig.isConfigured` (`type != PinType.none`) **and** `guards(PinScope.app)` — i.e. only a PIN whose `scopes` set contains `PinScope.app` (wire `DETOXO_APP`) blocks the launch. A PIN scoped only to settings/plan-switch/etc. does **not** gate the splash. On a genuine first run no PIN exists, so this stage is skipped. (PIN mechanics — types, salted hashing, lockout ladder, biometrics, recovery — live in the access-protection docs; the splash only reads `PinCubit` state.)
-- **Required-permission gate** uses `PermissionsCubit.allRequiredGranted` (see §3).
-- The `unawaited(...)` widget refresh means a slow/absent native side can never stall the gate.
-
-The `build()` method renders a branded splash (Detoxo logo, "Reclaim your attention", spinner) while `_bootstrap()` runs.
+- **`onboarded`** is a boolean on `AppSettings` (`lib/features/blocking/shared/domain/entities/app_settings.dart`), persisted through the settings store. It is deliberately **not** the onboarding progress record (§2.2) — an install that predates that record must never be re-onboarded just because the record is absent.
+- **PIN gate** uses `PinConfig.isConfigured` (`type != PinType.none`) **and** `guards(PinScope.app)` — i.e. only a PIN whose `scopes` set contains `PinScope.app` (wire `DETOXO_APP`) blocks the launch. A PIN scoped only to settings/plan-switch/etc. does **not** gate the launch. On a genuine first run no PIN exists, so this stage is skipped. (PIN mechanics — types, salted hashing, lockout ladder, biometrics, recovery — live in the access-protection docs; the gate only reads `PinCubit` state at bootstrap.)
+- **Required-permission gate** uses `PermissionsCubit.allRequiredGranted` (see §3), pushed into the gate by a `BlocListener` in `main.dart` so a grant or a revocation re-routes on its own. It applies **only** from a pass-through screen or `/home` (`AppGate._permissionsGateApplies`): the cubit re-emits on every app resume, so an unscoped gate would yank a user off `/rules/edit` mid-edit and destroy their unsaved rule along with its `state.extra`. They are funnelled the next time they pass through home (EVO-041).
+- `/permissions` is a **destination, not a pass-through**: once the required permissions are granted the redirect leaves the user on it, so granting accessibility and overlay does not yank them off the screen while they work through the recommended ones.
 
 ---
 
-## 2. Onboarding intro (`onboarding` feature)
+## 2. Onboarding (`onboarding` feature)
 
-`lib/features/onboarding/` is a **presentation-only feature** — its public barrel (`onboarding.dart`) exports just `OnboardingScreen`; there is no data/ or domain/ layer.
+`lib/features/onboarding/` is a full slice (`domain/`, `data/`, `presentation/`). Its barrel exports the screen plus the domain that outlives it — the progress record and the survey→rule mapping, both read by `lib/app/starter_rule_sync.dart`.
 
-`presentation/onboarding_screen.dart` is a 5-page horizontal `PageView` over the ambient gradient (`GlassScaffold`). Each page is a **problem→solution** beat driven by a `_HeroKind` enum, and every hero is a **coded illustration built from the design system** (no bespoke Lottie/image assets):
+The old five-page `PageView` intro captured exactly one value (the daily-limit dial) and **persisted no position** — killing the app on page 4 restarted it at page 1. It also ended with a daily limit and nothing else: no rule, no reason. It has been replaced by a linear, persisted step machine that ends with a working rule in place.
 
-| Page | `_HeroKind` | Accent | Title | Hero / interaction |
-|------|-------------|--------|-------|--------------------|
-| 0 | `welcome` | `AppColors.seed` | "Take your time back" | brand logo (`assets/images/detox_logo_no_bg.png`) in an accent halo, breathing (`_WelcomeHero`) |
-| 1 | `caught` | `AppColors.seed` | "Caught the moment it starts" | `CaughtHero` — real app-pack icons ring a rising "reel" card a shield sweeps away; `Pill` footer "Blocks the reels, not the app" |
-| 2 | `plans` | `AppColors.onbTeal` | "Not all-or-nothing" | `PlanPreview` — tap any of the five plan chips to morph the badge + promise line |
-| 3 | `limit` | `AppColors.onbTeal` | "See the number, set the line" | `_ReelCountUp` (counts up once) above the interactive `ScreenTimeDial` |
-| 4 | `stick` | `AppColors.onbViolet` | "Make it stick" | `CommitmentHero` — shield with a lock that clicks shut + an always-on `StatusDot`; three benefit rows |
+### 2.1 The three properties that carry the design
 
-Copy is **value/outcome-first**: each page opens with the user's pain and answers it with what Detoxo does — the bottomless feed caught in the moment (page 1), the five flexible plans that fit how you change (page 2), an honest on-device reel count + a daily limit you set (page 3), and PIN/uninstall/always-on protection that makes it stick (page 4). Deep per-plan teaching is deliberately **deferred to the in-context dashboard feature showcase** (`additional_feature/showcase_view`); onboarding only sells the value and hands off. Nothing is requested or persisted per-page except the limit dial on page 3.
+1. **Persist before navigating.** The whole machine lives inside the *one* `/onboarding` route, so "navigate" is an `emit` — `await save` then `emit` gets the ordering for free, with no partial route stack to rebuild. A crash between the two resumes at the *next* step, a harmless replay; the reverse order loses it. Pinned by `test/onboarding_resume_test.dart`, which holds the write open and inspects both sides mid-flight.
+2. **Write each answer as it is given**, never batched. Batching at the end means a user who abandons at the last question is a user whose answers never existed.
+3. **Create the starter rule at grant time, not at selection time** (§2.4). A rule written when the feeds are picked does nothing for however long the user hesitates on the accessibility screen — and nothing forever if they never grant it.
 
-**The daily-limit step (page 3, `_LimitStep`).** Page 3 — "See the number, set the line" — first surfaces the on-device reel counter as a tangible number via `_ReelCountUp` (an illustrative "reels a day, typically" ticker that counts up **once** on entry, respecting reduce-motion), then presents the interactive **`ScreenTimeDial`** (`presentation/widgets/screen_time_dial.dart`) — a draggable 270° radial gauge (range **15 min – 5 h**, **15-minute** steps, default **90 min**) that visually mirrors the dashboard screen-time ring. Dragging (or tapping) the arc updates the value, which animates in the centre and fires a **selection haptic** on each new step; it's a Semantics slider (increase/decrease step) for accessibility. The selection is held in local `_draftLimit` state (nothing is saved until finish) and seeds the dashboard's screen-time ring max. Because the dial owns its drag gestures, the `PageView` horizontal swipe is **suspended on this page** (`NeverScrollableScrollPhysics`) — Back/Next still navigate. If the user skips the step, `_finish()` falls back to the **90-minute** default.
+### 2.2 Steps and storage
 
-UI mechanics:
-- **Coded heroes, no external art:** the welcome/caught/stick heroes (`_WelcomeHero`, `CaughtHero`, `CommitmentHero`) and the plans/limit interactions are composed entirely from design-system primitives (`GlassContainer`/`IconBadge`/`AppChip`/`StatusDot`/`ScreenTimeDial`) and `flutter_animate` — there are no Lottie/illustration assets to load or fall back for. All motion is guarded by `MediaQuery.maybeDisableAnimationsOf` and degrades to a static end-state under reduce-motion.
-- **Parallax:** the welcome/caught/stick heroes drift at 60px × page-delta relative to the swipe (`Transform.translate` driven by the `PageController`) in `_PageView`.
-- **Haptics:** a **selection** tick on every page change (`onPageChanged`) and on each dial step, and a **success** pulse when `_finish()` runs (`AppHaptics`, gated by the global vibration setting).
-- **Skip** (top-right `GhostButton`) — visible on pages 0–3, fades out (opacity 0, disabled) on the last page (index 4).
-- **Back** (top-left `GhostButton`) — hidden (opacity 0, disabled) on page 0, visible from page 1 onward; steps back one page via `PageController.previousPage`. Gives a discoverable way back for screen-reader users, since TalkBack intercepts the `PageView` swipe.
-- **Bottom bar** — a segmented filling progress bar (`_ProgressBar`: five segments, each filling with the current page accent as the user advances; wrapped in `Semantics(label: 'Step N of M')` so progress is announced) plus a full-width `PrimaryButton` labelled **"Next"** on pages 0–3 and **"Get started"** on the last page, tinted with the current page's accent.
+Six walked steps, `OnboardingStepId` (stable wire tokens), plus a terminal `completed`:
 
-**Finishing** (`_finish()`, reached by *Skip*, or by *Get started* on the last page via `_next()`):
+| Step | Purpose |
+|---|---|
+| `welcome` | What Detoxo is, in one screen (`CaughtHero` + "Blocks the reels, not the app") |
+| `survey` | Name (optional), screen-time band, what matters most |
+| `projection` | The five-year cost, computed from the band |
+| `selection` | Pick the feeds to protect — **requires ≥ 1** |
+| `commitment` | The promise, keyed to `mattersMost`, plus the daily-limit dial |
+| `permissions` | Hands off to the real `/permissions` screen — the hard gate |
 
-```dart
-final settings = sl<SettingsRepository>();
-// Seed the dashboard ring's daily limit from the quick-pick (or 90 min default)
-// through the app-wide cubit, so the dashboard reflects it live.
-final dailyLimit = context.read<DailyLimitCubit>();
-AppHaptics.success(); // completion pulse
-await settings.save((await settings.load()).copyWith(onboarded: true));
-await dailyLimit.setLimit(_draftLimit ?? _defaultLimit);
-if (mounted) context.go(Routes.splash);   // NOT /permissions — see note 2
+Persisted under `StoreKeys.onboardingProgress` (`'onboarding_progress'`) by `OnboardingRepositoryImpl`, as JSON with enums as **stable name strings**:
+
+```jsonc
+{
+  "step": "SURVEY",
+  "name": null,
+  "screenTimeBand": "BETWEEN_3_AND_4H",
+  "mattersMost": "FOCUS",
+  "selection": { "platforms": ["ig_reel"] },
+  "dailyLimitMinutes": 90,
+  "startedAtMs": 1756742400000
+}
 ```
 
-Three things to note:
+Reads are tolerant in the `Rule` / `AppSettings` idiom (hand-rolled JSON, not freezed): an unknown enum token degrades to `null`, an unknown step to `welcome`, and a corrupt or unparseable blob restarts the run rather than stranding the launch on a crash it cannot escape. `dailyLimitMinutes` is **clamped** to the dial's own 15 min – 5 h range on read: the widget is the only bound in the UI, so a restored or hand-edited record could otherwise hand `setLimit` a `0`, which `DailyLimit.isExceeded` treats as "no limit at all" — silently switching the ceiling off while the screen still showed one.
 
-1. It persists `onboarded: true` **directly through `SettingsRepository`** (resolved from `sl`),
-   not through `SettingsCubit` — because `tool/check_boundaries.sh` forbids a feature importing
-   another feature's `presentation/`, and the cubit lives in `blocking/shared/presentation/`.
-   The domain contract is the only legal handle onboarding has on settings.
-2. **It navigates back to the splash (`/`), not straight to `/permissions`.** This is load-bearing,
-   not cosmetic. A raw repository write persists the flag but leaves `SettingsCubit.state` stale at
-   `onboarded: false`, and `_commit` is `emit → save → pushSettings` with no repo→cubit feedback —
-   so the next `_commit` from *any* setter (the dashboard showcase Skip, picking a mode, flipping a
-   switch) does `state.copyWith(...)` carrying that stale `false` and writes it **straight back over
-   Hive**, walking the user through onboarding again on the next cold launch. Re-entering the splash
-   re-runs `SettingsCubit.bootstrap()`, which reloads the flag that was just persisted, so nothing
-   can clobber it; the splash gate then routes on to `/permissions` itself — and, unlike the old
-   direct jump, honours the PIN gate on the way. This was a real defect, caught on a physical device
-   by `integration_test/app_e2e_test.dart` (see `.claude/skills/detoxo-auto-test/SKILL.md`). The
-   general rule: **an `AppSettings` field written behind the cubit's back must be followed by a
-   cubit reload**, or it will be silently reverted.
-3. It **seeds the daily limit** through the **app-wide `DailyLimitCubit`** (`context.read<DailyLimitCubit>().setLimit(...)`, the quick-pick choice or the 90-minute default) — not a direct `DailyLimitRepository.save`, so the value re-emits to the dashboard's screen-time ring **live**. This is the value the ring reads as its max (the ring's fill comes from native usage time, not `DailyLimit.consumed`). See [07-daily-limit-scheduler.md](07-daily-limit-scheduler.md).
+**The record holds PII.** A first name, a self-reported screen-time band and the list of social feeds the user has. The Hive box is excluded from Google cloud backup and device-to-device transfer (`android:allowBackup="false"` plus `res/xml/data_extraction_rules.xml`, EVO-005); it is cleared the moment the starter rule lands.
+
+Vocabularies: `ScreenTimeBand` — 7 bands plus `DONT_KNOW`, each carrying an `hoursPerDay` midpoint (the projection's only input; `DONT_KNOW` uses the average, because a zero projection would reward not answering). `MattersMost` — `FOCUS SLEEP PRESENT MENTAL OTHER`.
+
+### 2.3 Script as data
+
+`domain/onboarding_script.dart` holds `surveyQuestions`, a `List<OnboardingQuestion>` of `(field, prompt, kind, options, optional)`. The survey step walks the list and renders it, so **adding a question is a list edit** — no new widget, no new state field, no new navigation edge. `SurveyStep.isComplete` is derived from the same list, so a new required question gates the step with no other change.
+
+The table is deliberately **non-generic**: a `const` list of `AskChips<SomeEnum>` erases to `dynamic` in the walker anyway, so the type parameter would buy nothing and cost a cast at every render. The table covers the survey only — `projection` needs arithmetic, `selection` needs `TargetsCubit`, and `permissions` is an existing screen.
+
+### 2.4 The starter rule
+
+`domain/starter_rule.dart` maps the survey to **one** M3 rule, built from the existing `RulePreset` set rather than from scratch — M3 already ships these windows, and a second copy of "22:00–07:00" is a second thing to keep right:
+
+| `mattersMost` | Rule |
+|---|---|
+| `SLEEP` | `RulePreset.sleep` — schedule, daily 22:00–07:00 (exercises the overnight-wrap path) |
+| `FOCUS` | `RulePreset.workHours` — schedule, Mon–Fri 09:00–17:00 |
+| `PRESENT` / `MENTAL` / `OTHER` / **skipped** | `RulePreset.doomscrollBudget` — time limit, 30 min/day, `lockPeriod: END_OF_DAY` |
+
+`mattersMost` is **nullable and null is a real answer**: skipping the survey used to leave it null, which the commitment screen rendered as the 30-minute budget while the sync refused to write anything — the app stating a behaviour it did not implement, on the last screen before the grant. `starterPreset(null)` now returns the preset that copy describes (EVO-039), and the commitment screen renders its promise **from that preset** rather than restating the hours in prose, so the two cannot drift.
+
+The preset's *category* selection is replaced with the `platformId`s the user actually picked: a starter rule must block what they chose, not a default taxonomy. `lockPeriod` needs no field — `Rule.toJson` already emits `END_OF_DAY` as the only time-limit lock behaviour M3 shipped. The presets are reached by **name** (`RulePreset.sleep`, not `RulePreset.all[1]`) so reordering the empty-state list cannot silently change which rule a new user gets. Covered by `test/starter_rule_test.dart`.
+
+**When it is written.** `lib/app/starter_rule_sync.dart` is mounted app-wide in `main.dart` beside `AppResumeSync`. There is **no push event for "accessibility granted"** — the state is read, not delivered — but `AppResumeSync` already refreshes permissions on every resume and the cubit re-polls itself 400 ms after a request, so the signal arrives on its own whether the user returns to the app or grants while it is still foregrounded.
+
+It reads a **level, not an edge**, and that distinction is load-bearing. Watching the false→true edge on `allRequiredGranted` is the obvious design and it was silently broken: `PermissionsCubit.effectivelyGranted` consults `_lastKnownGranted`, which `refresh()` overwrites *before* it emits, so re-evaluating the PREVIOUS state inside `listenWhen` scored it against post-refresh memory. A previous emit holding a live `unknown` for an already-persisted permission read back as granted, `!true` collapsed the edge, and the rule was never written — on the most ordinary path there is, because the 400 ms poll after `request()` routinely returns `unknown`. The write is idempotent, so firing on every emit costs nothing and cannot go wrong that way.
+
+Two listeners, not one. The second watches `RulesState.loaded`, because the grant can be discovered by the bootstrap's own `permissions.refresh()` while `RulesCubit` is still loading — and `RulesCubit.save` refuses to write on top of rules it has not read. Waiting for `loaded` keeps `rules.load` off the startup critical path.
+
+The decision itself lives in `applyStarterRule`, a top-level function taking the repository, a `save` callback and an `isMounted` probe — so the branches below are covered by plain unit tests (`test/starter_rule_sync_test.dart`) with no widget tree:
+
+| Record | Action |
+|---|---|
+| `step: permissions` | Write the rule, then clear the record |
+| `step: completed` | Clear it — an orphan from a crash between marking completed and clearing |
+| anything else | Nothing: an existing install (no record ⇒ `welcome`) or a run still in progress |
+
+So **no upgrading user ever gets a rule they did not ask for**. Two paths deliberately leave the record ARMED rather than consuming it: a refused `save` (the rule cap, or a rules blob that never loaded) and an unmounted teardown mid-await — both mean "try again later", not "job done". The rejected-save path logs through `AppLogger.e`, not `.w`, because `.w` is debug-only and this is the one outcome the whole funnel exists to prevent: granted, onboarded, and no rule.
+
+### 2.5 The walker and its chrome
+
+`presentation/onboarding_screen.dart` provides `OnboardingCubit` for the `/onboarding` route only (cubits are never registered in `sl` in this repo; the *repository* is) and renders whatever step the cubit is on through an `AnimatedSwitcher`. Existing chrome is kept verbatim: the segmented `_ProgressBar` (`Semantics(label: 'Step N of M')`), the top-left **Back** and top-right **Skip** ghost buttons, and the accent-tinted full-width `PrimaryButton`.
+
+- **Next** is gated only where it must be: `survey` needs its required answers, `selection` needs ≥ 1 feed — *unless there is nothing to pick*. A device with none of the supported apps installed would otherwise be a permanent dead end: Next disabled, Skip already gone, so onboarding could never be completed and `onboarded` never flipped, returning the user to the same screen on every future launch.
+- **`permissions` is terminal for the walker.** Reaching it — or resuming onto it after a crash between `advance` and `setOnboarded` — re-runs the hand-off. Without that the resumed state rendered an enabled button that did nothing, on a screen the user could not tell they had already passed.
+- **Skip** jumps to `selection` and disappears from there on — neither the picks nor the permissions are skippable, because without them onboarding has protected nothing.
+- **Back** walks the machine backwards and never erases an answer. A `PopScope` routes the system back button through the same path, so it cannot drop the user out of the app mid-onboarding.
+- The **selection** step renders through the blocklist's own `BlockAppGroup` / `BlockAppTile`, so Instagram's Feed / Reels / Stories collapse under one tile exactly as they do on the blocklist screen and the two cannot drift. Only installed apps are listed — offering feeds the user cannot open would make the "pick at least one" gate answerable with something that blocks nothing.
+- The **commitment** step keeps the interactive `ScreenTimeDial` (270° radial gauge, **15 min – 5 h**, **15-minute** steps, default **90 min**) that used to be page 3, and its promise copy is keyed to the same `mattersMost` answer that picks the starter rule — so what the user reads is what the rule will actually do.
+- All motion is guarded by `MediaQuery.maybeDisableAnimationsOf` and degrades to a static end-state under reduce-motion. Heroes remain coded illustrations built from design-system primitives — no Lottie or illustration assets.
+- A funnel event (`AnalyticsEvent.onboardingStep`) fires per step change with `step` and `direction` (`ENTER` / `FORWARD` / `BACK`). Only those two tokens are sent — never a name, a band or a picked feed. `ENTER` fires from `load()`, so the first step has a denominator; the direction separates a Back tap from a Next tap, which are the same `advance` call and would otherwise inflate every step total (EVO-040).
+
+### 2.6 Finishing
+
+Leaving `commitment` advances the record to `permissions`, writes the dial value through the app-wide `DailyLimitCubit` (so the dashboard ring re-emits live) and flips `onboarded` through **`SettingsCubit.setOnboarded`**. The redirect then routes on to `/permissions` by itself.
+
+`onboarded` flips **here, not at grant time**, on purpose: a user who quits on the permission screen has already answered everything, and making them replay the funnel to get back to a system settings toggle is the worst version of this flow. The record keeps `step: permissions`, which is what still arms the starter rule.
+
+> **The splash round-trip is gone.** The old `_finish()` wrote `onboarded` through the raw `SettingsRepository` and then navigated to `/` rather than `/permissions`, because a raw write left `SettingsCubit.state` stale at `onboarded: false` and the next `_commit` from *any* setter would `copyWith` that stale value straight back over Hive — walking the user through onboarding again on the next cold launch. The whole workaround existed because `tool/check_boundaries.sh` forbade onboarding importing `blocking/shared/presentation/`. Exporting `SettingsCubit` (and `TargetsCubit`, and `BlockAppTile`) from `lib/features/blocking/blocking.dart` — the `content_counter` / `limits` precedent — removed the cause, and **burned `tool/boundaries_baseline.txt` down from seven grandfathered entries to zero**. The general rule still stands for anything else: an `AppSettings` field written behind the cubit's back must be followed by a cubit reload, or it will be silently reverted.
 
 ---
 
@@ -121,12 +152,13 @@ Three things to note:
   | `usageAccess` | "Usage access" | "Powers app usage limits." | no | — |
   | `batteryOptimization` | "Unrestricted battery" | "Keeps the blocker alive. Pick Detoxo, then \"Don't optimize\"." | no | — |
   | `deviceAdmin` | "Uninstall protection" | "Optional uninstall protection." | no | ✓ |
+  | `notificationListener` | "Notification access" | "Silences notifications from apps you have locked." | no | ✓ |
 
   `why` lives on the enum because three surfaces render it (funnel, settings sheet, dashboard card) and the previously duplicated copies had already drifted. Icons stay in presentation — an `IconData` field would drag `flutter/material` into a domain layer that otherwise imports only `equatable`.
 
   **Gate-able** marks `restrictedWhenSideloaded`: the toggles Android's restricted-settings / ECM gate can silently refuse (§3.5).
 
-  Only **accessibility** and **overlay** are required — they are the minimum for the blocker to detect and to draw the block/PIN screen. Everything else is "recommended".
+  Only **accessibility** and **overlay** are required — they are the minimum for the blocker to detect and to draw the block/PIN screen. Everything else is "recommended", so adding `notificationListener` changed the funnel's denominator (now 7) without affecting `allRequiredGranted` or the splash gate.
 
 - **`PermissionStatus`** (`Equatable`) — `{ kind, state }` with `granted`, `permanentlyDenied`, and `blockedByRestrictedSettings` (`permanentlyDenied && kind.restrictedWhenSideloaded`) getters, plus `copyWith`.
 - **`PermissionState`** (defined in `lib/features/blocking/shared/domain/entities/enums.dart`) — `{ granted, denied, permanentlyDenied, unknown }`. New statuses default to `unknown`. `permanentlyDenied` arises two ways: from the OS for **notifications** (the one runtime permission that can be marked "don't ask again"), and from `PermissionsCubit` for a gate-able permission it has inferred is blocked by restricted settings (§3.5). `blockedByRestrictedSettings` is what separates the two, since the recovery differs.
@@ -171,6 +203,7 @@ Everything is gated on `PlatformCapabilities.usesAndroidPermissionFunnel` (Andro
   | `usageAccess` | `hasUsageAccess` |
   | `batteryOptimization` | `isIgnoringBatteryOptimizations` |
   | `deviceAdmin` | `isDeviceAdminActive` |
+  | `notificationListener` | `isNotificationListenerEnabled` |
   | `notifications` | `permission_handler` `Permission.notification.status` → `granted`, else `permanentlyDenied` when `isPermanentlyDenied` (don't-ask-again), else `denied`; **a plugin throw is caught and reads as `unknown`** — an uncaught rejection here used to fail the splash's `Future.wait` and hang the app on the splash |
 
   A `null` channel read is retried **once after 150 ms**; still `null` → the status is `PermissionState.unknown`, **never `denied`**. (Previously `null` was coerced to `false` → denied, so one flaky cold-start read re-opened the full permission setup wall for an already-set-up user.)
@@ -186,6 +219,7 @@ Everything is gated on `PlatformCapabilities.usesAndroidPermissionFunnel` (Andro
   | `usageAccess` | `openUsageAccess()` — Usage-access settings |
   | `batteryOptimization` | `requestIgnoreBattery()` — battery-exemption prompt |
   | `deviceAdmin` | `requestDeviceAdmin()` — device-admin activation prompt |
+  | `notificationListener` | `openNotificationListenerSettings()` — the system "Notification access" list (no programmatic grant exists) |
   | `notifications` | if `Permission.notification.isPermanentlyDenied` → `openAppSettings()`; else `Permission.notification.request()` — in-app runtime dialog |
 
   A plain `request()` no-ops once notifications is permanently denied (don't-ask-again), so the branch sends the user to the app's system settings screen instead, giving a real recovery path; on resume the funnel re-checks and the card flips to granted.
@@ -224,11 +258,12 @@ Per-permission icons (`_iconFor`, presentation-only; the `why` copy is on the en
 | usageAccess | `bar_chart` |
 | batteryOptimization | `battery_charging_full` |
 | deviceAdmin | `shield` |
+| notificationListener | `notifications_off` |
 
 **`requestPermission(context, kind)`** (`presentation/permission_actions.dart`) is the single grant entry point for all three surfaces (funnel, settings sheet, dashboard card), so the disclosure and recovery flows cannot drift between them. In order:
 
 1. If the status is `blockedByRestrictedSettings` → open `RestrictedSettingsSheet` instead. Another trip to the system toggle would just repeat the dead end.
-2. If the kind is `accessibility` → show the **prominent disclosure** dialog first (Play's Accessibility API policy requires an in-app disclosure of what the service does and why, *before* the grant). The copy mirrors `accessibility_service_description` in `android/app/src/main/res/values/strings.xml`; keep the two in sync. Declining returns without requesting.
+2. If `_disclosureFor(kind)` returns copy → show that **prominent disclosure** dialog first, *before* the grant. Two kinds have one, both because their scope is wider than their name suggests: `accessibility` (Play's Accessibility API policy requires an in-app disclosure of what the service does and why — the copy mirrors `accessibility_service_description` in `android/app/src/main/res/values/strings.xml`, keep the two in sync) and `notificationListener` (Android hands a listener *every* notification on the device; the copy says so plainly, and states that only the sending app's name is read and nothing is stored or transmitted — [29](29-notification-suppression.md) §5). Declining returns without requesting.
 3. Otherwise → `cubit.request(kind)`.
 
 ### 3.4 Restricted settings / ECM recovery
@@ -293,29 +328,47 @@ The same `PermissionsCubit` is reused in **Settings** (`lib/features/settings/pr
 
 ## 4. Manufacturer-specific accessibility guidance
 
-**None is present in the code**, with one system-level exception: the restricted-settings / ECM recovery in §3.4, which is an Android-version behaviour rather than an OEM one. The onboarding, permissions, and splash sources contain no OEM-specific branches or copy (no Xiaomi/MIUI, Oppo, Vivo, Huawei, Samsung, OnePlus, Realme, autostart, etc.). The accessibility request simply opens the standard system Accessibility settings via `openAccessibilitySettings()`; battery-optimization exemption is offered as its own recommended permission. Any OEM autostart/background-restriction guidance would be a **follow-up** (docs/UX), not something the app currently detects or special-cases.
+**None is present in the code**, with one system-level exception: the restricted-settings / ECM recovery in §3.4, which is an Android-version behaviour rather than an OEM one. The onboarding, permissions, bootstrap and splash sources contain no OEM-specific branches or copy (no Xiaomi/MIUI, Oppo, Vivo, Huawei, Samsung, OnePlus, Realme, autostart, etc.). The accessibility request simply opens the standard system Accessibility settings via `openAccessibilitySettings()`; battery-optimization exemption is offered as its own recommended permission. Any OEM autostart/background-restriction guidance would be a **follow-up** (docs/UX), not something the app currently detects or special-cases.
 
 ---
 
 ## 5. End-to-end sequence (first run, Android)
 
-1. Cold launch → `/` splash → `_bootstrap()` loads settings/permissions/pin (targets off the critical path), seeds the enabled set from installed defaults, refreshes the counter widget, and fires the blocklist drift repair (`syncEngineBlocklists()`).
-2. `onboarded == false` → `/onboarding`. User swipes/skips the 5-page value-first intro (five problem→solution beats, incl. the reel count-up + daily-limit dial on page 3); finishing persists `onboarded: true`, seeds the daily limit (dialled value or 90 min default), and returns to the **splash** (`/`), which re-bootstraps `SettingsCubit` from the freshly written flag and re-runs the gate — landing on `/permissions`.
-3. `/permissions` funnel. User grants **Accessibility** and **Display over apps** (required) via system screens; returning each time re-checks on resume. Optional permissions (notifications, usage, battery, device-admin) offered but not blocking.
-4. Once both required are granted, **Continue** → `/home`.
-5. Next launch: splash finds `onboarded == true`, no app-scope PIN (unless the user set one), required permissions granted → routes straight to `/home`. If an app-scope PIN was later configured, step 2 of the gate diverts to `/pin/lock` first.
+1. Cold launch → `/` splash → `runBootstrap()` loads settings/permissions/pin, seeds the enabled-platform set from installed defaults, then opens `AppGate` and fires the background legs (counter widget, `syncEngineBlocklists()`, rules/limit/streak reloads).
+2. `onboarded == false` → the redirect sends the user to `/onboarding`. They walk **welcome → survey → projection → selection → commitment**, each answer written to `StoreKeys.onboardingProgress` as it is given. Killing the app at any point resumes on that step.
+3. Leaving `commitment` advances the record to `permissions`, seeds the daily limit (dialled value or the 90-minute default) and flips `onboarded: true` through `SettingsCubit` — the redirect routes on to `/permissions`.
+4. `/permissions` funnel. User grants **Accessibility** and **Display over apps** (required) via system screens; returning each time re-checks on resume. Optional permissions (notifications, usage, battery, device-admin) offered but not blocking. The redirect leaves them on the screen once the required two are in.
+5. The moment `allRequiredGranted` flips true, `StarterRuleSync` writes **exactly one** rule from the survey, marks the record `completed` and clears it — so the first thing that happens after granting is that Detoxo does something.
+6. **Continue** → `/home`.
+7. Next launch: the bootstrap finds `onboarded == true`, no app-scope PIN (unless one was set), required permissions granted → the redirect lands straight on `/home`. If an app-scope PIN was later configured, gate step 3 diverts to `/pin/lock` first. An **upgrading** install has no progress record at all, which is exactly why completion lives on `AppSettings.onboarded`: it is never re-onboarded.
 
 ---
 
 ## Source files
 
 - `lib/app/splash_screen.dart`
-- `lib/features/onboarding/onboarding.dart`
-- `lib/features/onboarding/presentation/onboarding_screen.dart` (5-page problem→solution intro + `_LimitStep` + `_ReelCountUp` + `_ProgressBar`; seeds `DailyLimit`)
 - `lib/features/onboarding/presentation/widgets/screen_time_dial.dart` (`ScreenTimeDial` — the draggable daily-limit gauge)
-- `lib/features/onboarding/presentation/widgets/caught_hero.dart` (`CaughtHero` — page 1 app-icon ring + reel-catch)
-- `lib/features/onboarding/presentation/widgets/plan_preview.dart` (`PlanPreview` — page 2 interactive plan chooser)
-- `lib/features/onboarding/presentation/widgets/commitment_hero.dart` (`CommitmentHero` — page 4 shield/lock hero)
+- `lib/features/onboarding/onboarding.dart` (barrel: screen + progress record + starter rule)
+- `lib/features/onboarding/domain/entities/onboarding_progress.dart` (`OnboardingStepId`, `ScreenTimeBand`, `MattersMost`, `OnboardingProgress`)
+- `lib/features/onboarding/domain/onboarding_script.dart` (`surveyQuestions` — the survey as data)
+- `lib/features/onboarding/domain/starter_rule.dart` (`starterRule` — survey → one M3 rule)
+- `lib/features/onboarding/domain/repositories/onboarding_repository.dart`
+- `lib/features/onboarding/data/repositories/onboarding_repository_impl.dart`
+- `lib/features/onboarding/presentation/onboarding_cubit.dart` (the persisted step machine)
+- `lib/features/onboarding/presentation/onboarding_screen.dart` (the walker + chrome)
+- `lib/features/onboarding/presentation/steps/{survey,projection,selection}_step.dart`
+- `lib/features/onboarding/presentation/widgets/caught_hero.dart` (`CaughtHero` — the welcome hero)
+- `lib/features/onboarding/presentation/widgets/commitment_hero.dart` (`CommitmentHero` — the commitment hero)
+- `lib/features/onboarding/presentation/widgets/screen_time_dial.dart` (`ScreenTimeDial` — the daily-limit dial)
+- `lib/features/limits/rules/domain/entities/rule_preset.dart` (`RulePreset.sleep` / `.workHours` / `.doomscrollBudget`)
+- `lib/app/bootstrap.dart` (`runBootstrap` — ordered, individually-guarded app-start work)
+- `lib/app/starter_rule_sync.dart` (`StarterRuleSync` — writes the starter rule on the grant edge)
+- `lib/core/navigation/app_gate.dart` (`AppGate` — the whole gate order)
+- `lib/core/storage/local_store.dart` (`StoreKeys.onboardingProgress`)
+- `test/onboarding_resume_test.dart` (resume at every step, per-answer writes, persist-before-emit, migration)
+- `test/starter_rule_test.dart` (the survey → rule mapping, selection carry-over, wire contract)
+- `test/app_gate_test.dart` (the gate order, pass-through rules, session flags)
+- `test/routes_registered_test.dart` (every declared path resolves)
 - `lib/features/limits/daily_limit/presentation/daily_limit_cubit.dart` (`DailyLimitCubit.setLimit` — seeds the limit on finish, via the app-wide provider)
 - `lib/features/permissions/permissions.dart`
 - `lib/features/permissions/presentation/permission_actions.dart` (`requestPermission` — the single grant entry point; prominent disclosure + restricted-settings routing)

@@ -40,6 +40,13 @@ class LocalStore {
 /// Stable keys for [LocalStore].
 abstract final class StoreKeys {
   static const String settings = 'app_settings';
+
+  /// First-run step machine: the step reached plus every answer given so far,
+  /// enums as stable name strings. Written on EVERY answer and before every
+  /// step change, so a kill mid-onboarding resumes where the user left off.
+  /// Completion is NOT here — that stays `AppSettings.onboarded`, so an
+  /// existing install with no progress record is never re-onboarded.
+  static const String onboardingProgress = 'onboarding_progress';
   static const String pinConfig = 'pin_config'; // secret
   static const String webBlocklist = 'web_blocklist';
   static const String webBlockStats = 'web_block_stats';
@@ -47,6 +54,29 @@ abstract final class StoreKeys {
   static const String protectedApps = 'protected_apps';
   static const String dailyLimit = 'daily_limit';
   static const String streak = 'daily_limit_streak';
+
+  /// JSON array of rule documents (schedules, time limits, open limits);
+  /// enums as stable name strings, capped at 50 rules.
+  static const String rules = 'rules';
+
+  /// Per-target temporary unblocks (M8): `{grants: [{targetType, targetId,
+  /// startMs, endMs, cancelledMs, source}]}`, newest first, capped at 50 and
+  /// pruned on write. Only the ACTIVE ones cross the channel; native enforces
+  /// their expiry, so a grant lapses on time with Detoxo closed.
+  static const String temporaryUnblocks = 'temporary_unblocks';
+
+  /// The rationed-escape ledger (M8): `{config, entries: [{kind, atMs, untilMs,
+  /// ruleId, reason}]}`, newest first, capped at 50.
+  ///
+  /// ONE store with a `kind` discriminator on purpose. M8 writes only
+  /// `OVERRIDE` (lifting one locked rule); M2.2's emergency pass adds
+  /// `EMERGENCY` to this same list rather than a second key — a persisted-key
+  /// rename is a one-way door. Each preset reads only its own kind.
+  static const String bypassLedger = 'bypass_ledger';
+
+  /// Day-keyed insight rollups: `{days: {"dd-MM-yyyy": {...}}}`, pruned to the
+  /// newest 90 days on every write. Day keys always come from `daySignature`.
+  static const String usageDaily = 'usage_daily';
   static const String premiumDevUnlock = 'premium_dev_unlock';
   static const String analyticsEvents = 'analytics_events';
   static const String dismissedNotices = 'dismissed_notices';

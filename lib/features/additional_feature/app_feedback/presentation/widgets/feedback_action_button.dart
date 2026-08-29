@@ -1,6 +1,5 @@
 import 'package:detoxo/features/additional_feature/app_feedback/presentation/feedback_launcher.dart';
-import 'package:detoxo/features/blocking/shared/domain/entities/app_settings.dart';
-import 'package:detoxo/features/blocking/shared/presentation/settings_cubit.dart';
+import 'package:detoxo/features/blocking/blocking.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 

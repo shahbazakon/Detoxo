@@ -74,6 +74,22 @@ class EngineChannel {
     }
   }
 
+  /// Like [_invoke], but a [PlatformException] propagates instead of
+  /// collapsing into null. For the few arms whose "no" must stay
+  /// distinguishable from "didn't answer" (usage stats: denied vs unavailable,
+  /// EVO-014). Still null off-Android / without the native side.
+  Future<T?> invokeOrThrow<T>(
+    String method, [
+    Map<String, dynamic>? args,
+  ]) async {
+    if (!PlatformCapabilities.supportsBlockingEngine) return null;
+    try {
+      return await _commands.invokeMethod<T>(method, args);
+    } on MissingPluginException {
+      return null;
+    }
+  }
+
   Future<bool> invokeBool(String method, [Map<String, dynamic>? args]) async =>
       (await _invoke<bool>(method, args)) ?? false;
 
@@ -115,6 +131,44 @@ class EngineChannel {
   Future<void> pushAppBlocklist(List<String> packages) =>
       invokeVoid(ChannelMethods.pushAppBlocklist, {'packages': packages});
 
+  /// Pushes the soft-nudge config: the switch, the apps it times and its
+  /// tuning. See [ChannelMethods.pushNudgeConfig]. No-op off-Android.
+  Future<void> pushNudgeConfig({
+    required bool enabled,
+    required List<String> packages,
+    required int thresholdStepMs,
+    required int dailyCap,
+  }) => invokeVoid(ChannelMethods.pushNudgeConfig, {
+    'enabled': enabled,
+    'packages': packages,
+    'thresholdStepMs': thresholdStepMs,
+    'dailyCap': dailyCap,
+  });
+
+  /// Pushes the resolved rules snapshot (JSON array, see
+  /// [ChannelMethods.pushRules]) and the earliest window edge (0 = none);
+  /// native enforces the windows itself. No-op off-Android.
+  Future<void> pushRules(String json, int nextBoundaryMs) => invokeVoid(
+    ChannelMethods.pushRules,
+    {'json': json, 'nextBoundaryMs': nextBoundaryMs},
+  );
+
+  /// The ACTIVE per-target temporary unblocks (M8) as a JSON array of
+  /// `{targetType, targetId, endMs}`; native enforces their expiry. No-op
+  /// off-Android.
+  Future<void> pushTemporaryUnblocks(String json) =>
+      invokeVoid(ChannelMethods.pushTemporaryUnblocks, {'json': json});
+
+  /// The target of an "Allow for a while" tap on the native wall (`"TYPE|id"`)
+  /// — read AND cleared natively, so it answers at most once.
+  Future<String?> takePendingUnblock() =>
+      _invoke<String>(ChannelMethods.takePendingUnblock);
+
+  /// Grants taken on the wall itself (EVO-050), as the `pushTemporaryUnblocks`
+  /// JSON array — read AND cleared natively, so each is absorbed once.
+  Future<String?> takeNativeGrants() =>
+      _invoke<String>(ChannelMethods.takeNativeGrants);
+
   Future<bool> isAccessibilityEnabled() =>
       invokeBool(ChannelMethods.isAccessibilityEnabled);
 
@@ -137,6 +191,40 @@ class EngineChannel {
 
   Future<void> requestIgnoreBattery() =>
       invokeVoid(ChannelMethods.requestIgnoreBatteryOptimizations);
+
+  Future<void> openNotificationListenerSettings() =>
+      invokeVoid(ChannelMethods.openNotificationListenerSettings);
+
+  // ── Usage stats (pull-only) ───────────────────────────────────────────────
+
+  /// Raw `{package, foregroundMillis}` rows, or null off-Android. Throws the
+  /// `USAGE_ACCESS_DENIED` / `BAD_ARGS` [PlatformException]s through — the
+  /// usage repository maps them; nothing else should call this directly.
+  Future<List<Map<String, dynamic>>?> queryAppUsage({
+    required int startMillis,
+    required int endMillis,
+  }) => _invokeRows(ChannelMethods.queryAppUsage, {
+    'startMillis': startMillis,
+    'endMillis': endMillis,
+  });
+
+  /// Raw `{package, type, timestampMillis}` rows; same contract as
+  /// [queryAppUsage].
+  Future<List<Map<String, dynamic>>?> queryUsageEvents({
+    required int startMillis,
+    required int endMillis,
+  }) => _invokeRows(ChannelMethods.queryUsageEvents, {
+    'startMillis': startMillis,
+    'endMillis': endMillis,
+  });
+
+  Future<List<Map<String, dynamic>>?> _invokeRows(
+    String method,
+    Map<String, dynamic> args,
+  ) async {
+    final res = await invokeOrThrow<List<dynamic>>(method, args);
+    return res?.map((e) => Map<String, dynamic>.from(e as Map)).toList();
+  }
 
   Future<void> requestDeviceAdmin() =>
       invokeVoid(ChannelMethods.requestDeviceAdmin);
@@ -170,6 +258,26 @@ class EngineChannel {
   Future<void> killApp(String pkg) =>
       invokeVoid(ChannelMethods.killApp, {'package': pkg});
   Future<void> lockScreen() => invokeVoid(ChannelMethods.lockScreen);
+
+  // ── Block screen (intervention wall) ──────────────────────────────────────
+
+  /// Raises the wall with a `BlockScreenPayload.toWire()` map. False when it
+  /// is switched off, the overlay grant is missing, or off-Android.
+  Future<bool> showBlockScreen(Map<String, dynamic> payload) =>
+      invokeBool(ChannelMethods.showBlockScreen, payload);
+  Future<void> hideBlockScreen() => invokeVoid(ChannelMethods.hideBlockScreen);
+  Future<bool> isBlockScreenShowing() =>
+      invokeBool(ChannelMethods.isBlockScreenShowing);
+  Future<void> goHome() => invokeVoid(ChannelMethods.goHome);
+
+  /// Persists the wall's style (`BlockScreenStyle.toWire()`); a showing wall
+  /// is rebuilt live. No-op off-Android.
+  Future<void> setBlockScreenStyle(Map<String, dynamic> style) =>
+      invokeVoid(ChannelMethods.setBlockScreenStyle, {'style': style});
+
+  /// The persisted wall style as a map; `{}` when never saved / off-Android.
+  Future<Map<String, dynamic>> blockScreenStyle() =>
+      invokeMap(ChannelMethods.blockScreenStyle);
 
   Future<Map<String, dynamic>> blockStats() =>
       invokeMap(ChannelMethods.blockStats);
@@ -251,6 +359,29 @@ class EngineChannel {
           .toList();
     } on Object catch (e) {
       AppLogger.e('channel ${ChannelMethods.installedApps} bad payload', e);
+      return null;
+    }
+  }
+
+  /// Labels of installed browsers the web blocker cannot enforce in, or `null`
+  /// when unknown (iOS / tests / channel error). Empty list means "every
+  /// browser you have is covered" — a meaningfully different answer from
+  /// `null`, so the two are not collapsed.
+  Future<List<String>?> unsupportedBrowsers() async {
+    final res = await _invoke<List<dynamic>>(
+      ChannelMethods.unsupportedBrowsers,
+    );
+    if (res == null) return null;
+    try {
+      return res
+          .map((e) => (e as Map)['label']?.toString() ?? '')
+          .where((l) => l.isNotEmpty)
+          .toList();
+    } on Object catch (e) {
+      AppLogger.e(
+        'channel ${ChannelMethods.unsupportedBrowsers} bad payload',
+        e,
+      );
       return null;
     }
   }

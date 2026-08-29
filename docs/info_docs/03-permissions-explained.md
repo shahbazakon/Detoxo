@@ -19,7 +19,7 @@ During the "Set up protection" screen you'll see permissions split into two grou
 | **Accessibility** | Required to block | Detecting and blocking Reels & Shorts |
 | **Display over apps** | Required to block | Showing the block / PIN screen on top of other apps |
 | **Notifications** | Recommended | A heads-up if protection ever stops |
-| **Usage access** | Recommended | App usage limits |
+| **Usage access** | Recommended | App usage limits + the Insights screen |
 | **Unrestricted battery** | Recommended | Keeping the blocker alive in the background |
 | **Uninstall protection** (Device admin) | Recommended | Making Detoxo harder to remove in a moment of weakness |
 
@@ -84,9 +84,9 @@ Detoxo watches for this. If it notices a grant isn't taking, the button on the p
 
 **What you'll see:** "Usage access" — *Powers app usage limits.*
 
-**Why it's useful.** This is Android's app-usage information. Detoxo uses it to power **daily usage limits** — so it can tell how long you've spent in a given app and act when you hit your cap.
+**Why it's useful.** This is Android's app-usage information. Detoxo uses it for two things: **daily usage limits** — so it can tell how long you've spent in a given app and act when you hit your cap — and the **Insights** screen (Activity → Insights), which shows your real screen time, pickups and top apps, taken from the same records Android's own Digital Wellbeing uses.
 
-**What it does not do.** It reads usage stats on-device to enforce your own limits. It isn't used to profile you and it isn't sent anywhere. Skip it and blocking still works fully; you just won't have usage-limit features.
+**What it does not do.** It reads usage stats on-device only. It isn't used to profile you, and **none of it is sent anywhere** — your per-app usage never leaves the phone. Skip it and blocking still works fully; you just won't have usage-limit features, and Insights will show a "Grant" card instead of numbers (never a misleading zero).
 
 ---
 
@@ -125,13 +125,46 @@ This is the one permission granted with a simple in-app "Allow?" pop-up rather t
 
 ---
 
+## Notification access — recommended, optional
+
+**What you'll see:** "Notification access" — *Silences notifications from apps you have locked.*
+
+**Why it's useful.** Blocking an app doesn't stop it *calling you back*. Turn on
+**Settings → Privacy → Notification silence** and notifications from apps you've locked or
+scheduled stop arriving while they're blocked — no banner to tap, no reason to reopen. They
+come back on their own when the block lifts.
+
+**Be clear-eyed about this one.** Android doesn't offer a "only these apps" version of this
+permission: granting it technically gives Detoxo access to every notification on your phone.
+Detoxo shows you that plainly before sending you to the system screen. What it actually does
+with the access:
+
+- It reads **which app sent the notification**, and **whether that app labelled it a
+  message, call or alarm** — and nothing else. Not the title, not the message text, not who
+  sent it, not the pictures.
+- **Messages and calls always reach you**, even from an app you've blocked. Detoxo silences
+  the feed, not the person.
+- It **stores nothing, logs nothing, sends nothing**. A dismissed notification is never read,
+  changed, or re-posted.
+- Your **protected apps are never silenced** — banking, payments and password managers keep
+  notifying you regardless.
+- Turn the switch off and Detoxo **stops receiving notifications entirely**, rather than
+  receiving them and ignoring them.
+
+It's off until you turn it on, and the app works completely without it.
+
+---
+
 ## Your privacy, plainly
 
 - **On-device by design.** Detection and the Reel Counter run locally on your phone. The "what's on screen" check happens in the moment and isn't stored or transmitted.
 - **Offline-first blocking.** Detoxo's blocking configuration is built in and doesn't rely on a custom server. It doesn't upload your scrolling, your messages, your app list, or the specific sites and videos you see. Your block history stays on your device.
 - **Anonymous diagnostics.** To fix crashes and improve Detoxo, the app sends **anonymous, aggregated** usage and diagnostic data to Google Firebase: which screens you open, when you change plan or toggle protection, how often blocking fires (by app *category*, e.g. "YouTube" — never the exact video or URL), rough reel-count totals, crash reports, and performance timings. It's tied to a **random ID** created on your device — not your name, email, or an account (there's no login). A setting to turn this off is planned.
+- **Notifications are never read.** If you switch on Notification silence, Detoxo sees only
+  which app sent a notification and what kind it is — never its contents — and keeps none of
+  it. Messages and calls are never silenced.
 - **No ads, no ad tracking, no selling your data.**
-- **You're in control.** Only two permissions are required; the rest are optional and reversible. You can review and change every one of them anytime under **Settings → Permissions**, without redoing onboarding.
+- **You're in control.** Only two of the seven permissions are required; the rest are optional and reversible. You can review and change every one of them anytime under **Settings → Permissions**, without redoing onboarding.
 
 If a permission ever gets switched off (say, after a system update), Detoxo notices when you reopen it and simply invites you to turn it back on — no lock-in, no dark patterns.
 
@@ -141,3 +174,16 @@ If a permission ever gets switched off (say, after a system update), Detoxo noti
 
 - [All user guides](00-index.md)
 - Engineering detail (for the curious): [../code_docs/13-onboarding-permissions.md](../code_docs/13-onboarding-permissions.md), [../code_docs/04-native-android-layer.md](../code_docs/04-native-android-layer.md)
+
+---
+
+## Is anything Detoxo stores backed up to Google?
+
+**No.** Detoxo opts out of Android's cloud backup and device-to-device transfer
+entirely (`allowBackup="false"` plus an explicit data-extraction rule). Nothing
+you tell it — the apps you protect, your name, how much you said you scroll, the
+feeds you picked — is copied off the device.
+
+The trade-off is deliberate: if you reinstall Detoxo or move to a new phone, you
+set it up again from scratch. We would rather you re-do a two-minute setup than
+have the list of your private apps sitting in a cloud backup.

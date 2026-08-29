@@ -4,6 +4,7 @@ import 'package:detoxo/core/design_system/foundations/animated_icons.dart';
 import 'package:detoxo/core/design_system/foundations/glass_container.dart';
 import 'package:detoxo/core/design_system/theme/app_theme.dart';
 import 'package:detoxo/core/design_system/tokens/app_blur.dart';
+import 'package:detoxo/core/design_system/tokens/app_motion.dart';
 import 'package:detoxo/core/design_system/tokens/app_spacing.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_animate/flutter_animate.dart';
@@ -232,38 +233,80 @@ class _RingPainter extends CustomPainter {
       old.accentAlt != accentAlt;
 }
 
-/// A glass linear progress bar (daily-limit usage, permissions completion).
+/// A glass linear progress bar (daily-limit usage, permissions completion,
+/// the insights distraction share and per-app split).
+///
+/// The **one** proportion bar in the app: private re-implementations kept
+/// drifting apart (6 px here, 8 px there). Set [animate] for the growing fill;
+/// it is opt-in so the existing static call sites are untouched.
 class ProgressBar extends StatelessWidget {
-  const ProgressBar({required this.progress, this.height = 8, super.key});
+  const ProgressBar({
+    required this.progress,
+    this.height = 8,
+    this.animate = false,
+    this.semanticLabel,
+    super.key,
+  });
 
   final double progress;
   final double height;
 
+  /// Grow the fill on change instead of snapping. Honours the OS "remove
+  /// animations" setting.
+  final bool animate;
+
+  /// What a screen reader announces. A bare bar contributes no semantics node
+  /// at all, so a caller whose value is not already in adjacent text must pass
+  /// this or the information is silently unavailable.
+  final String? semanticLabel;
+
   @override
   Widget build(BuildContext context) {
-    return ClipRRect(
+    final reduce = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
+    final target = progress.clamp(0.0, 1.0);
+    final fill = Container(
+      height: height,
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            Theme.of(context).colorScheme.secondary,
+            Theme.of(context).colorScheme.primary,
+          ],
+        ),
+        borderRadius: BorderRadius.circular(height),
+      ),
+    );
+    final bar = ClipRRect(
       borderRadius: BorderRadius.circular(height),
       child: Stack(
         children: [
           Container(height: height, color: context.glass.border),
-          FractionallySizedBox(
-            widthFactor: progress.clamp(0, 1),
-            child: Container(
-              height: height,
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [
-                    Theme.of(context).colorScheme.secondary,
-                    Theme.of(context).colorScheme.primary,
-                  ],
-                ),
-                borderRadius: BorderRadius.circular(height),
+          if (animate && !reduce)
+            TweenAnimationBuilder<double>(
+              tween: Tween(begin: 0, end: target),
+              duration: AppDurations.slow,
+              curve: AppCurves.decelerate,
+              // `child` is built once and handed back each frame — the fill is
+              // not reallocated 30 times per animation.
+              child: fill,
+              builder: (context, v, child) => FractionallySizedBox(
+                // A zero-width FractionallySizedBox lays out as unconstrained;
+                // a hairline keeps it a no-op.
+                widthFactor: v == 0 ? 0.001 : v,
+                child: child,
               ),
+            )
+          else
+            FractionallySizedBox(
+              widthFactor: target == 0 ? 0.001 : target,
+              child: fill,
             ),
-          ),
         ],
       ),
     );
+    return semanticLabel == null
+        ? bar
+        : Semantics(label: semanticLabel, container: true, child: bar);
   }
 }
 

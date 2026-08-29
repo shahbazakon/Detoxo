@@ -35,7 +35,7 @@ by the `../info_docs/` set.
 | Permissions funnel | Accessibility, overlay, usage access, battery exemption, device admin | ✅ (Android-only) |
 | Premium / entitlement | Modeled; unlocked via a **local dev-unlock** (Settings → Developer) | ⚠️ No live Play Billing (swap-in) |
 | Ads | Wired with Google **test** ad-unit ids; no live init in Dart | ⚠️ Test only |
-| Analytics (block-event history) | Local block-event history (recent ~100) | ⚠️ Local buffer only (no cloud sink) |
+| Analytics (block-event history) | Local block-event history (rolling 500-event buffer) | ⚠️ Local buffer only (no cloud sink) |
 | Firebase telemetry | Analytics + Crashlytics + Performance, anonymised | ✅ Wired ([19](19-firebase-telemetry.md)); collection on in all builds |
 | Onboarding / feedback | Showcase tips (`showcaseview`); in-app feedback emails to support | ✅ |
 
@@ -177,35 +177,111 @@ touching presentation.
 
 `buildRouter()` (`app_router.dart`) returns a flat `GoRouter` whose paths live in
 `routes.dart` (`Routes.splash`, `.onboarding`, `.permissions`, `.home`,
-`.blocklist`, `.pinSetup`, `.pinLock`, `.settings`, `.webBlock`, `.appBlock`,
-`.dailyLimit`, `.analytics`, `.contentCounter`, `.bubbleStyle`, `.homeWidget`, …).
-`initialLocation` is the splash route. Both `.home` and `.blocklist` render the
-same `HomeShell`.
+`.pinSetup`, `.pinLock`, `.settings`, `.webBlock`, `.appBlock`, `.dailyLimit`,
+`.rules`, `.analytics`, `.bubbleStyle`, `.homeWidget`, `.unsupported`, …).
+`initialLocation` is the splash route.
 
-**Gating is imperative, not declarative.** Rather than route redirects, the
-splash screen loads state and then `context.go(...)`s to the right place.
+**Every constant in `routes.dart` is a path, and every one resolves.**
+`test/routes_registered_test.dart` reads that file as text, regexes out each
+`static const String`, and asserts it against the built `GoRouter`
+configuration — no mirrors, no hand-kept list to drift. It exists because
+`Routes.pause`, `Routes.curious` and `Routes.unsupported` sat declared but
+unregistered for months: navigating to any of them failed at runtime and nothing
+caught it. `pause` and `curious` were deleted (Pause and Conscious are dashboard
+*modes*, not destinations); `unsupported` was registered against the
+`UnsupportedScreen` that had been sitting orphaned in `lib/app/`.
 
-### 4. Splash gating order — `lib/app/splash_screen.dart`
+**Gating is declarative: one `redirect`, reading one object.** It used to be an
+imperative `context.go(...)` chain inside the splash, restated in the PIN
+screen's `onUnlocked` and again (by bouncing back through the splash) at the end
+of onboarding — three copies of one order.
 
-After first frame, `_bootstrap()` awaits **only what the gating below reads** —
-`settings.bootstrap()`, `permissions.refresh()`, `pin.load()` in parallel.
-`targets.load()` (native config push + installed-package scan, the slow leg) is
-awaited **only on first run**, where its installed-defaults are needed to seed
-the enabled-platform set; on every later launch it is fire-and-forgotten so it
-still pushes config to native without holding the splash. A home-widget refresh
-with the latest counter snapshot and the blocklist drift repair
-(`syncEngineBlocklists()` from `lib/app/engine_sync.dart` — the shared
-protected-apps + web-blocklist + app-blocklist push, also the resume path's
-heavy leg) are likewise fire-and-forget. Then it routes:
+`AppGate` (`lib/core/navigation/app_gate.dart`) is a small `ChangeNotifier`
+holding `ready / supported / onboarded / pinLocked / permissionsOk`. The router
+takes it as `refreshListenable` and its `redirect` is a one-liner delegating to
+`AppGate.redirect(location)`. Cubits are `Stream`s and `refreshListenable` wants
+a `Listenable`, so the flags are pushed in by `BlocListener`s in `main.dart`;
+that also keeps `core/navigation/` free of feature imports and makes the whole
+order unit-testable with no widget tree (`test/app_gate_test.dart`).
+
+Two details that are load-bearing rather than cosmetic:
+
+- `redirect` returns **null** when the location already *is* the destination.
+  That is what stops `GoRouter` looping.
+- `Routes.permissions` is **not** a pass-through screen. Once the two required
+  permissions are granted the user is left on it — granting accessibility and
+  overlay must not yank them away while they work through the recommended ones.
+  They leave via its own Continue button. `splash`, `onboarding`, `pinLock` and
+  `unsupported` *are* pass-throughs and eject to `home` once satisfied.
+- The permissions gate only *applies* from a pass-through or `/home`
+  (`_permissionsGateApplies`). The `PermissionsCubit` listener that feeds the
+  gate fires on every app resume, so an unscoped gate destroyed in-progress work:
+  lose accessibility while composing a rule at `/rules/edit` and the editor, its
+  unsaved rule and its `state.extra` went with it. The user is funnelled on the
+  next trip through home instead.
+- `pinLocked` is a **session** flag, not a derived one: armed once by the
+  bootstrap, cleared by a successful unlock. Re-locking on resume is
+  `PinAutoRelock`'s job and does not route.
+
+### 4. Bootstrap and gating order — `lib/app/bootstrap.dart`
+
+The splash no longer routes; it renders the brand moment and calls
+`runBootstrap(context)`, which ends by opening the gate. `_bootstrap()` used to
+do four jobs in one method — cubit hydration, first-run seeding, native drift
+repair *and* routing — of which only the last ~14 lines were routing.
+
+`runBootstrap` is three phases, each step individually wrapped in the existing
+`guardedSync` (`lib/app/engine_sync.dart`), so **one failing leg can never stop
+app start**. Before this, a throw anywhere in the inline sequence left the user
+on the spinner forever.
+
+1. **Blocking** — only what the gate decision reads, in parallel:
+   `settings.bootstrap()`, `permissions.refresh()`, `pin.load()`.
+2. **First run only, strictly ordered** — seed the enabled-platform set from
+   every target that is both `defaultEnabled` and `isInstalled`. Genuinely
+   sequential: the seed needs `targets.load()` (native config push +
+   installed-package scan, the slow leg) to have finished. Apps the user does
+   not have are never pre-enabled.
+3. **Gate opens**, then **background** — the home-widget re-render, blocklist
+   drift repair (`syncEngineBlocklists()`, also the resume path's heavy leg),
+   and the `rules` / `dailyLimit` / `streak` reloads, all fire-and-forget.
+   Nothing routes on any of it, so making the user watch it would be pure
+   latency. On a non-first run `targets.load()` moves into this phase.
+
+The first-run predicate is captured **before** phase 2, not re-read after it:
+`SettingsCubit._commit` emits synchronously, so the seed makes the enabled set
+non-empty and a re-read would run the slow leg a second time on the one launch
+that can least afford it. Those three cubit reloads live here and **only** here —
+`main.dart` deliberately does not `..load()` them at provider construction, which
+used to run every one of them twice per cold start (and `RulesCubit.load()` ends
+in a resync, so that was two UsageStats reads and two native pushes).
+
+The whole body is wrapped in try/finally, and **the finally opens the gate
+regardless**. The per-step guards cover the phases but not the prologue's
+`context.read`s or the `gate.update` argument list — a throw there left `ready`
+false, which pins every location to `/`, and the splash does not re-run its
+post-frame callback, so the spinner was forever. On that path `onboarded` is read
+from the repository rather than the cubit that may be what failed: opening the
+gate with a default `false` would walk an already-onboarded user back through the
+entire first run, a worse outcome than the failure being recovered from.
+
+The order the gate then applies:
 
 ```
-onboarding  →  PIN lock  →  permissions  →  home
+unsupported  →  onboarding  →  PIN lock  →  permissions  →  home
 ```
 
-1. `!settings.state.onboarded` → `Routes.onboarding`
-2. PIN configured and guards `PinScope.app` → `Routes.pinLock`
-3. `!permissions.allRequiredGranted` → `Routes.permissions`
-4. otherwise → `Routes.home`
+1. `!ready` → `Routes.splash` (nothing routes on unloaded state)
+2. `!supported` (`PlatformCapabilities.isBlockingPreviewOnly`) → `Routes.unsupported`
+3. `!onboarded` → `Routes.onboarding`
+4. `pinLocked` (PIN configured and guards `PinScope.app`) → `Routes.pinLock`
+5. `!permissionsOk` (`allRequiredGranted`) → `Routes.permissions`
+6. otherwise → `Routes.home`
+
+**"Reset app data" re-enters the splash without restarting the process**, so
+`settings_screen.dart` calls `AppGate.reset()` before `context.go(Routes.splash)`.
+Without it the gate would still hold the pre-wipe flags, wave the user straight
+back to home, and the bootstrap would never run.
 
 ### The home shell — `lib/features/dashboard/presentation/home_shell.dart`
 
@@ -213,6 +289,20 @@ onboarding  →  PIN lock  →  permissions  →  home
 gradient, with a frosted floating bottom bar. The former "More" tab now lives in
 a right-side `AppDrawer`. Deeper screens (settings, blockers, daily limit,
 analytics, content-counter appearance) are reached via routes.
+
+`Routes.blocklist` used to register a *second* `HomeShell` on `/blocklist`,
+which is how the two tabs came to share one navigation stack; that constant is
+gone and `/home` is the only registration.
+
+**Why no `StatefulShellRoute.indexedStack`, and no per-tab deep link.** Both tabs
+are leaves — every drawer destination pushes *above* this shell — so there is no
+per-tab back stack for an indexed stack to preserve. It would, however, keep both
+tabs alive at once, and `_tab()` deliberately builds **only the active one** so
+the floating bar's single `ScrollController` attaches to exactly one scrollable
+for hide-on-scroll. A `?tab=` query seam was briefly added and then removed: no
+caller anywhere in the app produced such a URL and the gate's redirect returns a
+bare `Routes.home`, so the parameter was provably never non-default. Add it back
+the day something actually links to a tab.
 
 `DashboardTab` renders its sections in order: `DashboardTopBar` → `_Hero`
 (`CommandCenterCard`) → `_ModeSection` (`ModeSelector`) → `_SessionBanners` →
@@ -319,8 +409,10 @@ checks/launchers, `performBack` / `killApp` / `lockScreen`, `blockStats`,
 `setContentCounterEnabled`, `setContentBubbleEnabled`, `pinContentWidget`,
 `refreshContentWidget`, `setCounterStyle`, `installedPackages`). The event stream
 is a single broadcast stream whose payloads are demultiplexed by a `type` field:
-`serviceStatus`, `detection`, `blocked`, `webBlocked`, `foregroundChanged`,
-`consciousState`, `contentCounted`.
+`serviceStatus`, `blocked`, `webBlocked`, `consciousState`, `reelSessionState`,
+`contentCounted` — six types, each with a real native emitter. (The `detection` and
+`foregroundChanged` constants listed in an earlier revision were inert and have been deleted;
+[18-platform-channel-contracts.md](18-platform-channel-contracts.md) is authoritative.)
 
 The command/event contract is documented in full in the platform-channel
 contract doc; the native side of the hot path is in the detection-engine doc.
@@ -358,12 +450,14 @@ a rebind cannot be forced, so detect + notify is the ceiling). See
 lib/
   main.dart                     entry: DI → MultiBlocProvider → MaterialApp.router
   app/
-    splash_screen.dart          boot + imperative gating (onboarding→PIN→perms→home)
+    splash_screen.dart          the brand moment; calls runBootstrap, does not route
+    bootstrap.dart              ordered, individually-guarded app-start work
+    starter_rule_sync.dart      writes the first run's rule on the grant edge
     unsupported_screen.dart     iOS/web honest "runs on Android" state
   core/                         infra reused by 2+ features
     constants/                  app_constants (EngineTimings) · channel_constants
     di/                         injector.dart — get_it locator `sl`
-    navigation/                 app_router.dart · routes.dart
+    navigation/                 app_router.dart · routes.dart · app_gate.dart
     platform/                   platform_capabilities.dart (Android gate)
     platform_channels/          engine_channel.dart (MethodChannel/EventChannel wrapper)
     storage/                    local_store.dart (key-value)
@@ -434,6 +528,9 @@ Detailed treatment lives in the persistence and configuration docs.
 - `pubspec.yaml`
 - `lib/main.dart`
 - `lib/app/splash_screen.dart`
+- `lib/app/bootstrap.dart`
+- `lib/app/starter_rule_sync.dart`
+- `lib/core/navigation/app_gate.dart`
 - `lib/app/unsupported_screen.dart`
 - `lib/core/di/injector.dart`
 - `lib/core/navigation/app_router.dart`

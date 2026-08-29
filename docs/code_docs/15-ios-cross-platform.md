@@ -199,8 +199,17 @@ Design notes:
 - **Icon:** `Icons.phonelink_erase`.
 
 This is the "honest preview state" that `PlatformCapabilities.isBlockingPreviewOnly` is
-meant to surface. Wherever the app routes an unsupported platform to a dead end, this is the
-screen it shows.
+meant to surface.
+
+**It is now actually reachable.** `Routes.unsupported` (`/unsupported`) sat declared in
+`routes.dart` but registered in no route for months — this screen was a compiled orphan with
+zero references, and navigating to the constant failed at runtime. M6 registered the route and
+made `AppGate.redirect` send an unsupported platform to it as gate step 2, immediately after
+the bootstrap-ready check and ahead of onboarding — so a platform that cannot block never
+walks a user through setting up blocking. See
+[01-overview-architecture.md](01-overview-architecture.md) §3–§4.
+`test/routes_registered_test.dart` now asserts every constant in `routes.dart` resolves, so
+this class of dead route cannot come back.
 
 > **Cross-reference correction:** The doc-comment in `unsupported_screen.dart` and in
 > `platform_capabilities.dart` still points at `docs/15-ios-cross-platform.md`. This file is

@@ -133,11 +133,18 @@ if (pkg in blockedApps &&
 }
 ```
 
-**Pause does not unlock whole-app locks.** The App Blocker UI presents locks as
-unconditional, so the check sits above the `pausedUntil` clock gate: a Pause
-taken for reels suspends reel/web blocking only — a fully-locked app stays
-bounced through the whole Pause window. (The master switch, above both, still
-disables everything.)
+**Pause does not unlock whole-app locks.** The check sits above the pause gate:
+a Pause taken for reels suspends reel/web blocking only — a fully-locked app
+stays bounced through the whole Pause window. (The master switch, above both,
+still disables everything.)
+
+**A per-target grant DOES lift it** (M8). The branch reads
+`!appUnblocked && pkg in blockedApps && …`, where `appUnblocked` is
+`UnblockRegistry.isUnblocked("APP", pkg, …)`. That is the point of the feature:
+"Unblock Instagram for 15 minutes" has to work from an app-block wall and from
+the blocklist row, or the only way in is turning protection off entirely. The
+grant expires natively and re-arms on its own; a Pause still does not lift the
+lock ([31](31-locked-rules-and-unblock.md) §2).
 
 The branch is **anchored to the foreground**: a backgrounded blocked app posts
 notifications carrying its own `packageName` (the event mask still delivers
@@ -227,26 +234,30 @@ just its feed surfaces.
 | Field | Type | Notes |
 |---|---|---|
 | `pattern` | `String` | The host (`youtube.com`); also the entry's `id`. |
-| `matchType` | `WebMatchType` | `DOMAIN` (default) / `EXACT` / `WILDCARD`. |
+| `matchType` | `WebMatchType` | `DOMAIN` (default) / `WILDCARD`. |
 | `enabled` | `bool` | Default `true`. |
-| `pausedUntil` | `DateTime?` | Optional per-entry pause window. |
 | `displayName` | `String?` | Friendly label; falls back to `pattern`. |
 | `source` | `WebBlockSource` | `CUSTOM` / `POPULAR` / `ADULT` / `APP_DERIVED`. |
 | `brandColor` | `int?` | ARGB for the leading badge. |
 | `createdAt` | `DateTime?` | Newest-first ordering. |
 
-Derived getters: `label` (display name or pattern) and
-`isActive == enabled && (pausedUntil == null || pausedUntil.isBefore(now))`.
+Derived getters: `label` (display name or pattern) and `isActive == enabled`.
+
+> **M8 removed `pausedUntil` from this entity and from the wire.** EVO-012's
+> per-site pause was Detoxo's only per-target, time-expiring escape; M8
+> generalised it into `TemporaryUnblock`, so an allowed site is now a `WEBSITE`
+> grant in `UnblockRegistry` — the same mechanism that frees an app or a reel
+> feed — and the entry itself is unconditional. Native ignores the old key, so a
+> downgrade cannot resurrect a stale pause, and `migrateWebPauses` carries a
+> live one across once at bootstrap. See
+> [31](31-locked-rules-and-unblock.md) §3.
 
 Serialization is `toJson()` / `fromJson()` — the full persistence shape. The
-minimal `{pattern, matchType[, pausedUntil]}` wire payload is built by
-`syncWebBlocklist` (there is no `toWire()` on the entity: the wire list also
-contains alias and app-derived patterns that never exist as entries). Enable
-state, source and colors stay Dart-side; **the per-site pause window crosses
-the wire** (EVO-012) so native enforces expiry itself — a paused site re-arms
-even if the app is never reopened. `blockMode` was removed from the entity
-(dead: native hardcodes `PRESS_BACK`; `fromJson` ignores the legacy key).
-`isActiveAt(now)` is the clock-injectable form of `isActive`.
+minimal `{pattern, matchType}` wire payload is built by `syncWebBlocklist`
+(there is no `toWire()` on the entity: the wire list also contains alias and
+app-derived patterns that never exist as entries). Enable state, source and
+colors stay Dart-side. `blockMode` was removed from the entity (dead: native
+hardcodes `PRESS_BACK`; `fromJson` ignores the legacy key).
 
 `WebBlockSource` lives in `web_blocker/domain/entities/web_block_source.dart`;
 `WebMatchType` in the shared enums
@@ -280,12 +291,15 @@ more here would create entries native can never match): ASCII hostnames only
   returns the non-primary hosts. Rationale: a `DOMAIN` match on `youtube.com`
   already covers `m.`/`www.` subdomains, so only cross-registrable aliases like
   `youtu.be`, `twitter.com` (for X), or `fb.com` need their own rule.
-- <a id="appdomain-derivation"></a>**`AppDomainCatalog`**
-  (`web_blocker/domain/entities/app_domain_catalog.dart`) — a static
-  `packageName → [domains]` map (~17 entries) used by the "Block sites for
-  blocked apps" toggle. The cubit reads the *existing* App Blocker list and
-  derives web rules from it, so the **package list itself never crosses the
-  channel** — only the resulting domains do.
+- <a id="appdomain-derivation"></a>**The category catalog's `domainsForPackage`**
+  (`Catalog.bundled`, [26](26-catalog-and-usage-signal.md) — it replaced the
+  18-entry `AppDomainCatalog` map) is what the "Block sites for blocked apps"
+  toggle derives from. `syncWebBlocklist` reads the *existing* App Blocker list
+  and derives web rules from it, so the **package list itself never crosses the
+  channel** — only the resulting domains do. Every seeded service carries its
+  domains, so the derivation now covers more apps than the old map (blocking
+  WhatsApp with the toggle on also blocks `web.whatsapp.com`); the 18 legacy
+  pairs are preserved exactly (`test/catalog_test.dart`).
 
 ### Persistence & stats
 
@@ -373,23 +387,28 @@ fire-and-forget call sites from booking `fatal: true` pseudo-crashes via
 
 The algorithm:
 
-1. For each **enabled** entry add `{pattern, matchType}`; a live per-site
-   pause adds `pausedUntil` (epoch ms) — native skips the rule until then and
-   re-arms it at expiry (EVO-012). Disabled entries are omitted.
+1. For each **enabled** entry add `{pattern, matchType}`. Disabled entries are
+   omitted. Nothing about an allowed site rides this payload any more — that is
+   a grant on `pushTemporaryUnblocks` (M8).
 2. For any enabled **popular** entry, add each
    `PopularSites.aliasesFor(pattern)` as a `DOMAIN` rule (`putIfAbsent`, so
-   explicit rules win); aliases inherit the primary's pause window.
+   explicit rules win). Because an alias is its own pattern on the wire, an
+   allow on the primary mints its own grant for each alias too — exactly what
+   the pause used to duplicate onto them. **Resume passes the same alias set**
+   (`UnblockCubit.endEarly(..., alsoEnd:)`): ending only the exact id left
+   `twitter.com` open for the rest of the window while the row's pill cleared
+   and the screen read as protected. One tap out has to undo one tap in.
 3. If `blockWebsitesForBlockedApps` is on, load the App Blocker list and, for
-   each **enabled** app, add every `AppDomainCatalog.domainsFor(package)` as a
-   `DOMAIN` rule.
+   each **enabled** app, add every `Catalog.bundled.domainsForPackage(package)`
+   as a `DOMAIN` rule.
 4. Serialize the deduped `pattern → matchType` map to a JSON array of
    `{pattern, matchType}` and call `engine.pushWebBlocklist(json)`.
 
 Because active-state, pausing, alias expansion, and app-derivation are all
 resolved here, the native side only ever sees a flat, already-filtered rule
 list. In practice every rule the cubit emits is `matchType: "DOMAIN"` — nothing
-in the UI creates `EXACT`/`WILDCARD` entries today, though both the entity and
-the native engine support them.
+in the UI creates `WILDCARD` entries today, though the entity and the native
+engine support them.
 
 ### Screen
 
@@ -424,9 +443,13 @@ Latent since inception, first triggered 2026-08-17 by the first on-device
   the sibling screens, and stays visible while a query is active so the filter
   can always be cleared; the section header shows the entry count). Each row
   keeps only the enable toggle inline (with a site-named `semanticLabel`);
-  pause/resume (EVO-012: a `GlassBottomSheet` of 5/15/30/60-minute chips;
-  paused rows show a warning `Pill` "Paused until HH:MM" and native re-arms the
-  block at expiry; paused/disabled rows dim their leading badge), edit (custom
+  allow/resume (EVO-012, generalised by M8: the shared
+  `showUnblockDurationSheet` — a `GlassBottomSheet` of 5/15/30/60-minute chips,
+  the same one the App Blocker rows and the block screen use; allowed rows show
+  a warning `Pill` "Allowed until HH:MM" **selected off `UnblockCubit`'s derived
+  `active` list**, so the row actually rebuilds when the grant lapses instead of
+  holding a dead countdown; native re-arms the block at expiry;
+  allowed/disabled rows dim their leading badge), edit (custom
   only — also enforced in `editEntry`) and delete live in a **flutter_slidable
   end action pane** (`DrawerMotion`; each `_RowAction` is its own rounded
   surface — `AppRadius.continuous(AppRadius.lg)`, tone fill at 0.18 alpha,
@@ -522,7 +545,7 @@ an optional adult-domain `HashSet`.
   the toggle is on, and frees it when off (so it costs no heap otherwise). A
   missing/unreadable asset degrades to an empty set (adult blocking no-ops).
   The asset is **generated** (EVO-017): `tool/web_blocker/blocked_websites.json`
-  (`domains` — 226 registrable hosts, incl. the 34 folded in from the user's
+  (`domains` — 272 registrable hosts, incl. the ones folded in from the user's
   scrape; `tlds` — the four ICANN adult TLDs `adult`/`porn`/`sex`/`xxx`;
   `allow` — hosts the compiler refuses, e.g. `google.com`, `twitter.com`) is
   compiled by `bash tool/dev.sh adultlist` (`tool/web_blocker/compile_adult_list.py`,
@@ -530,7 +553,7 @@ an optional adult-domain `HashSet`.
   source and asset drift. Edit the JSON, never the `.gz`.
 - `hasAnyRules()` — cheap guard for the accessibility hot path (any rules, or
   adult enabled with a non-empty set).
-- `matchHost(host, fullUrl?)` — returns which list blocks the host:
+- `matchHost(host)` — returns which list blocks the host:
   `Match.RULE` (the user's/derived blocklist), `Match.ADULT` (the bundled set)
   or `null`. The caller uses the distinction to name RULE hits but never ADULT
   ones (EVO-018). Rule matching:
@@ -539,12 +562,15 @@ an optional adult-domain `HashSet`.
 |---|---|
 | `DOMAIN` (default) | `host == pattern` **or** `host.endsWith("." + pattern)` — covers subdomains. |
 | `WILDCARD` | glob (`*` = any run) — regex precompiled once at `parse()`, never on the per-event path. |
-| `EXACT` | matches only when a `fullUrl` is supplied and equals the pattern. |
 
-A rule with a future `pausedUntil` (epoch ms, from the wire — EVO-012) is
-skipped until `System.currentTimeMillis()` passes it, then matches again with
-no push needed. The `DOMAIN` subdomain check is allocation-free
-(`isSubdomainOf` — no `"." + pattern` concat per event).
+**One grant check gates the whole rule loop** (M8): before iterating,
+`matchHost` asks `UnblockRegistry.isUnblocked("WEBSITE", host, elapsedRealtime)`
+— a `WEBSITE` grant matches the host exactly or as a subdomain of it, so
+allowing `youtube.com` covers `m.youtube.com`, the coverage `pausedUntil` had.
+The deadline is on the **monotonic** clock (EVO-048), converted once per parse,
+so rolling the device clock back in Settings cannot hold an allow open. The
+`DOMAIN` subdomain check is allocation-free (`isSubdomainOf` — no
+`"." + pattern` concat per event).
 
 If adult blocking is on, the host is additionally walked up its parent labels
 **down to the bare TLD** (`foo.bar.example.com → bar.example.com → example.com
@@ -552,10 +578,17 @@ If adult blocking is on, the host is additionally walked up its parent labels
 asset (`porn`) blocks every `*.porn` address, and a TLD entry can only ever
 match as the *last* label (`sussex.ac.uk` never reaches `sex`).
 
+That walk lives in `matchesAdult`, called **outside** the grant check above —
+not merely skipped by a `continue` inside the loop — so an 18+ hit can never be
+lifted by a `WEBSITE` grant (EVO-018). The wall also refuses to offer "Unblock
+for a while" for a host that is on **both** lists: the rule arm wins the match,
+so the button would otherwise mint a grant the adult walk immediately overrules.
+
 > All matching is **host-based**. Android accessibility can read the address bar
 > but cannot see network traffic, so there is no URL/path/network-level
-> filtering. `EXACT` needs a full URL that the current flow never provides, so it
-> is effectively unused today.
+> filtering. An `EXACT` arm once existed and needed a full URL this flow never
+> supplies, so it matched NOTHING; it was removed, and any `EXACT` rehydrated
+> from an old blob now falls through to `DOMAIN`, which does block.
 
 ### `BrowserUrlExtractor`
 
@@ -574,7 +607,11 @@ stateless host extraction from a browser's accessibility tree.
      `findAccessibilityNodeInfosByViewId`.
   2. **Generic fallback:** a bounded DFS (`ArrayDeque`, capped at `maxNodes` =
      `MAX_NODES` = 12000, same cap as reel detection) over `EditText` /
-     `url`-ish nodes, extending coverage to effectively any browser.
+     `url`-ish nodes. It widens coverage **within `KNOWN_BROWSERS`** — the eight
+     recognized-but-unmapped packages — and not beyond it: `isBrowser` gates the
+     whole branch first, so a browser absent from that set is never read at all
+     and neither the user's blocklist nor the 18+ filter applies in it. The UI
+     says "any **supported** browser" for this reason.
 
   Both stages **skip focused nodes**: a focused address bar means the user is
   typing, so half-typed hosts never trigger a back press mid-edit. Once
@@ -597,7 +634,10 @@ per-package `THROTTLE_MS` (150 ms) throttle:
 
 ```kotlin
 if (BrowserUrlExtractor.isBrowser(pkg)) {
-    if (webEngine.hasAnyRules() &&
+    // `!paused` keeps a Pause's meaning for the browser: web blocking has
+    // never survived a Pause (strict websites are EVO-030's follow-up).
+    if (!paused &&
+        (webEngine.hasAnyRules() || ruleEngine.hasHostRules()) &&
         (event.type == WINDOW_STATE_CHANGED || event.type == WINDOW_CONTENT_CHANGED))
         handleBrowser(pkg)
     return   // a browser carries no reel surfaces
@@ -610,8 +650,12 @@ if (BrowserUrlExtractor.isBrowser(pkg)) {
    `rootInActiveWindow` is the focused pane, and the generic fallback would
    otherwise harvest any url-ish `EditText` from the *other* app and BACK out
    of it. Then `extractHost(root, pkg, MAX_NODES)`; bail if null.
-2. `webEngine.matchHost(host)` → `Match?`; if `null` (allowed), remember the
-   host as `lastUrlByPkg` and return.
+2. `webEngine.matchHost(host)` → `Match?`; when `null`, a **website schedule**
+   from the rules snapshot is tried next (`ruleEngine.blockingForHost(host, now)`,
+   [27](27-rules-engine.md)). If both are null (allowed), remember the host as
+   `lastUrlByPkg` and return. A rule hit follows the same path as a `RULE` hit
+   below (named host, `source: "RULE"`), with the wall's `blockReason` set to the
+   rule's reason (`SCHEDULE`) instead of `WEB_RULE`.
 3. **Per-host debounce:** if the host equals the last one and it is within
    `BLOCK_DEBOUNCE_MS` (1200 ms), skip — so a content-change storm on the same
    blocked page yields at most one back press.
@@ -620,16 +664,18 @@ if (BrowserUrlExtractor.isBrowser(pkg)) {
    total, host?}` — **`host` is present only for `RULE` hits.** Adult-list hits
    are counted but never named (EVO-018): without a host, Dart's per-host tally
    and the "Most blocked" line skip them.
-5. A short toast (EVO-011) so the bounce is attributable rather than looking
-   like a browser glitch — **"$host is blocked by Detoxo"** (`toast_blocked`,
-   shared with the whole-app block) for RULE hits, **"Adult site blocked by
-   Detoxo"** (`toast_blocked_adult`) for ADULT hits — then
-   `pressBackWithRateLimit()` (global back action, rate-limited by
+5. **Raise the wall** (`raiseWall`, [25](25-block-screen.md)) with
+   `TYPE_WEBSITE` and the host as `referenceId`/`displayName` — empty for ADULT
+   hits, which are never named (EVO-018). Only if no wall could be raised
+   (`!shown`) does a toast stand in (EVO-011), so the bounce is still
+   attributable rather than looking like a browser glitch — **"$host is blocked
+   by Detoxo"** (`toast_blocked`, shared with the whole-app block) for RULE
+   hits, **"Adult site blocked by Detoxo"** (`toast_blocked_adult`) for ADULT
+   hits. Then `pressBackWithRateLimit()` (global back action, rate-limited by
    `BACK_RATE_LIMIT_MS` = 1100 ms).
 
-The block **mode is always `PRESS_BACK`** here — only
-`{pattern, matchType[, pausedUntil]}` crosses the channel, so native has no
-per-entry mode to honor. The log line never includes the host (browsing data
+The block **mode is always `PRESS_BACK`** here — only `{pattern, matchType}`
+crosses the channel, so native has no per-entry mode to honor. The log line never includes the host (browsing data
 must not reach logcat); the `webBlocked` event is consumed by
 `WebBlockStatsRepositoryImpl.watch()` to update the Dart-side dashboard.
 
@@ -643,8 +689,8 @@ must not reach logcat); the `webBlocked` event is consumed by
 | App Blocker — curated feed toggles | Live, via existing reel/short detection (`SettingsCubit.togglePlatform`). |
 | Web Blocklist — custom + popular domains | **Live** — native `WebBlockEngine` + address-bar read → back press. |
 | Web Blocklist — "block sites for blocked apps" | Live; domains derived Dart-side from enabled App Blocker apps. |
-| Web Blocklist — adult category | **Live** — 226 registrable domains + the 4 ICANN adult TLDs, compiled from `tool/web_blocker/blocked_websites.json` into `adult_domains.txt.gz` (EVO-017); hits are counted but never named (EVO-018). No-ops if the asset is missing. |
-| Web match types beyond `DOMAIN` (`WILDCARD`/`EXACT`) | Supported natively; not produced by the current UI. |
+| Web Blocklist — adult category | **Live** — 272 registrable domains + the 4 ICANN adult TLDs, compiled from `tool/web_blocker/blocked_websites.json` into `adult_domains.txt.gz` (EVO-017); hits are counted but never named (EVO-018). No-ops if the asset is missing. |
+| Web match types beyond `DOMAIN` (`WILDCARD`) | Supported natively; not produced by the current UI. |
 
 ## Source files
 
@@ -661,10 +707,11 @@ must not reach logcat); the `webBlocked` event is consumed by
 - `lib/core/platform_channels/installed_app.dart`
 - `lib/core/utils/package_name.dart` (package-id validation)
 - `lib/features/limits/web_blocker/domain/entities/web_block_entry.dart`
+- `lib/features/limits/unblock/**` (the grant that replaced `pausedUntil` — [31](31-locked-rules-and-unblock.md))
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/UnblockRegistry.kt`
 - `lib/features/limits/web_blocker/domain/entities/web_block_source.dart`
 - `lib/features/limits/web_blocker/domain/entities/web_block_stats.dart`
 - `lib/features/limits/web_blocker/domain/entities/popular_site.dart`
-- `lib/features/limits/web_blocker/domain/entities/app_domain_catalog.dart`
 - `lib/features/limits/web_blocker/domain/repositories/web_block_repository.dart`
 - `lib/features/limits/web_blocker/domain/repositories/web_block_stats_repository.dart`
 - `lib/features/limits/web_blocker/domain/utils/domain_validator.dart`

@@ -269,9 +269,10 @@ Everything above is offline-first by design. To add a live backend:
 
 ### Networking primitives available
 
-- `dio: ^5.9.2` is declared in `pubspec.yaml` but **is not imported or used
-  anywhere in `lib/`** (`grep 'package:dio'` over `lib/` is empty). It is a
-  staged dependency for the future remote repository, currently dead weight.
+- **There is no HTTP client at all.** `dio` was declared as a staged dependency for a future
+  remote repository, never imported, and has since been **removed** from `pubspec.yaml`, which now
+  records the decision inline: *"No dio / http client: this build is offline-first and nothing in
+  `lib/` makes a request. `upgrader` brings its own client for the Play version check."*
 - There is **no** `lib/core/network/` directory, no `http`/`HttpClient` usage, no FCM, and no
   networking-based `ConfigRepository` implementation. (The app does bundle a Firebase **telemetry**
   layer — analytics/crash/perf — but that is not a config or networking path; see
@@ -310,7 +311,7 @@ replacement URL in code — it belongs in the config payload.
 - `lib/core/di/injector.dart` — `ConfigRepository` registration.
 - `lib/features/content_counter/content_counter_core/data/repositories/content_counter_repository_impl.dart` — reuses `loadBlockTargets()` for app naming.
 - `assets/config/platforms_config.json`, `assets/config/initial_config.json` — bundled config payloads.
-- `pubspec.yaml` — asset declarations; unused `dio` dependency.
+- `pubspec.yaml` — asset declarations; the annotated "no dio / http client" decision.
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/channels/CommandHandler.kt` — native `pushConfig` handler.
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/ConfigStore.kt` — persists pushed config (`platforms_config_json` in its own `detoxo_platforms_config` prefs file).
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/DetectionConfig.kt` — parses the pushed config into the native lookup.

@@ -143,10 +143,16 @@ and disclosed.
 **What the app does with it:**
 
 > Detoxo is a digital-wellbeing app that helps users stop compulsive short-form-video
-> scrolling. It uses AccessibilityService for one purpose: to recognise, on-device and in
-> real time, when a short-form video feed (Instagram Reels, YouTube Shorts, and similar
-> infinite feeds) is on screen inside an app the user has explicitly added to their own
-> blocklist — and then to perform a Back action so the feed closes.
+> scrolling. It uses AccessibilityService for two closely related purposes, both on-device
+> and in real time. The first is to recognise when a short-form video feed (Instagram Reels,
+> YouTube Shorts, and similar infinite feeds) is on screen inside an app the user has
+> explicitly added to their own blocklist — and then to close the feed with a Back action and
+> show Detoxo's own full-screen block screen, drawn with the user-granted "Display over other
+> apps" permission, which names what was blocked and offers "Go home", "Open Detoxo" and
+> "Back to the app". The second is to measure how long the user has been in an app they asked
+> to be reminded about, and show a small dismissible card saying so. That second use closes
+> nothing and blocks nothing; it is off by default and reads no screen content at all — only
+> which app is in the foreground.
 >
 > The service inspects the foreground window's node tree to match known feed surfaces.
 > That evaluation happens entirely on the device, in the moment, and the result is
@@ -184,8 +190,13 @@ Source of truth: [19-firebase-telemetry.md](19-firebase-telemetry.md).
 | Is collection optional? | **No** — currently unconditional. A consent/opt-out toggle is a known gap (see below) |
 | Data shared with third parties? | **No** (Firebase is a processor, not a recipient) |
 
-**What is explicitly never sent** (enforced in code): PIN secrets, the specific site or
-URL blocked, the specific video watched, the installed-app list, message content, and
+**What is explicitly never sent** (enforced in code): PIN secrets, **anything at all about a
+notification** (the listener reads only a notification's package name, key, user and category —
+never its title, text, sender or extras — and stores, logs and transmits none of it; see
+[29](29-notification-suppression.md) §5), the specific site or
+URL blocked, the specific video watched, the installed-app list, message content, the
+**per-app screen-time figures** behind the Insights screen (`usage_daily` is local Hive
+only — the telemetry layer has no insights event, [28](28-insights.md) §8), and
 the **protected-apps list** (the user's banking/UPI/password apps — it never leaves the
 device, and no analytics or log line ever names a protected package; see
 [24-protected-apps.md](24-protected-apps.md) §6). `web_blocked` deliberately drops the
@@ -225,12 +236,14 @@ required a Console special-use declaration and manual review. The app declares n
 sees the persistent low-priority "Detoxo is active" notification, now posted with
 `NotificationManager.notify()`.
 
-`FOREGROUND_SERVICE` does still appear in the **merged** manifest, pulled in transitively
-by `home_widget` → `androidx.glance` → `androidx.work`. It is a normal install-time
-permission with no Console declaration attached, and stripping a library's permission with
-`tools:node="remove"` would make any future WorkManager foreground work throw
-`SecurityException` — so it stays. If a reviewer asks, the answer is "transitive from
-AndroidX WorkManager; the app starts no foreground service."
+`FOREGROUND_SERVICE` no longer arrives transitively (the `home_widget` →
+`androidx.glance` → `androidx.work` chain went with that package on 2026-08-29).
+**Drift to resolve before the next submission:** `android/app/src/main/AndroidManifest.xml`
+lines 7–8 still declare `FOREGROUND_SERVICE` **and** `FOREGROUND_SERVICE_SPECIAL_USE`
+directly, and the service calls `startAsForeground()` — which contradicts the paragraph
+above. Either drop the two `uses-permission` lines and the FGS call, or keep them and file
+the special-use declaration in the Console; this doc describes the intended state, not
+the manifest as it stands.
 
 **Battery optimisation.** Detoxo does **not** declare
 `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`. The "Unrestricted battery" step opens
@@ -245,19 +258,71 @@ from Detoxo's own settings or Android's Security settings. Disclose it as a user
 self-control feature that prevents impulsive uninstall and enables the optional
 lock-screen block action.
 
-**`SYSTEM_ALERT_WINDOW`.** Used to draw Detoxo's own block screen and reel-counter
-bubble over other apps. It never reads or interacts with other apps' content. (The PIN
-prompt is an ordinary in-app screen — it does not use this permission.)
+**`SYSTEM_ALERT_WINDOW`.** Used to draw Detoxo's own three windows over other apps:
+the block screen, the reel-counter bubble, and the soft-nudge card
+([30](30-soft-nudge.md)) — a small bottom-anchored card that states how long the user
+has been in an app, auto-dismisses after ~6 s, passes every touch outside its own
+bounds straight through to the app underneath, and blocks nothing. It never reads or interacts with other apps' content. (The PIN
+prompt is an ordinary in-app screen — it does not use this permission.) The block screen
+([25](25-block-screen.md)) is raised by the accessibility service at the moment of a block. It
+is always dismissible from an on-screen action ("Go home" and "Open Detoxo" are never delayed;
+only the way back into the blocked app waits a few user-configurable seconds), can be switched
+off by the user (Appearance → Block screen), never imitates system UI, never covers a system
+dialog or an app that comes to the foreground other than the one the block came from, the
+launcher, or the app that block was opened from (where it waits for the user's own exit), captures
+no input meant for other apps, and is removed on screen-off, on Pause, when protection is
+switched off, and when the overlay grant is revoked — in which case blocking degrades to the
+existing toast + Back. The in-app `accessibility_service_description`
+("…and block it") already covers the wall, so the disclosure dialog is unchanged.
 
-**`PACKAGE_USAGE_STATS`.** Powers user-configured daily app usage limits; read on-device,
-never uploaded. Granted by the user on Android's own Usage-access screen.
+**`BIND_NOTIFICATION_LISTENER_SERVICE` (notification suppression).** The highest-scrutiny
+declaration in the app, because it sits alongside an AccessibilityService and device-admin.
+Declare it as a user-initiated self-control feature: while the user's **Notification silence**
+toggle is on, notifications from apps *the user has locked or scheduled in Detoxo* are dismissed
+so a blocked app cannot pull them back.
+
+What to state, all of it enforced in code ([29](29-notification-suppression.md) §5):
+
+- **Notification metadata only.** `onNotificationPosted` reads `packageName`, `key`, `user` and
+  `notification.category` — the last being a fixed Android constant naming the *kind* of
+  notification (message, call, alarm…), chosen by the sending app from a closed set. It never
+  touches `.extras`, so no title, text, sender or image is ever accessed. Grep-checkable, and
+  part of the release checklist below.
+- **Messages and calls are never silenced**, even from a blocked app: the feature blocks the
+  feed, not the person (EVO-038).
+- **Nothing is stored, logged or transmitted.** No package name reaches Logcat; there is no
+  analytics event; a cancelled notification is never read, modified or re-posted.
+- **Off by default and opt-in**, with a **prominent in-app disclosure shown before** the system
+  grant screen, stating plainly that Android grants access to every notification on the device
+  and what Detoxo does with it. Reversible from Detoxo's own settings at any time.
+- **Unbound while off.** Turning the toggle off calls `requestUnbind()`, so Detoxo stops
+  receiving notifications entirely rather than receiving and discarding them.
+- **Protected apps are exempt**, always — banking, UPI and password managers are refused above
+  every other check, even when also locked or scheduled ([24](24-protected-apps.md)).
+
+No new `<uses-permission>` is declared: the `BIND_` guard sits on the `<service>` tag and is
+held by the system. Like accessibility, overlay and device admin, the toggle is subject to
+restricted settings / ECM on sideloaded installs (§6).
+
+**`PACKAGE_USAGE_STATS`.** Powers user-configured daily app usage limits **and the
+Insights screen** (the user's own screen time, pickups and top apps —
+[28](28-insights.md)); read on-device, stored on-device, **never uploaded**. Granted by
+the user on Android's own Usage-access screen, and optional: without it Insights shows a
+grant card rather than any number.
+
+> **Re-check before the next release.** Insights broadened what is *held* on device (a
+> 90-day per-app usage history under `usage_daily`), though not what is *sent* — the
+> answers in §4 are unchanged because nothing new leaves the device. The in-app
+> disclosure's promise that "your counts and settings stay on your device" now covers
+> this data too, and still holds.
 
 ---
 
 ## 6. Restricted settings / ECM — expected, not a bug
 
 Android 13+ *Restricted Settings* and Android 15+ *Enhanced Confirmation Mode* block the
-Accessibility, overlay and device-admin toggles for apps whose installer is not trusted.
+Accessibility, overlay, device-admin and notification-access toggles for apps whose installer is
+not trusted.
 **Play Store installs are exempt**, so this never affects users who install from the
 store — including internal-testing testers.
 
@@ -288,6 +353,9 @@ conservative.
 - [ ] Merged-manifest permission list reviewed (§4 command) — no `AD_ID`, no `QUERY_ALL_PACKAGES`
 - [ ] `mapping.txt` uploaded to the Console; `build/symbols/` uploaded via `flutter symbols upload`
 - [ ] Accessibility Permissions Declaration submitted (§3) + disclosure screenshot attached
+- [ ] Notification-access declaration submitted (§5) + its disclosure screenshot attached
+- [ ] `grep -rn "\.extras" android/` matches only the KDoc forbidding it — no notification content is ever read ([29](29-notification-suppression.md) §5)
+- [ ] Notification-access disclosure copy still matches what the listener reads (`permission_actions.dart` `_disclosureFor`) — it names the category read, not just the package
 - [ ] Data safety form completed (§4); privacy-policy page matches it
 - [ ] Store listing from [../info_docs/01-product-overview.md](../info_docs/01-product-overview.md) §"App-store listing copy"
 - [ ] Screenshots + feature graphic prepared (**not in this repo** — still to be produced)
@@ -300,5 +368,5 @@ conservative.
 | No telemetry consent/opt-out | GDPR/DSA exposure for EU users |
 | Privacy-policy page content unverified (lives outside this repo) | Data-safety form may contradict the published policy |
 | No store screenshots / feature graphic in repo | Listing cannot be completed |
-| Daily limit is UI-only (no native `UsageStats` quota gate) | Do not claim it as a working feature in the listing. The **app blocker IS enforced natively** (HOME-bounce via `pushAppBlocklist`) and may be listed |
-| 12 grandfathered feature-boundary violations (`tool/boundaries_baseline.txt`) | Engineering debt, not a Play blocker |
+| ~~Daily limit is UI-only~~ — **resolved by M3** ([27](27-rules-engine.md)): the rules snapshot carries `daily_reel_limit`, metered natively against `ContentCounter.timeTodayMs()` | It may now be listed, along with the natively enforced app blocker (HOME-bounce via `pushAppBlocklist`) |
+| 7 grandfathered feature-boundary violations (`tool/boundaries_baseline.txt`) | Engineering debt, not a Play blocker |

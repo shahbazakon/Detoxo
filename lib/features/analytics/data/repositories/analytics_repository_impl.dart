@@ -13,8 +13,26 @@ class AnalyticsRepositoryImpl implements AnalyticsRepository {
   final LocalStore _store;
   static const int _maxEvents = 500;
 
+  /// Appends run one at a time. Blocks arrive from the engine stream, and two
+  /// overlapping read-modify-writes on the same key silently drop one of the
+  /// user's own block events — the failure this serialisation exists to stop.
+  Future<void> _appends = Future<void>.value();
+
   @override
-  Future<void> logBlock(BlockEvent event) async {
+  Future<void> logBlock(BlockEvent event) =>
+      _appends = _appends.then((_) => _append(event));
+
+  /// Deliberately re-reads rather than holding the list in memory: this repo is
+  /// a lazy singleton and "Reset app data" wipes the box underneath it
+  /// (`LocalStore.clearAll`), which an in-memory buffer would not see — it
+  /// would then write the wiped events straight back. The decode is one capped
+  /// list per block event, at user pace, on a stream that now has exactly one
+  /// listener.
+  ///
+  /// ponytail: decode + encode of the whole capped list per block — the cost of
+  /// one JSON document. Upgrade path = an append-only store, or a buffer once
+  /// something can invalidate it on wipe.
+  Future<void> _append(BlockEvent event) async {
     final events = await recent(limit: _maxEvents);
     final updated = [event, ...events].take(_maxEvents).toList();
     await _store.write(

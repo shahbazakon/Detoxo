@@ -17,10 +17,16 @@ Run this after you add, remove, or meaningfully change:
 Skip it for pure test/formatting changes with no behavioral or structural effect.
 
 ## Documentation layout
-- `docs/code_docs/` — engineering docs (`00-index.md`, `01`–`24`). Authored **from source**;
+- `docs/code_docs/` — engineering docs (`00-index.md`, `01`–`31`). Authored **from source**;
   each ends with a **`## Source files`** section listing the real files it documents.
 - `docs/info_docs/` — end-user / marketing docs (`00-index.md`, `01`–`04`): product overview,
   feature walkthroughs, permissions explained, FAQs.
+- `docs/plan_docs/` — the **forward-looking** milestone plan (`00-index.md`, `01`–`10`, M0–M8; M0, M1, M3, M4, M5, M6, M7 and M8 are shipped — see 25 / 26 / 27 / 28 / 29 / 30 / 31, and 13 + 01 for M6. **M2 is the only one left**).
+  Describes unbuilt capability, so it is **not** kept in sync with source the way `code_docs/` is.
+  Touch it only when a milestone's scope changes, or when one **ships**: then write the
+  engineering doc into `code_docs/NN-*.md`, register it in `code_docs/00-index.md`, add the
+  feature's row to the mapping table below, and stamp the plan doc `Status: shipped` with the
+  commit. `docs/suggestion_docs/` is inert source material — never edit it.
 
 ## Mapping — what to update when you touch…
 
@@ -37,18 +43,26 @@ Skip it for pure test/formatting changes with no behavioral or structural effect
 | `lib/features/blocking/shared/data/**`, `lib/core/network/**` | 10 |
 | `lib/features/monetization/premium/**` | 11 |
 | `lib/features/analytics/**`, native FGS notification / `receivers/BootReceiver.kt` / `admin/DetoxoDeviceAdminReceiver.kt` | 12 |
-| `lib/features/{onboarding,permissions}/**`, `lib/app/splash_screen.dart` | 13 |
+| `lib/features/analytics/insights/**`, `lib/core/utils/duration_format.dart` | 28 (+ 09 for `usage_daily`, 26 for the usage-layer consumer; **user-facing** → `info_docs/02` §15 + `04`) |
+| `lib/features/{onboarding,permissions}/**`, `lib/app/{splash_screen,bootstrap,starter_rule_sync}.dart` | 13 (+ 01 §3–§4 for the gate/bootstrap; **user-facing** → `info_docs/02` §1 + `04`) |
+| `lib/core/navigation/**` (`app_router.dart`, `routes.dart`, `app_gate.dart`) | 01 §3 (+ 13 for the gate order) |
 | `lib/features/dashboard/**` (home shell + dashboard sections), `lib/core/design_system/foundations/**` (glass primitives) | 01 (+ **user-facing** → `info_docs/02` §1) |
 | `pubspec.yaml` | 14 |
 | `lib/app/unsupported_screen.dart`, `lib/core/platform/**` | 15 |
 | release status / what-works-vs-swap-in changes | 16 |
-| `lib/features/content_counter/**`, native `engine/ContentCounter*.kt`, `overlay/**`, `widget/**` | 17 |
+| `lib/features/content_counter/**`, native `engine/ContentCounter*.kt`, `overlay/ContentCounterBubble.kt`, `overlay/OverlayWindows.kt`, `widget/**` | 17 |
+| `lib/features/blocking/block_screen/**`, native `overlay/BlockScreen*.kt`, the `raiseWall` sites + hide rules in `DetoxoAccessibilityService.kt`, `res/values/strings.xml` (`wall_*`) | 25 (+ 03, 04, 09, 18, 19, 22; **user-facing** → `info_docs/02` §3 + §9, `info_docs/04`) |
+| `lib/features/catalog/**`, `lib/features/usage/**`, native `engine/UsageQuery.kt`, the `queryAppUsage` / `queryUsageEvents` arms | 26 (+ 06 for the derived-domain consumer, 18) |
 | `lib/features/additional_feature/appearance/**` (Appearance screen: theme + background + reel-counter hub) | 17 (theme/background source is `blocking/shared` `SettingsCubit`; **user-facing** → `info_docs/02` §8–§9) |
 | `lib/core/constants/channel_constants.dart`, native `channels/**` | 18 |
+| native `notifications/**`, `engine/{SuppressionDecision,NotificationListenerCheck}.kt`, `shouldSuppressNotification` in `DetoxoAccessibilityService.kt`, the `suppressNotifications` field/toggle | 29 (+ 04, 09, 12, 13, 18, 22, 24, 27; **user-facing** → `info_docs/02` §16, `03`, `04`) |
 | `lib/features/protected_apps/**`, the service's privacy guard (`isProtected` sites in `DetoxoAccessibilityService.kt`) | 24 (+ 03, 04, 09, 18; **user-facing** → `info_docs/02` §13 + `04`) |
+| `lib/features/limits/rules/**`, native `engine/RuleEngine.kt`, the `pushRules` arm, the rule arms + `checkRuleBoundary` in `DetoxoAccessibilityService.kt` / `WatchdogJobService.kt`, `dashboard/.../rules_card.dart` | 27 (+ 03, 04, 06, 07, 09, 16, 18; **user-facing** → `info_docs/02` §6 + §14, `04`) |
 | `lib/core/services/firebase/**`, `lib/firebase_options.dart`, Firebase Gradle plugins (`android/settings.gradle.kts`, `android/app/build.gradle.kts`) | 19 (+ 12, 14, 16; **privacy** → `info_docs/03` + `04`) |
 | `lib/features/help/**`, `lib/features/additional_feature/showcase_view/**` | 20 (+ user-facing → `info_docs/02` + `04`) |
 | `lib/features/additional_feature/app_upgrader/**`, `lib/core/design_system/components/{dialog,overlays}.dart` (blocking-dialog params), the update entry points in `settings_screen.dart` (`_VersionBanner`) / `daily_limit_screen.dart` (`InfoBanner`) | 21 (+ user-facing → `info_docs/02` + `04`) |
+| `lib/features/blocking/shared/domain/nudge_sync.dart`, the `nudge*` fields/setters in `app_settings.dart` / `settings_cubit.dart`, native `engine/NudgeTracker.kt`, `overlay/NudgeOverlay.kt`, the `tickNudge` site + `nudgeForegroundPkg` latch in `DetoxoAccessibilityService.kt`, `res/values/strings.xml` (`nudge_*`) | 30 (+ 03, 04, 09, 18, 19, 26; **user-facing** → `info_docs/02` §17 + `04`) |
+| `lib/features/limits/unblock/**`, native `engine/UnblockRegistry.kt`, the `pushTemporaryUnblocks` / `takePendingUnblock` arms, the four unblock check sites + the `offersUnblock` producers in `DetoxoAccessibilityService.kt`, the `ACTION_UNBLOCK` branch in `overlay/BlockScreenOverlay.kt`, and `Rule.locked` / `lockScope` / `LockGuard` | 31 (+ 03, 04, 06, 07, 09, 18, 25, 26, 27, 01 §3; **user-facing** → `info_docs/02` §6 + §18 + `04`) |
 | **any user-facing behavior change** | the matching `info_docs/02-feature-walkthroughs.md` section **and** `info_docs/04-faqs.md` |
 
 New feature area with no mapping? Add a row here, and either extend the closest doc or add a

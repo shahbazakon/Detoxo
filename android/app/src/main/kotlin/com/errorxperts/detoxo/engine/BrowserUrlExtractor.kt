@@ -7,8 +7,10 @@ import java.util.ArrayDeque
  * Extracts the current URL host from a browser's accessibility tree.
  *
  * Mapped browsers use a direct address-bar resource-id lookup (one indexed call);
- * unmapped browsers fall back to a bounded DFS over EditText / url-ish nodes, so
- * coverage extends to effectively any installed browser. Stateless and pure.
+ * browsers in [KNOWN_BROWSERS] without a mapped id fall back to a bounded DFS
+ * over EditText / url-ish nodes. The fallback widens coverage WITHIN that set —
+ * it does not reach browsers outside it, because [isBrowser] gates the whole web
+ * branch before extraction is ever attempted. Stateless and pure.
  */
 object BrowserUrlExtractor {
 
@@ -157,6 +159,10 @@ object BrowserUrlExtractor {
         if (s.contains(' ')) return null // "Search or type URL", search queries
         s = s.substringAfter("://", s) // scheme
         s = s.substringBefore('/').substringBefore('?').substringBefore('#')
+        // Userinfo BEFORE the port split, or `user:pass@youtube.com` yields
+        // `user` and the host is never blocked. Dart's DomainValidator strips
+        // it too (and is pinned by test/web_blocker_test.dart).
+        s = s.substringAfterLast('@')
         s = s.substringBefore(':') // port
         if (s.startsWith("www.")) s = s.substring(4)
         // FQDN form (`example.com.`) resolves identically and would otherwise

@@ -335,6 +335,23 @@ void main() {
       expect(cubit.needsPinToAdd('com.my.bank'), isFalse);
     });
 
+    // EVO-046: a browser is not in the reel catalog, but protecting one turns
+    // off the website blocklist and the 18+ filter inside it — the same
+    // self-bypass the catalog gate exists to price.
+    test('needsPinToAdd covers browsers, which are not catalog apps', () async {
+      final cubit = build();
+      await cubit.load();
+      expect(
+        cubit.state.monitoredPackages,
+        isNot(contains('com.android.chrome')),
+      );
+      expect(cubit.needsPinToAdd('com.android.chrome'), isTrue);
+      expect(cubit.needsPinToAdd(' org.mozilla.focus '), isTrue);
+      expect(cubit.needsPinToAdd('com.jio.web'), isTrue);
+      // Still free for the apps the feature is actually for.
+      expect(cubit.needsPinToAdd('com.my.bank'), isFalse);
+    });
+
     test(
       'needsPinToAdd fails closed before load and after a failed load',
       () async {

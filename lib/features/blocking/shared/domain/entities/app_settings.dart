@@ -32,6 +32,10 @@ class AppSettings extends Equatable {
     this.blockAdultWebsites = false,
     this.blockWebsitesForBlockedApps = false,
     this.showFeedbackButton = false,
+    this.suppressNotifications = false,
+    this.nudgeEnabled = false,
+    this.nudgeThresholdMinutes = 5,
+    this.nudgeDailyCap = 4,
   });
 
   factory AppSettings.fromJson(Map<String, dynamic> json) {
@@ -75,6 +79,17 @@ class AppSettings extends Equatable {
       blockWebsitesForBlockedApps:
           json['blockWebsitesForBlockedApps'] as bool? ?? false,
       showFeedbackButton: json['showFeedbackButton'] as bool? ?? false,
+      suppressNotifications: json['suppressNotifications'] as bool? ?? false,
+      // Clamped to the same range the native engine coerces to, so a
+      // corrupt or hand-edited blob can't render "up to -5 per app a day"
+      // in Settings while the engine quietly enforces 1.
+      nudgeEnabled: json['nudgeEnabled'] as bool? ?? false,
+      nudgeThresholdMinutes:
+          ((json['nudgeThresholdMinutes'] as num?)?.toInt() ?? 5).clamp(1, 60),
+      nudgeDailyCap: ((json['nudgeDailyCap'] as num?)?.toInt() ?? 4).clamp(
+        1,
+        50,
+      ),
     );
   }
 
@@ -122,6 +137,27 @@ class AppSettings extends Equatable {
   /// Whether the global feedback button is shown in screen app bars. UI-only
   /// (the native engine ignores it); persisted through the single settings path.
   final bool showFeedbackButton;
+
+  /// Whether notifications from currently-blocked apps are cancelled. Opt-in
+  /// and off by default: it needs Android's notification-access grant, which is
+  /// broader than everything else Detoxo asks for. Native derives WHICH apps
+  /// per notification from the live engine state — only this switch is pushed.
+  final bool suppressNotifications;
+
+  /// Soft nudge: after this many minutes in one distracting app, a dismissible
+  /// card says so, and it returns at every further multiple. Advisory only —
+  /// nothing is blocked and nothing is pressed.
+  ///
+  /// Note the shape of it, because two plausible readings differ: this is
+  /// elapsed time inside ONE visit to ONE app, not cumulative use across the
+  /// day. Two four-minute visits never nudge. "Tell me after 30 minutes today"
+  /// is the daily limit, which already exists — point the user there instead.
+  final bool nudgeEnabled;
+  final int nudgeThresholdMinutes;
+
+  /// Nudges per app per day before the machine goes quiet. A card every five
+  /// minutes forever is ignorable by the third one.
+  final int nudgeDailyCap;
 
   DateTime _now(DateTime? now) => now ?? DateTime.now();
 
@@ -175,6 +211,10 @@ class AppSettings extends Equatable {
     bool? blockAdultWebsites,
     bool? blockWebsitesForBlockedApps,
     bool? showFeedbackButton,
+    bool? suppressNotifications,
+    bool? nudgeEnabled,
+    int? nudgeThresholdMinutes,
+    int? nudgeDailyCap,
   }) {
     return AppSettings(
       activePlan: activePlan ?? this.activePlan,
@@ -197,6 +237,12 @@ class AppSettings extends Equatable {
       blockWebsitesForBlockedApps:
           blockWebsitesForBlockedApps ?? this.blockWebsitesForBlockedApps,
       showFeedbackButton: showFeedbackButton ?? this.showFeedbackButton,
+      suppressNotifications:
+          suppressNotifications ?? this.suppressNotifications,
+      nudgeEnabled: nudgeEnabled ?? this.nudgeEnabled,
+      nudgeThresholdMinutes:
+          nudgeThresholdMinutes ?? this.nudgeThresholdMinutes,
+      nudgeDailyCap: nudgeDailyCap ?? this.nudgeDailyCap,
     );
   }
 
@@ -217,6 +263,10 @@ class AppSettings extends Equatable {
     'blockAdultWebsites': blockAdultWebsites,
     'blockWebsitesForBlockedApps': blockWebsitesForBlockedApps,
     'showFeedbackButton': showFeedbackButton,
+    'suppressNotifications': suppressNotifications,
+    'nudgeEnabled': nudgeEnabled,
+    'nudgeThresholdMinutes': nudgeThresholdMinutes,
+    'nudgeDailyCap': nudgeDailyCap,
   };
 
   @override
@@ -237,5 +287,9 @@ class AppSettings extends Equatable {
     blockAdultWebsites,
     blockWebsitesForBlockedApps,
     showFeedbackButton,
+    suppressNotifications,
+    nudgeEnabled,
+    nudgeThresholdMinutes,
+    nudgeDailyCap,
   ];
 }
