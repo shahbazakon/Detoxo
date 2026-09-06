@@ -179,6 +179,8 @@ The little counter bubble floats on top of whatever app you're in, so Android as
 
 If the bubble or the block screen is switched on but the permission is missing, its card on the Appearance screen tells you so — tap the warning to open the setting; it clears on its own once granted.
 
+If the bubble is switched on but the permission is missing, the **Bubble** card on the Appearance screen tells you so — tap the warning to open the setting; it clears on its own once granted.
+
 ## What happens when I tap the counter bubble?
 
 It depends on the **Show time on tap** option (on by default, in the bubble's appearance settings):
