@@ -39,6 +39,8 @@ class DailyStats extends Equatable {
         lastPickupMs: _intOrNull(json['lastPickupMs']),
         contextSwitches: _int(json['contextSwitches']),
         reelCount: _int(json['reelCount']),
+        // Re-sorted on read: every consumer assumes "first is busiest", and a
+        // hand-edited or older document need not honour that.
         topApps: [
           for (final e in _list(json['topApps']))
             if (e is Map && e['package'] is String && e['package'] != '')
@@ -46,7 +48,7 @@ class DailyStats extends Equatable {
                 package: e['package'] as String,
                 foregroundMillis: _int(e['ms']),
               ),
-        ],
+        ]..sort((a, b) => b.foregroundMillis.compareTo(a.foregroundMillis)),
         computedAtMs: _int(json['computedAtMs']),
         // `== true` rather than a cast: a stored 1 or "true" must not throw.
         complete: json['complete'] == true,
@@ -125,8 +127,12 @@ class DailyStats extends Equatable {
   };
 
   /// Zero for anything that is not a number — including a numeric string, a
-  /// map, or a value a future schema change renames out from under this reader.
-  static int _int(Object? v) => _intOrNull(v) ?? 0;
+  /// map, or a value a future schema change renames out from under this reader
+  /// — and zero for a negative one: no duration or count here can be below it.
+  static int _int(Object? v) {
+    final n = _intOrNull(v) ?? 0;
+    return n < 0 ? 0 : n;
+  }
 
   static int? _intOrNull(Object? v) => switch (v) {
     final num n when n.isFinite => n.toInt(),

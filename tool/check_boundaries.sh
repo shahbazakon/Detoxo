@@ -28,7 +28,12 @@ while IFS= read -r -d '' file; do
   self=$(printf '%s' "$file" | sed -nE 's#^lib/features/([^/]+)/.*#\1#p')
   # forbidden: importing another feature's data/ or presentation/
   while IFS= read -r line; do
-    other=$(printf '%s' "$line" | sed -nE "s#.*package:detoxo/features/([^/]+)/.*/(data|presentation)/.*#\1#p")
+    # `(.*/)?` — the module segment is optional, exactly as in the grep below.
+    # With a REQUIRED segment this extraction returned nothing for a feature's
+    # top-level data/ or presentation/ (…/features/dashboard/presentation/…),
+    # so those imports were skipped and the gate passed vacuously for them
+    # (found 2026-09-06, with two such imports live and the baseline empty).
+    other=$(printf '%s' "$line" | sed -nE "s#.*package:detoxo/features/([^/]+)/(.*/)?(data|presentation)/.*#\1#p")
     [ -z "$other" ] && continue
     [ "$other" = "$self" ] && continue
     # Key on file + imported path (not line number, which shifts on any edit).

@@ -3,7 +3,6 @@ import 'dart:ui' show ImageFilter;
 
 import 'package:detoxo/core/design_system/design_system.dart';
 import 'package:detoxo/core/navigation/routes.dart';
-import 'package:detoxo/core/widgets/common_widgets.dart';
 import 'package:detoxo/features/blocking/blocking.dart';
 import 'package:detoxo/features/content_counter/content_counter.dart';
 import 'package:flutter/material.dart';
@@ -95,7 +94,8 @@ class _BlockScreenSection extends StatelessWidget {
         semanticLabel: 'Block screen',
         onChanged: (on) => cubit.setEnabled(enabled: on),
       ),
-      disabledHint: 'Block screen off — blocks fall back to a short toast',
+      disabledHint:
+          'Block screen off — app & website blocks fall back to a short toast',
       notice: style.enabled && overlayGranted == false
           ? 'Needs “Display over other apps” — tap to allow'
           : null,

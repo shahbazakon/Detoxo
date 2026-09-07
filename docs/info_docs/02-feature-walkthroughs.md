@@ -90,9 +90,9 @@ progress bar showing how many required ones are granted.
 The bottom button stays disabled and reads **Grant required permissions** until
 both required ones are on; then it becomes **Continue** and takes you home.
 
-> **A brief "Checking…" is normal.** Right after launch, a card (and the
-> dashboard's Protection Status card) can show a neutral **"Checking…"** for a
-> moment while Detoxo reads the real status from Android. That's not a denial
+> **A brief "Checking…" is normal.** Right after launch, a card can show a
+> neutral **"Checking…"** for a moment while Detoxo reads the real status from
+> Android. That's not a denial
 > and not "protection off" — it settles on its own, usually within a second, and
 > never un-grants anything you've already set up.
 
@@ -155,7 +155,8 @@ The five modes fall into two groups:
 
 Tap **Block All**. That's it — from now on, whenever a reel or short appears,
 Detoxo exits it (or closes / locks the app, depending on your block-mode choice
-in Settings — see §9) and shows its **block screen**: a full-screen card that
+in Settings — see §9). Pick the **Block screen** mode there and it also shows its
+**block screen**: a full-screen card that
 names what was blocked ("Instagram Reels is blocked by Detoxo"), which plan did
 it, today's reel count and how many times you've opened that app today, with
 three ways out — **Go home**, **Open Detoxo**, or **Back to Instagram** (the app
@@ -167,8 +168,11 @@ the app you came from (there it simply reads **Dismiss**) — and disappears on 
 own when you move on to a different app, turn the screen off, start a Pause, or
 switch protection off. In **Conscious** the card also tells you your time bank is
 empty; in **One Reel** / **Unblock** it says you've watched your reel(s). You can
-restyle the card, drop the wait or the extra lines — or switch it off and go back
-to a short toast — under **Appearance → Block screen** (§8, §9).
+restyle the card, drop the wait or the extra lines — or switch it off for app and
+website blocks — under **Appearance → Block screen** (§8, §9). Whatever mode you
+pick, the card always appears once your **daily limit** is used up (§6), when a
+**schedule** you set kicks in, or when your **Conscious** bank runs dry — those are
+commitments you made in advance, so Detoxo always shows you the wall for them.
 
 ### One Reel — watch one, then blocked
 
@@ -374,8 +378,9 @@ progress bar, and it resets automatically at the start of each new day.
 
 **It's a real stop.** When today's reel time reaches the limit, Detoxo blocks
 every reel feed it knows — Reels, Shorts and the rest — until midnight, with the
-block screen saying *"Your daily limit is used up."* The rest of each app keeps
-working; only the feeds are closed. A **Pause** lifts it like any other block
+block screen saying *"Your daily limit is used up."* That card shows whatever
+block mode you chose and even if you switched the block screen off under
+Appearance. The rest of each app keeps working; only the feeds are closed. A **Pause** lifts it like any other block
 (§3). The limit is measured by the **reel counter** (§8), so if you switch the
 counter off, the Daily limit screen tells you it can't be enforced until you turn
 it back on. You'll also see the limit pinned at the top of **Rules** (§14).
@@ -549,9 +554,14 @@ Open **Settings** from the top bar or menu. It's grouped into:
 
 - **Daily limit** — jumps to the daily-cap screen (§6).
 - *(A **Privacy** group sits just below Protection — see §13 Protected apps.)*
-- **When a reel is detected** — choose what blocking actually does (the block
-  screen appears with every option unless you switch it off under Appearance):
+- **When a reel is detected** — choose what blocking actually does:
   - **Press back** — exits the reel (recommended).
+  - **Block screen** — exits the reel and shows the full-screen block screen with
+    a way back (needs "Display over other apps"; Detoxo opens Android's screen if
+    it's missing, and the row underneath says so until you allow it — until then
+    the reel still closes and a short toast names the block). With any other mode
+    the card only appears when your daily limit is used up, a schedule kicks in,
+    or your Conscious bank runs dry.
   - **Close the app** — force-closes the offending app.
   - **Lock app** — hides the app behind your PIN, like an app locker (requires a
     PIN; Detoxo sends you to PIN setup if you pick this without one).

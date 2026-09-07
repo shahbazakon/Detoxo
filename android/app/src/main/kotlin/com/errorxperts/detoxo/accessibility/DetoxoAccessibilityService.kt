@@ -51,6 +51,7 @@ import com.errorxperts.detoxo.engine.recycleSafe
 import com.errorxperts.detoxo.overlay.BlockScreenOverlay
 import com.errorxperts.detoxo.overlay.BlockScreenPayload
 import com.errorxperts.detoxo.overlay.NudgeOverlay
+import com.errorxperts.detoxo.overlay.WallPolicy
 import com.errorxperts.detoxo.receivers.WatchdogJobService
 import java.util.ArrayDeque
 import java.util.concurrent.ConcurrentHashMap
@@ -1220,26 +1221,39 @@ class DetoxoAccessibilityService : AccessibilityService() {
         var mode = resolveBlockMode(detector)
         // A rule must bounce: the count-only NONE mode falls back to a BACK press.
         if (ruleReason != null && mode == "NONE") mode = "PRESS_BACK"
-        store.recordBlock(dateKey())
-        val (today, total, _) = store.blockStats(dateKey())
+        // `now` is this block's one clock read; yesterday's key comes from it
+        // too (Calendar arithmetic, so a DST day is still one day).
+        store.recordBlock(dateKey(), DateKeys.dayBefore(now), pkg)
+        val stats = store.blockStats(dateKey(), DateKeys.dayBefore(now))
+        val reason = ruleReason ?: BlockScreenPayload.REASON_PLAN
+
+        // The wall accompanies the navigation below, never replaces it: with
+        // no overlay grant the user is still bounced. Raised for the
+        // BLOCK_SCREEN mode or a forced block — a spent limit, a schedule, a
+        // drained Conscious bank (WallPolicy); NONE navigates nowhere, and a
+        // wall over a still-playing reel would be a trap. Wanted but not shown
+        // (no grant) falls back to the legacy toast, as the app and website
+        // sites do, so the block is never silent.
+        val forced = WallPolicy.forced(reason, activePlan, consciousBank)
+        val wanted = WallPolicy.reelWall(store.defaultBlockMode, mode, forced)
+        var shown = false
+        if (wanted) {
+            val payload = reelPayload(pkg, platformId, ruleReason, ruleUnlocksAtMs, offersUnblock)
+            shown = raiseWall(payload, backStaysOver(pkg), raisedOver = pkg)
+            if (!shown) {
+                Toast.makeText(
+                    this, getString(R.string.toast_blocked, payload.displayName), Toast.LENGTH_SHORT,
+                ).show()
+            }
+        }
         ServiceEventBus.post(
             "blocked",
             mapOf("package" to pkg, "platformId" to platformId, "mode" to mode,
-                "today" to today, "total" to total,
-                "reason" to (ruleReason ?: BlockScreenPayload.REASON_PLAN)),
+                "today" to stats.today, "total" to stats.total,
+                "yesterday" to stats.yesterday, "byPackage" to stats.byPackage,
+                "reason" to reason, "wall" to shown),
         )
-        Log.i(TAG, "blocked $platformId in $pkg via $mode")
-
-        // The wall accompanies the navigation below, never replaces it: with
-        // no overlay grant the user is still bounced. NONE navigates nowhere —
-        // a wall over a still-playing reel would be a trap, so it gets none.
-        if (mode != "NONE") {
-            raiseWall(
-                reelPayload(pkg, platformId, ruleReason, ruleUnlocksAtMs, offersUnblock),
-                backStaysOver(pkg),
-                raisedOver = pkg,
-            )
-        }
+        Log.i(TAG, "blocked $platformId in $pkg via $mode wall=$shown")
 
         when (mode) {
             "KILL_APP" -> { blockVibrate(); performBackInternal(); killApp(pkg) }
@@ -1519,14 +1533,18 @@ class DetoxoAccessibilityService : AccessibilityService() {
         if (now - lastAppBlockTime <= BLOCK_DEBOUNCE_MS) return
         lastAppBlockTime = now
 
-        store.recordBlock(dateKey())
-        val (today, total, _) = store.blockStats(dateKey())
+        // `now` is this block's one clock read; yesterday's key comes from it
+        // too (Calendar arithmetic, so a DST day is still one day).
+        store.recordBlock(dateKey(), DateKeys.dayBefore(now), pkg)
+        val stats = store.blockStats(dateKey(), DateKeys.dayBefore(now))
         val token = if (reason == BlockScreenPayload.REASON_APP_BLOCK) "app_block" else "rule"
         ServiceEventBus.post(
             "blocked",
             mapOf(
                 "package" to pkg, "platformId" to token, "mode" to "HOME",
-                "today" to today, "total" to total, "reason" to reason,
+                "today" to stats.today, "total" to stats.total,
+                "yesterday" to stats.yesterday, "byPackage" to stats.byPackage,
+                "reason" to reason,
             ),
         )
         Log.i(TAG, "blocked $token in $pkg via HOME")
@@ -1673,7 +1691,9 @@ class DetoxoAccessibilityService : AccessibilityService() {
                 bank = 0L
                 lastReelAtMs = 0L
                 // The drain-to-empty boot IS the Conscious moment: raise the
-                // wall here, not only on the next detection event.
+                // wall here, not only on the next detection event. A drained
+                // bank is a forced block (WallPolicy.forced, EVO-054), so this
+                // walls in every mode and past the Appearance switch.
                 foregroundPkg?.takeUnless { isProtected(it) }?.let { fg ->
                     // The surface that actually drained the bank — since M8 this
                     // id is what an Unblock tap grants, so guessing the package's

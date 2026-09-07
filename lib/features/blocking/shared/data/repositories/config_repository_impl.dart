@@ -66,13 +66,8 @@ class ConfigRepositoryImpl implements ConfigRepository {
     PlatformModel platform, {
     required bool isInstalled,
   }) {
-    final modes = <BlockingMode>{};
-    for (final detector in platform.detectors.values) {
-      for (final m in detector.supportedBlockModes) {
-        modes.add(BlockingMode.fromWire(m));
-      }
-    }
-    if (modes.isEmpty) modes.add(BlockingMode.pressBack);
+    // The detectors' supportedBlockModes are consumed natively
+    // (resolveBlockMode); Dart never read them, so they are not surfaced.
     return BlockTarget(
       platformId: platform.platformId,
       packageName: platform.packageName.isNotEmpty
@@ -84,7 +79,6 @@ class ConfigRepositoryImpl implements ConfigRepository {
           : app.appName,
       iconUrl: platform.iconUrl.isNotEmpty ? platform.iconUrl : app.iconUrl,
       detectionType: DetectionType.fromWire(platform.detectionType),
-      supportedModes: modes.toList(),
       premiumExclusive: platform.premiumExclusive,
       defaultEnabled: platform.defaultStatus,
       isBrowser: app.isBrowser,

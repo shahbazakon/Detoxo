@@ -1,6 +1,5 @@
 import 'package:detoxo/core/design_system/design_system.dart';
 import 'package:detoxo/features/additional_feature/app_feedback/app_feedback.dart';
-import 'package:detoxo/features/dashboard/presentation/widgets/menu_button.dart';
 import 'package:flutter/material.dart';
 
 /// Dashboard header: the brand wordmark, a notifications action, and the menu

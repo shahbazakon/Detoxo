@@ -45,12 +45,15 @@ void main() {
     expect(e[1], {'enabled': 1});
   });
 
-  test('logBlockTriggered → block_triggered { platform, mode }', () async {
-    await service.logBlockTriggered(platform: 'youtube', mode: 'PRESS_BACK');
-    final e = capturedEvent();
-    expect(e[0], 'block_triggered');
-    expect(e[1], {'platform': 'youtube', 'mode': 'PRESS_BACK'});
-  });
+  test(
+    'logBlockTriggered → block_triggered { platform, mode, wall }',
+    () async {
+      await service.logBlockTriggered(platform: 'youtube', mode: 'PRESS_BACK');
+      final e = capturedEvent();
+      expect(e[0], 'block_triggered');
+      expect(e[1], {'platform': 'youtube', 'mode': 'PRESS_BACK', 'wall': 0});
+    },
+  );
 
   test('logReelsCounted → reels_counted { count }', () async {
     await service.logReelsCounted(7);

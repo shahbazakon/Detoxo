@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import 'package:detoxo/core/design_system/design_system.dart';
-import 'package:detoxo/core/widgets/common_widgets.dart';
 import 'package:detoxo/features/blocking/block_screen/domain/entities/block_screen_payload.dart';
 import 'package:detoxo/features/blocking/block_screen/domain/entities/block_screen_style.dart';
 import 'package:detoxo/features/blocking/block_screen/presentation/block_screen_style_cubit.dart';

@@ -26,7 +26,6 @@ BlockTarget _target(String pkg, String name) => BlockTarget(
   displayName: '$name Reels',
   iconUrl: 'https://cdn.example/$name.png',
   detectionType: DetectionType.legacy,
-  supportedModes: const [BlockingMode.pressBack],
   premiumExclusive: false,
   defaultEnabled: true,
   isBrowser: false,

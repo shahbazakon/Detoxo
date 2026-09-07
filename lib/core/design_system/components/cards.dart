@@ -50,24 +50,53 @@ class TrendDelta {
   final bool up;
 }
 
-/// A metric tile that animates its value (count-up) when it changes — making a
-/// live refresh visible. Sits in a `Row` (caller wraps in `Expanded`); uses a
-/// flat translucent glass (cheap, no per-frame saveLayer).
+/// A metric tile that animates its value when it changes — making a live
+/// refresh visible. The first paint counts up from zero; a later change tweens
+/// from the value on screen, never back through zero (a tile fed by a live
+/// stream — the Activity tab's block counts — would otherwise rewind on every
+/// event). Sits in a `Row` (caller wraps in `Expanded`); uses a flat
+/// translucent glass (cheap, no per-frame saveLayer), or no surface at all
+/// with [contained] false.
 class StatCard extends StatelessWidget {
   const StatCard({
     required this.label,
-    required this.value,
     required this.icon,
+    this.value,
+    this.text,
     this.unit,
     this.trend,
+    this.caption,
+    this.compact = false,
+    this.contained = true,
     super.key,
-  });
+  }) : assert(value != null || text != null, 'Provide a value or text');
 
   final String label;
-  final int value;
+
+  /// A count, animated up on first paint.
+  final int? value;
+
+  /// A verbatim figure ("3h 12m") shown instead of [value], never animated.
+  final String? text;
   final IconData icon;
   final String? unit;
   final TrendDelta? trend;
+
+  /// A muted line under the label — a neutral reference for the number
+  /// ("Yesterday: 52"), never a verdict on it.
+  final String? caption;
+
+  /// A denser tile for a 2×2 grid: icon inline with the label, a smaller
+  /// figure and tighter padding. The default suits a two-up row.
+  final bool compact;
+
+  /// Whether the tile paints its own glass. Set `false` inside a panel that
+  /// already supplies the surface (the Activity grids): the tile keeps its
+  /// padding and layout but is glass-on-glass no longer. A tappable tile
+  /// (EVO-062) has to choose its own affordance — keep the surface, or add one.
+  final bool contained;
+
+  String get _figure => text ?? '$value${unit == null ? '' : ' $unit'}';
 
   /// What a screen reader hears: one sentence, not the three loose nodes the
   /// visual layout happens to produce.
@@ -75,7 +104,10 @@ class StatCard extends StatelessWidget {
     final trailing = trend == null
         ? ''
         : ', ${trend!.up ? 'up' : 'down'} ${trend!.percent} percent';
-    return '$label: $value${unit == null ? '' : ' $unit'}$trailing';
+    // A visual "·" separator is silence to TalkBack, so the clauses would run
+    // together; spoken, it is a comma.
+    final tail = caption == null ? '' : ', ${caption!.replaceAll(' · ', ', ')}';
+    return '$label: $_figure$trailing$tail';
   }
 
   @override
@@ -83,48 +115,106 @@ class StatCard extends StatelessWidget {
     final text = Theme.of(context).textTheme;
     // The count-up is decoration. Honour the OS "remove animations" setting,
     // and keep the per-frame tween churn out of the semantics tree entirely —
-    // otherwise TalkBack reads every intermediate number (the
-    // `ReelCounterCard` rule).
+    // otherwise TalkBack reads every intermediate number.
     final reduce = MediaQuery.maybeDisableAnimationsOf(context) ?? false;
+    final figureStyle = (compact ? text.titleLarge : text.headlineSmall)
+        ?.copyWith(
+          fontWeight: FontWeight.w800,
+          fontFeatures: const [FontFeature.tabularFigures()],
+        );
+    final verbatim = this.text;
+    final figure = verbatim != null
+        ? Text(verbatim, style: figureStyle)
+        : TweenAnimationBuilder<int>(
+            // No key on the value: re-keying rebuilt the tween from `begin`
+            // on every change, so a live tile rewound to 0 on each event.
+            tween: IntTween(begin: 0, end: value),
+            duration: reduce ? Duration.zero : AppDurations.slow,
+            curve: AppCurves.standard,
+            builder: (context, v, _) =>
+                Text(unit == null ? '$v' : '$v $unit', style: figureStyle),
+          );
+    final badge = trend == null
+        ? null
+        : AppBadge.label(
+            '${trend!.up ? '▲' : '▼'} ${trend!.percent}%',
+            tone: trend!.up ? AppTone.success : AppTone.danger,
+          );
+    final captionText = caption == null
+        ? null
+        : Text(
+            caption!,
+            style: text.bodySmall?.copyWith(color: context.glass.onGlassMuted),
+          );
+    final padding = EdgeInsets.all(compact ? AppSpacing.sm : 14);
+    final body = Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: compact
+          ? [
+              Row(
+                children: [
+                  Icon(icon, size: 18, color: context.accent),
+                  const SizedBox(width: AppSpacing.xxs),
+                  // Wraps rather than clips: "Distracting opens" beside
+                  // an icon overflows a half-width tile from ~1.3× text
+                  // scale, and [StatCardPair] stretches the neighbour.
+                  Expanded(child: Text(label, style: text.bodySmall)),
+                  ?badge,
+                ],
+              ),
+              const SizedBox(height: AppSpacing.xxs),
+              figure,
+              ?captionText,
+            ]
+          : [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Icon(icon, color: context.accent),
+                  ?badge,
+                ],
+              ),
+              const SizedBox(height: AppSpacing.xs),
+              figure,
+              Text(label, style: text.bodySmall),
+              ?captionText,
+            ],
+    );
     return Semantics(
       label: _semanticLabel(),
       excludeSemantics: true,
-      child: GlassContainer(
-        enableBlur: false,
-        padding: const EdgeInsets.all(14),
-        tintTop: AppColors.seed.withValues(alpha: 0.18),
-        tintBottom: AppColors.seed.withValues(alpha: 0.05),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Icon(icon, color: context.accent),
-                if (trend != null)
-                  AppBadge.label(
-                    '${trend!.up ? '▲' : '▼'} ${trend!.percent}%',
-                    tone: trend!.up ? AppTone.success : AppTone.danger,
-                  ),
-              ],
-            ),
-            const SizedBox(height: AppSpacing.xs),
-            TweenAnimationBuilder<int>(
-              key: ValueKey(value),
-              tween: IntTween(begin: 0, end: value),
-              duration: reduce ? Duration.zero : AppDurations.slow,
-              curve: AppCurves.standard,
-              builder: (context, v, _) => Text(
-                unit == null ? '$v' : '$v $unit',
-                style: text.headlineSmall?.copyWith(
-                  fontWeight: FontWeight.w800,
-                  fontFeatures: const [FontFeature.tabularFigures()],
-                ),
-              ),
-            ),
-            Text(label, style: text.bodySmall),
-          ],
-        ),
+      child: contained
+          ? GlassContainer(
+              enableBlur: false,
+              padding: padding,
+              tintTop: AppColors.seed.withValues(alpha: 0.18),
+              tintBottom: AppColors.seed.withValues(alpha: 0.05),
+              child: body,
+            )
+          : Padding(padding: padding, child: body),
+    );
+  }
+}
+
+/// Two [StatCard]s side by side. `IntrinsicHeight` so a wrapped label or
+/// caption at a large text scale stretches both tiles, not one — the shorter
+/// tile would otherwise float beside its neighbour.
+class StatCardPair extends StatelessWidget {
+  const StatCardPair(this.first, this.second, {super.key});
+
+  final StatCard first;
+  final StatCard second;
+
+  @override
+  Widget build(BuildContext context) {
+    return IntrinsicHeight(
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(child: first),
+          const SizedBox(width: AppSpacing.sm),
+          Expanded(child: second),
+        ],
       ),
     );
   }
@@ -263,10 +353,15 @@ class AppCard extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       if (title != null)
-                        Text(
-                          title!,
-                          style: text.titleMedium?.copyWith(
-                            fontWeight: FontWeight.w700,
+                        // A heading, so a screen reader can jump card to
+                        // card on a scroll of several.
+                        Semantics(
+                          header: true,
+                          child: Text(
+                            title!,
+                            style: text.titleMedium?.copyWith(
+                              fontWeight: FontWeight.w700,
+                            ),
                           ),
                         ),
                       if (subtitle != null) ...[

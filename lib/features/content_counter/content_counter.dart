@@ -5,8 +5,8 @@
 /// - domain entities + repository contracts (count, styles, bubble, widget);
 /// - `ContentCounterCubit` / `CounterAppearanceCubit` — provided app-wide in
 ///   `main.dart`; screens read them from context;
-/// - `ReelCounterCard`, `BubblePreview`, `WidgetPreview` — the counter's
-///   embeddable surfaces (Activity card, Appearance hub previews).
+/// - `BubblePreview`, `WidgetPreview` — the counter's embeddable surfaces
+///   (Appearance hub previews). The Activity tab reads the cubit directly.
 library;
 
 export 'content_counter_appearance/presentation/widgets/bubble_preview.dart';
@@ -23,6 +23,5 @@ export 'content_counter_core/domain/repositories/counter_appearance_repository.d
 export 'content_counter_core/domain/usage_ladder.dart';
 export 'content_counter_core/presentation/content_counter_cubit.dart';
 export 'content_counter_core/presentation/counter_appearance_cubit.dart';
-export 'content_counter_core/presentation/widgets/reel_counter_card.dart';
 export 'home_content_counter/domain/entities/widget_style.dart';
 export 'home_content_counter/domain/repositories/home_widget_repository.dart';

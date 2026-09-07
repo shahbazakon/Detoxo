@@ -106,6 +106,11 @@ Future<void> runBootstrap(BuildContext context) async {
             sl<LocalStore>(),
             sl<TemporaryUnblockRepository>(),
           );
+          // The Dart block-event buffer is gone (doc 12 §1.1) and nothing reads
+          // its document, but an upgraded install still decodes it into RAM on
+          // every cold start (the box is not lazy). Deleting a missing key is a
+          // no-op, so this costs a fresh install nothing.
+          await sl<LocalStore>().delete('analytics_events');
           await unblock.load();
           // The wall's "Allow for a while" foregrounds Detoxo, and on a cold
           // start the EventChannel sink does not exist when the action fires —

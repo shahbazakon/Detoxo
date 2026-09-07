@@ -388,9 +388,11 @@ non-browser targets) and **Websites** (`PopularSites` chips + a custom host thro
 `DomainValidator.check`). Validation: ≥ 1 target; ≥ 1 day and `start ≠ end` for a schedule.
 Delete via `AppDialog.confirm(destructive: true)`.
 
-**Dashboard** — `RulesCard` (`AppCard`, `AppIcon.rules` = Lucide `CalendarClock`) sits full-width
-under the App / Web Blocker pair in `BlockerSection`: "N active" / "N on" / "Not set up" `Pill`
-and `RuleSummary.nextEvent` as the subtitle; taps → `Routes.rules`.
+**Dashboard** — `RulesCard` (tinted `GlassCard` status row, `AppIcon.rules` = Lucide
+`CalendarClock`) sits full-width between the session banners and the App / Web Blocker pair in
+`DashboardTab`: success tint + pulsing `StatusDot` while a rule is live, the house accent when
+rules exist but none is active, plain glass when none are set up; "N active" / "N on" /
+"Not set up" `Pill`, `RuleSummary.nextEvent` as the subtitle, chevron; taps → `Routes.rules`.
 
 **Daily limit screen** — "used" now reads `ContentCounterCubit.state.timeToday` (the meter that
 enforces), and the banner tells the truth: enforced until midnight, or "Reel counter is off" when

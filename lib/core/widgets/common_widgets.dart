@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 
 export 'package:detoxo/core/design_system/components/feedback.dart'
     show EmptyState;
+export 'package:detoxo/core/design_system/components/section_header.dart'
+    show SectionHeader;
 
 /// Shared composites kept at their original names/APIs so the ~13 screens that
 /// already use them keep compiling — now reskinned over the glass design system.
@@ -54,75 +56,9 @@ class SectionCard extends StatelessWidget {
   }
 }
 
-/// An uppercase group header for settings-style lists (label above a run of
-/// glass rows, instead of nesting them inside another glass card).
-class SectionHeader extends StatelessWidget {
-  const SectionHeader(this.label, {super.key});
-
-  final String label;
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(
-        left: 4,
-        top: AppSpacing.md,
-        bottom: AppSpacing.sm,
-      ),
-      child: Text(
-        label.toUpperCase(),
-        style: Theme.of(context).textTheme.labelMedium?.copyWith(
-          color: Theme.of(context).colorScheme.onSurfaceVariant,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 0.8,
-        ),
-      ),
-    );
-  }
-}
-
-/// A compact metric tile (e.g. "Blocks today: 12").
-class StatTile extends StatelessWidget {
-  const StatTile({
-    required this.label,
-    required this.value,
-    required this.icon,
-    super.key,
-  });
-
-  final String label;
-  final String value;
-  final IconData icon;
-
-  @override
-  Widget build(BuildContext context) {
-    return Expanded(
-      child: GlassContainer(
-        enableBlur: false,
-        padding: const EdgeInsets.all(14),
-        tintTop: AppColors.seed.withValues(alpha: 0.18),
-        tintBottom: AppColors.seed.withValues(alpha: 0.05),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Icon(icon, color: Theme.of(context).colorScheme.secondary),
-            const SizedBox(height: AppSpacing.xs),
-            Text(
-              value,
-              style: Theme.of(
-                context,
-              ).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800),
-            ),
-            Text(label, style: Theme.of(context).textTheme.bodySmall),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// EmptyState now lives in the design system (components/feedback.dart) and is
-// re-exported below so existing `common_widgets.dart` importers keep compiling.
+// EmptyState and SectionHeader now live in the design system
+// (components/feedback.dart, components/section_header.dart) and are re-exported
+// above so existing `common_widgets.dart` importers keep compiling.
 
 /// A labelled navigation tile for the "more features" list. Pass [animatedIcon]
 /// for a morphing badge glyph that plays on appear and replays on every tap;

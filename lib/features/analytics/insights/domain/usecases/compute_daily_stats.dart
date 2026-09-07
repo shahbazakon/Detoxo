@@ -44,14 +44,29 @@ DailyStats computeDailyStats({
           .toList()
         ..sort((a, b) => a.timestampMillis.compareTo(b.timestampMillis));
 
+  // `queryAndAggregateUsageStats` hands back bucket totals that are not
+  // clipped to the window — a short post-midnight window can still carry most
+  // of yesterday's bucket — so a row is capped at the window itself before
+  // anything is summed or ranked. A non-positive row is dropped (native drops
+  // these too; never trust one into a total), and a non-positive window
+  // (impossible by contract) yields an empty day rather than a negative one.
+  final windowMs = endMs - startMs;
+  final rows = windowMs <= 0
+      ? const <AppUsage>[]
+      : [
+          for (final a in usage)
+            if (a.foregroundMillis > 0)
+              a.foregroundMillis <= windowMs
+                  ? a
+                  : AppUsage(package: a.package, foregroundMillis: windowMs),
+        ];
+
   var screenTimeMs = 0;
   var distractionMs = 0;
-  for (final a in usage) {
-    final ms = a.foregroundMillis;
-    if (ms <= 0) continue; // native drops these; never trust it into a total
-    screenTimeMs += ms;
+  for (final a in rows) {
+    screenTimeMs += a.foregroundMillis;
     if (catalog.behaviorForPackage(a.package) == AppBehavior.distracting) {
-      distractionMs += ms;
+      distractionMs += a.foregroundMillis;
     }
   }
 
@@ -70,9 +85,17 @@ DailyStats computeDailyStats({
   // from something — this is the plan's `prevPkg != null` guard, derived.
   final contextSwitches = totalOpens > 0 ? totalOpens - 1 : 0;
 
-  final pickups = kept
-      .where((e) => e.type == UsageEventType.screenInteractive)
-      .toList();
+  // One pass over the (already sorted) events for the count and the two
+  // timestamps — not a third materialised list read for three fields.
+  var pickupCount = 0;
+  int? firstPickupMs;
+  int? lastPickupMs;
+  for (final e in kept) {
+    if (e.type != UsageEventType.screenInteractive) continue;
+    pickupCount++;
+    firstPickupMs ??= e.timestampMillis;
+    lastPickupMs = e.timestampMillis;
+  }
 
   // Protected apps are excluded from the only output that *names* an app.
   // The user marked these (banking, UPI, password managers) as apps Detoxo
@@ -80,24 +103,17 @@ DailyStats computeDailyStats({
   // nothing about them is stored or shown. Their time still counts toward the
   // aggregate totals above — that is not identifying, and dropping it would
   // make the day disagree with Digital Wellbeing for no privacy gain.
-  final top =
-      usage
-          .where(
-            (a) =>
-                a.foregroundMillis > 0 &&
-                !protectedPackages.contains(a.package),
-          )
-          .toList()
-        ..sort((a, b) => b.foregroundMillis.compareTo(a.foregroundMillis));
+  final top = rows.where((a) => !protectedPackages.contains(a.package)).toList()
+    ..sort((a, b) => b.foregroundMillis.compareTo(a.foregroundMillis));
 
   return DailyStats(
     dayKey: daySignature(start),
     screenTimeMs: screenTimeMs,
     distractionMs: distractionMs,
     distractionOpens: distractionOpens,
-    pickupCount: pickups.length,
-    firstPickupMs: pickups.isEmpty ? null : pickups.first.timestampMillis,
-    lastPickupMs: pickups.isEmpty ? null : pickups.last.timestampMillis,
+    pickupCount: pickupCount,
+    firstPickupMs: firstPickupMs,
+    lastPickupMs: lastPickupMs,
     contextSwitches: contextSwitches,
     reelCount: reelCount,
     topApps: top.take(kTopAppsCap).toList(),

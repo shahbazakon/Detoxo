@@ -35,6 +35,11 @@ String planLabel(BlockingPlan? plan, {int allowance = 1}) => switch (plan) {
 /// What happens when short content is detected.
 enum BlockingMode {
   pressBack('PRESS_BACK'),
+
+  /// Back press plus the full-screen wall. The only mode that raises the wall
+  /// on a plan block; a spent daily limit raises it in every mode (native
+  /// `WallPolicy`). Needs the overlay grant to show anything.
+  blockScreen('BLOCK_SCREEN'),
   killApp('KILL_APP'),
 
   /// Locks the offending app behind the user's PIN, app-locker style: the back
@@ -46,6 +51,9 @@ enum BlockingMode {
   /// Device-level lock via Device Admin. Retained for wire/config compatibility;
   /// no longer offered in the block-mode picker.
   lockScreen('LOCK_SCREEN'),
+
+  /// Legacy config token. Retained for wire compatibility only: no picker
+  /// entry, no native branch (falls through to a back press).
   overlay('OVERLAY'),
   none('NONE');
 

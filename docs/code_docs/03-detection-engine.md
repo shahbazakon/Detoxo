@@ -413,8 +413,9 @@ private fun onDetected(pkg, platformId, detector) {
 
 | Mode | Action | Notes |
 |------|--------|-------|
-| `PRESS_BACK` (default) | `performGlobalAction(GLOBAL_ACTION_BACK)` via `pressBackWithRateLimit()` | Rate-limited (§4.5). |
-| `KILL_APP` | Back, then `ActivityManager.killBackgroundProcesses(pkg)` | Best-effort; catches throwables. |
+| `PRESS_BACK` (default) | `performGlobalAction(GLOBAL_ACTION_BACK)` via `pressBackWithRateLimit()` | Rate-limited (§4.5). No wall. |
+| `BLOCK_SCREEN` | Back press **plus the block screen** ([25](25-block-screen.md)) | A wall policy, not a navigation: no detector lists it in `supportedBlockModes`, so `resolveBlockMode` yields `PRESS_BACK` and `overlay/WallPolicy.reelWall(store.defaultBlockMode, mode, ruleReason)` reads the *stored* choice to raise the wall. The only mode that walls a plan block. |
+| `KILL_APP` | Back, then `ActivityManager.killBackgroundProcesses(pkg)` | Best-effort; catches throwables. No wall. |
 | `LOCK_SCREEN` | Back, then device-admin `DevicePolicyManager.lockNow()` | Only if admin active (`admin/DetoxoDeviceAdminReceiver`). |
 | `NONE` | No-op | `onDetected` runs `recordBlock`/emit *before* the `when`, so a `NONE` detector still records the stat and emits a `blocked` event but performs no navigation — and raises **no block screen** (a wall over a still-playing reel would be a trap). |
 
@@ -425,6 +426,18 @@ private fun onDetected(pkg, platformId, detector) {
 2. Otherwise use the detector's first supported non-`NONE` mode.
 3. Otherwise fall back to the detector's `defaultBlockMode`, defaulting to
    `PRESS_BACK` when blank.
+
+**Wall rule (`overlay/WallPolicy`).** A reel block raises the block screen only when the user's
+stored mode is `BLOCK_SCREEN` **or** the block is *forced* — `WallPolicy.forced(reason, plan,
+bankMs)`: a `DAILY_LIMIT` or `SCHEDULE` reason, or a `PLAN` block under Conscious with the bank at
+zero (EVO-054/055) — and never over a `NONE` navigation. The Appearance switch
+(`BlockScreenStyleSpec.enabled`) is skipped per `WallPolicy.bypassesSwitch(payload, chosenMode)`:
+every forced wall, and a reel wall in the `BLOCK_SCREEN` mode; the decision is made inside
+`BlockScreenOverlay.show` from the payload and `store.defaultBlockMode`, so a style rebuild of a
+standing wall agrees with the raise. App-lock and website walls answer to the switch unless forced.
+When a reel wall is wanted but cannot show (no overlay grant) the site toasts `toast_blocked`
+(EVO-056), and the `blocked` event carries `wall: Boolean` (EVO-057). `pushSettings` whitelists
+`defaultBlockMode` to `BlockingMode`'s wire values. Pinned by `overlay/WallPolicyTest`.
 
 ### 4.5 Debounce vs. back rate-limit (two separate clocks)
 

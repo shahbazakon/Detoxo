@@ -112,6 +112,10 @@ object BlockScreenOverlay {
      * the caller then keeps its legacy toast. A standing wall takes a newer
      * payload (a drained bank, a fresh count) by rebuilding in place. Main
      * thread only; a call from another thread is re-posted and reports false.
+     * The Appearance switch is skipped per [WallPolicy.bypassesSwitch] (a
+     * forced block, or a reel wall in the Block screen mode) — decided here
+     * from the payload so [onStyleChanged] reaches the same answer; a preview
+     * always honours the switch. The overlay grant is never skipped.
      */
     fun show(
         context: Context,
@@ -138,8 +142,13 @@ object BlockScreenOverlay {
             }
             detach()
         }
-        val spec = BlockScreenStyleSpec.fromJson(storeFor(ctx).blockScreenStyleJson)
-        if (!spec.enabled) return false
+        val store = storeFor(ctx)
+        val spec = BlockScreenStyleSpec.fromJson(store.blockScreenStyleJson)
+        if (!spec.enabled &&
+            (preview || !WallPolicy.bypassesSwitch(payload, store.defaultBlockMode))
+        ) {
+            return false
+        }
 
         val t = SystemClock.uptimeMillis()
         if (t - overlayDeniedAtMs < OVERLAY_RECHECK_MS) return false
@@ -177,9 +186,10 @@ object BlockScreenOverlay {
             wm(ctx).addView(view, lp)
         } catch (e: WindowManager.BadTokenException) {
             // The grant was revoked between the check and the add: eject so
-            // the user is not left on the blocked surface, then reset.
+            // the user is not left on the blocked surface, then reset. A
+            // preview has no blocked surface — the user is in the style editor.
             Log.w(TAG, "addView refused (bad token): ${e.message}")
-            goHome(ctx)
+            if (!preview) goHome(ctx)
             detach()
             return false
         } catch (t: Throwable) {

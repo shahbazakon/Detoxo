@@ -308,7 +308,7 @@ Above the four variants sits a **"reels left" override**: `setRemaining(Int?)` (
 
 ### 7b. BlockScreenOverlay (the intervention wall)
 
-The second overlay in the package: `overlay/BlockScreenOverlay.kt` is an `object` holding one full-screen `TYPE_APPLICATION_OVERLAY` window (flags 808, drawn under the system bars and into the cutout) plus two edge strips that swallow the back gesture, raised by the accessibility service at every block and by `CommandHandler`'s preview arm. It is fail-safe (no grant → `false` → the trigger site keeps its toast), always dismissible from an on-screen action, and comes down on a foreground change away from the app it covers, on Pause / protection-off (`reload()`), on screen-off (a `BroadcastReceiver` registered on the **service** in `onServiceConnected`, unregistered inside `runCatching` from `onUnbind` and `onDestroy` — the MainActivity receiver is dead whenever the UI is), and when the service unbinds. The face is Canvas-drawn with real `Button`s underneath so TalkBack gets one target per action. Everything else — trigger sites, hide rules, renderer, style + on/off switch, channel — is in [25-block-screen.md](25-block-screen.md).
+The second overlay in the package: `overlay/BlockScreenOverlay.kt` is an `object` holding one full-screen `TYPE_APPLICATION_OVERLAY` window (flags 808, drawn under the system bars and into the cutout) plus two edge strips that swallow the back gesture, raised by the accessibility service at app and website blocks, at reel blocks in the **Block screen** mode or when forced (`overlay/WallPolicy.kt` — a spent daily limit, a schedule, a drained Conscious bank), and by `CommandHandler`'s preview arm. It is fail-safe (no grant → `false` → the trigger site keeps its toast), always dismissible from an on-screen action, and comes down on a foreground change away from the app it covers, on Pause / protection-off (`reload()`), on screen-off (a `BroadcastReceiver` registered on the **service** in `onServiceConnected`, unregistered inside `runCatching` from `onUnbind` and `onDestroy` — the MainActivity receiver is dead whenever the UI is), and when the service unbinds. The face is Canvas-drawn with real `Button`s underneath so TalkBack gets one target per action. Everything else — trigger sites, hide rules, renderer, style + on/off switch, channel — is in [25-block-screen.md](25-block-screen.md).
 
 ### 7c. NudgeOverlay (the soft nudge card)
 
@@ -450,7 +450,7 @@ See §8.
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/admin/DetoxoDeviceAdminReceiver.kt`
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/overlay/ContentCounterBubble.kt`
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/overlay/OverlayWindows.kt` (shared `overlayType` / `launchDetoxo`)
-- `android/app/src/main/kotlin/com/errorxperts/detoxo/overlay/BlockScreenOverlay.kt`, `BlockScreenRenderer.kt` (the intervention wall — [25](25-block-screen.md))
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/overlay/BlockScreenOverlay.kt`, `BlockScreenRenderer.kt`, `WallPolicy.kt` (the intervention wall and when it is raised — [25](25-block-screen.md))
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/overlay/NudgeOverlay.kt` (the soft-nudge card — [30](30-soft-nudge.md))
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/UsageQuery.kt` (pull-only `UsageStatsManager` reads — [26](26-catalog-and-usage-signal.md))
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/RuleEngine.kt` (the pushed rules snapshot — [27](27-rules-engine.md))

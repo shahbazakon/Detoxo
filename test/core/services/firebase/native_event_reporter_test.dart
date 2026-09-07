@@ -33,6 +33,7 @@ void main() {
       () => analytics.logBlockTriggered(
         platform: any(named: 'platform'),
         mode: any(named: 'mode'),
+        wall: any(named: 'wall'),
       ),
     ).thenAnswer((_) async {});
     when(() => analytics.logReelsCounted(any())).thenAnswer((_) async {});
@@ -61,12 +62,16 @@ void main() {
       'mode': 'PRESS_BACK',
       'today': 3,
       'total': 10,
+      'wall': true,
     });
     await pump();
 
     verify(
-      () =>
-          analytics.logBlockTriggered(platform: 'youtube', mode: 'PRESS_BACK'),
+      () => analytics.logBlockTriggered(
+        platform: 'youtube',
+        mode: 'PRESS_BACK',
+        wall: true,
+      ),
     ).called(1);
     verify(() => crash.setKey('blocks_today', 3)).called(1);
     verify(() => crash.setKey('blocks_total', 10)).called(1);
@@ -86,6 +91,7 @@ void main() {
       () => analytics.logBlockTriggered(
         platform: any(named: 'platform'),
         mode: any(named: 'mode'),
+        wall: any(named: 'wall'),
       ),
     );
   });

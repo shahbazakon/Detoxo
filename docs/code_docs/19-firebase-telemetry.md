@@ -6,9 +6,9 @@ in `lib/core/services/firebase/`, kept behind interfaces, and governed by strict
 
 > **This changes the app's data posture.** Earlier builds were fully offline with *nothing* leaving
 > the phone. With this layer wired, anonymised usage/crash/performance data is sent to Firebase.
-> The **local block-event history** (`AnalyticsRepository`,
-> [12-analytics-notifications-resilience.md](12-analytics-notifications-resilience.md)) is a
-> *separate* on-device buffer and still never uploads — don't conflate the two. User-facing
+> The **block counts** on the Activity tab (native `block_today` / `block_total`,
+> [12-analytics-notifications-resilience.md](12-analytics-notifications-resilience.md)) are a
+> *separate* on-device figure and still never upload — don't conflate the two. User-facing
 > disclosure lives in [`../info_docs/04-faqs.md`](../info_docs/04-faqs.md) and
 > [`../info_docs/03-permissions-explained.md`](../info_docs/03-permissions-explained.md).
 
@@ -150,7 +150,7 @@ the screen-scoped cubits). It switches on the event `type`
 
 | Native event | Analytics | Crashlytics keys |
 |---|---|---|
-| `blocked` `{platformId, mode, today, total}` | `block_triggered { platform, mode }` | `blocks_today`, `blocks_total` |
+| `blocked` `{platformId, mode, today, total, wall}` | `block_triggered { platform, mode, wall }` — `wall` is `1`/`0`, whether the block screen was shown (EVO-057; `mode` is the navigation, so the Block screen mode logs `PRESS_BACK` + `wall: 1`) | `blocks_today`, `blocks_total` |
 | `contentCounted` | `reels_counted { count }` — **batched** (§below) | — |
 | `webBlocked` `{host, mode, …}` | `web_blocked { mode }` — **host omitted** (§6) | — |
 | `blockScreenAction` `{action, referenceType, referenceId, preview}` | `block_screen_action { action }` — **referenceId omitted** (a host / package), **preview walls skipped** | — |
@@ -222,7 +222,7 @@ When adding an event, keep values to enums/counts/durations — no free-form use
 | Firebase Performance — **manual** `load_block_targets` trace (auto-trace Gradle plugin omitted: AGP-9 incompatible) | Shipped (manual traces only) |
 | Anonymous install-id user grouping | Shipped |
 | Consent gating / opt-out UI for telemetry | **Not built** — collection is unconditional (follow-up if Play data-safety / GDPR consent is required) |
-| Cloud sink for the local block-event `AnalyticsRepository` | Still not wired — that buffer remains on-device (doc 12) |
+| Cloud sink for block history | **Moot** — the Dart block-event buffer was removed; the native block counts stay on-device (doc 12 §1.1) |
 
 ---
 

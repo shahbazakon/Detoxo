@@ -205,7 +205,14 @@ always keeps whatever the repo returned.
   events; `engine/UsageQuery.kt` reads `UsageStatsManager` and knows nothing
   about it. Since insights ([28](28-insights.md)) reads per-app screen time,
   protected packages are excluded from the only output that *names* an app —
-  `DailyStats.topApps`, on screen and in the `usage_daily` document (EVO-032).
+  `DailyStats.topApps`, on screen and in the `usage_daily` document (EVO-032). A package
+  protected *after* a day was stored is scrubbed from every stored day on the next write
+  (`_scrubProtected`, [28](28-insights.md) §5) — only today and an unfinished yesterday are
+  ever recomputed, so it would otherwise stay named for up to 90 days — the record `today()`
+  serves when the engine fails to answer is scrubbed in memory before it is served, so the
+  screen keeps the promise on every exit and not only after a write — and the engine's
+  per-package block tally (`block_by_pkg_today`, EVO-059) drops it the moment
+  `pushProtectedApps` lands (`ConfigStore.scrubBlockTally`, [12](12-analytics-notifications-resilience.md) §1).
   Their time still counts toward the aggregate totals, which are not
   identifying. Any **future** consumer of `UsageQuery` must make the same
   exclusion; the promise below is not enforced by the accessibility guard.

@@ -51,8 +51,12 @@ class GlassSegmented extends StatelessWidget {
     final text = Theme.of(context).textTheme;
     final selected = selectedIndex.clamp(0, segments.length - 1);
     final compact = height < 48;
+    // A card-header control is 44 tall by design, but its touch target still
+    // has to reach the 48 dp floor (`AppSizes.minTapTarget`): the visual track
+    // keeps [height] and the hit layer spans the box padded up to the floor.
+    final reach = (AppSizes.minTapTarget - height).clamp(0.0, height) / 2;
 
-    final control = DecoratedBox(
+    final track = DecoratedBox(
       // The one place glass carries a drop shadow: a control needs to read as
       // lifted off the background, not printed onto it.
       decoration: ShapeDecoration(
@@ -94,63 +98,50 @@ class GlassSegmented extends StatelessWidget {
                   ),
                 ),
               ),
+              // Labels only — the taps and the semantics live on the hit layer
+              // below, which is the one that reaches the 48 dp floor.
               Row(
                 children: [
                   for (var i = 0; i < segments.length; i++)
                     Expanded(
-                      child: Semantics(
-                        button: true,
-                        selected: i == selected,
-                        label: segments[i].label,
-                        excludeSemantics: true,
-                        child: GestureDetector(
-                          behavior: HitTestBehavior.opaque,
-                          onTap: () {
-                            AppHaptics.selection();
-                            onChanged(i);
-                          },
-                          child: Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              if (segments[i].icon != null) ...[
-                                Icon(
-                                  segments[i].icon,
-                                  size: 18,
-                                  color: i == selected
-                                      ? accent
-                                      : glass.onGlassMuted,
-                                ),
-                                const SizedBox(width: AppSpacing.xs),
-                              ],
-                              Padding(
-                                // Breathing room so a label never touches the
-                                // pill's rim when the control hugs its content.
-                                padding: EdgeInsets.symmetric(
-                                  horizontal: compact
-                                      ? AppSpacing.sm
-                                      : AppSpacing.xs,
-                                ),
-                                child: Text(
-                                  segments[i].label,
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style:
-                                      (compact
-                                              ? text.labelMedium
-                                              : text.labelLarge)
-                                          ?.copyWith(
-                                            fontWeight: i == selected
-                                                ? FontWeight.w700
-                                                : FontWeight.w500,
-                                            color: i == selected
-                                                ? accent
-                                                : glass.onGlassMuted,
-                                          ),
-                                ),
-                              ),
-                            ],
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          if (segments[i].icon != null) ...[
+                            Icon(
+                              segments[i].icon,
+                              size: 18,
+                              color: i == selected
+                                  ? accent
+                                  : glass.onGlassMuted,
+                            ),
+                            const SizedBox(width: AppSpacing.xs),
+                          ],
+                          Padding(
+                            // Breathing room so a label never touches the
+                            // pill's rim when the control hugs its content.
+                            padding: EdgeInsets.symmetric(
+                              horizontal: compact
+                                  ? AppSpacing.sm
+                                  : AppSpacing.xs,
+                            ),
+                            child: Text(
+                              segments[i].label,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style:
+                                  (compact ? text.labelMedium : text.labelLarge)
+                                      ?.copyWith(
+                                        fontWeight: i == selected
+                                            ? FontWeight.w700
+                                            : FontWeight.w500,
+                                        color: i == selected
+                                            ? accent
+                                            : glass.onGlassMuted,
+                                      ),
+                            ),
                           ),
-                        ),
+                        ],
                       ),
                     ),
                 ],
@@ -159,6 +150,42 @@ class GlassSegmented extends StatelessWidget {
           ),
         ),
       ),
+    );
+
+    final control = Stack(
+      children: [
+        Padding(
+          padding: EdgeInsets.symmetric(vertical: reach),
+          child: ExcludeSemantics(child: track),
+        ),
+        // The hit layer: one full-height, opaque target per segment, so a
+        // 44 dp header control still takes a 48 dp tap. Column edges differ
+        // from the label columns by the track's 4 dp inset at most.
+        Positioned.fill(
+          child: Row(
+            children: [
+              for (var i = 0; i < segments.length; i++)
+                Expanded(
+                  child: Semantics(
+                    button: true,
+                    selected: i == selected,
+                    // One choice among several, not independent toggles.
+                    inMutuallyExclusiveGroup: true,
+                    label: segments[i].label,
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.opaque,
+                      onTap: () {
+                        AppHaptics.selection();
+                        onChanged(i);
+                      },
+                      child: const SizedBox.expand(),
+                    ),
+                  ),
+                ),
+            ],
+          ),
+        ),
+      ],
     );
 
     // Equal-width segments either way: inside IntrinsicWidth the flex children

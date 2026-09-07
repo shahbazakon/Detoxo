@@ -19,6 +19,7 @@ import 'package:detoxo/features/limits/limits.dart';
 import 'package:detoxo/features/permissions/domain/entities/permission_status.dart';
 import 'package:detoxo/features/permissions/presentation/permission_actions.dart';
 import 'package:detoxo/features/permissions/presentation/permissions_cubit.dart';
+import 'package:detoxo/features/settings/presentation/widgets/block_mode_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
@@ -117,11 +118,7 @@ class _SettingsScreenState extends State<SettingsScreen>
   }) async {
     final permissions = context.read<PermissionsCubit>();
     if (enabled) {
-      final status = permissions.state.firstWhere(
-        (s) => s.kind == AppPermission.notificationListener,
-        orElse: () =>
-            const PermissionStatus(kind: AppPermission.notificationListener),
-      );
+      final status = permissions.statusFor(AppPermission.notificationListener);
       if (!permissions.effectivelyGranted(status)) {
         final proceeded = await requestPermission(
           context,
@@ -189,10 +186,8 @@ class _SettingsScreenState extends State<SettingsScreen>
                   subtitle: 'Cap your reel time per day',
                   onTap: () => context.push(Routes.dailyLimit),
                 ),
-                FeatureTile(
-                  icon: Icons.touch_app_outlined,
-                  title: 'When a reel is detected',
-                  subtitle: _blockModeTitle(settings.defaultBlockMode),
+                _BlockModeTile(
+                  mode: settings.defaultBlockMode,
                   onTap: _openBlockMode,
                 ),
                 _Spaced(
@@ -370,6 +365,35 @@ class _AllowanceTile extends StatelessWidget {
   }
 }
 
+/// Block-mode entry, rendered truthfully like [_NudgeTile]: "Block screen"
+/// draws in an overlay window, so without "Display over other apps" the mode
+/// still bounces the reel but no wall can ever appear — say so and offer the
+/// fix. Only a *definite* missing grant counts (EVO-014).
+class _BlockModeTile extends StatelessWidget {
+  const _BlockModeTile({required this.mode, required this.onTap});
+
+  final BlockingMode mode;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    return BlocBuilder<PermissionsCubit, List<PermissionStatus>>(
+      builder: (context, _) {
+        final cubit = context.read<PermissionsCubit>();
+        return BlockModeTile(
+          mode: mode,
+          needsOverlay:
+              mode == BlockingMode.blockScreen &&
+              !cubit.effectivelyGranted(cubit.statusFor(AppPermission.overlay)),
+          onTap: onTap,
+          onGrant: () =>
+              unawaited(requestPermission(context, AppPermission.overlay)),
+        );
+      },
+    );
+  }
+}
+
 class _NudgeTile extends StatelessWidget {
   const _NudgeTile({
     required this.settings,
@@ -386,16 +410,14 @@ class _NudgeTile extends StatelessWidget {
     final accent = Theme.of(context).colorScheme.secondary;
     final enabled = settings.nudgeEnabled;
     return BlocBuilder<PermissionsCubit, List<PermissionStatus>>(
-      builder: (context, statuses) {
+      builder: (context, _) {
         final cubit = context.read<PermissionsCubit>();
-        final status = statuses.firstWhere(
-          (s) => s.kind == AppPermission.overlay,
-          orElse: () => const PermissionStatus(kind: AppPermission.overlay),
-        );
         // Only a *definite* missing grant is a problem — an unknown read falls
         // back to lastKnownGranted (EVO-014), so a flaky channel call never
         // accuses a working setup of being broken.
-        final blocked = enabled && !cubit.effectivelyGranted(status);
+        final blocked =
+            enabled &&
+            !cubit.effectivelyGranted(cubit.statusFor(AppPermission.overlay));
         return Column(
           children: [
             _Spaced(
@@ -413,18 +435,11 @@ class _NudgeTile extends StatelessWidget {
               ),
             ),
             if (blocked)
-              _Spaced(
-                GlassListTile(
-                  leading: const Icon(
-                    Icons.error_outline,
-                    color: AppColors.warning,
-                  ),
-                  title: 'Needs “Display over other apps”',
-                  subtitle: 'No cards can appear yet — tap to allow',
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: () => unawaited(
-                    requestPermission(context, AppPermission.overlay),
-                  ),
+              PermissionNeededRow(
+                title: 'Needs “Display over other apps”',
+                subtitle: 'No cards can appear yet — tap to allow',
+                onTap: () => unawaited(
+                  requestPermission(context, AppPermission.overlay),
                 ),
               ),
             if (enabled)
@@ -451,17 +466,16 @@ class _SuppressionTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final accent = Theme.of(context).colorScheme.secondary;
     return BlocBuilder<PermissionsCubit, List<PermissionStatus>>(
-      builder: (context, statuses) {
+      builder: (context, _) {
         final cubit = context.read<PermissionsCubit>();
-        final status = statuses.firstWhere(
-          (s) => s.kind == AppPermission.notificationListener,
-          orElse: () =>
-              const PermissionStatus(kind: AppPermission.notificationListener),
-        );
         // Only a *definite* missing grant is a problem. An unknown read is
         // covered by effectivelyGranted's lastKnownGranted fallback (EVO-014),
         // so a flaky channel call never accuses a working setup of being broken.
-        final blocked = enabled && !cubit.effectivelyGranted(status);
+        final blocked =
+            enabled &&
+            !cubit.effectivelyGranted(
+              cubit.statusFor(AppPermission.notificationListener),
+            );
         return Column(
           children: [
             _Spaced(
@@ -477,20 +491,13 @@ class _SuppressionTile extends StatelessWidget {
               ),
             ),
             if (blocked)
-              _Spaced(
-                GlassListTile(
-                  leading: const Icon(
-                    Icons.error_outline,
-                    color: AppColors.warning,
-                  ),
-                  title: 'Needs “Notification access”',
-                  subtitle: 'Nothing is being muted yet — tap to allow',
-                  trailing: const Icon(Icons.chevron_right),
-                  onTap: () => unawaited(
-                    requestPermission(
-                      context,
-                      AppPermission.notificationListener,
-                    ),
+              PermissionNeededRow(
+                title: 'Needs “Notification access”',
+                subtitle: 'Nothing is being muted yet — tap to allow',
+                onTap: () => unawaited(
+                  requestPermission(
+                    context,
+                    AppPermission.notificationListener,
                   ),
                 ),
               ),
@@ -590,25 +597,7 @@ class _UpdateButton extends StatelessWidget {
   }
 }
 
-// ── Block-mode + appearance option data ───────────────────────────────────────
-
-const _blockModes = <(BlockingMode, String, String)>[
-  (BlockingMode.pressBack, 'Press back', 'Exits the reel (recommended)'),
-  (
-    BlockingMode.killApp,
-    'Close the app',
-    'Force-closes (exit app) the offending app',
-  ),
-  (
-    BlockingMode.lockApp,
-    'Lock app',
-    'Locks the app behind your PIN, like an app locker',
-  ),
-];
-
-String _blockModeTitle(BlockingMode m) => _blockModes
-    .firstWhere((e) => e.$1 == m, orElse: () => _blockModes.first)
-    .$2;
+// ── Nudge + appearance option data ────────────────────────────────────────────
 
 /// Minutes offered for the soft nudge. Deliberately no value under 5: a card
 /// every couple of minutes stops being information and becomes nagging.
@@ -624,37 +613,6 @@ IconData _themeIcon(AppThemeMode m) => switch (m) {
   AppThemeMode.light => Icons.light_mode,
   AppThemeMode.dark => Icons.dark_mode,
 };
-
-// ── Selectable option row (used in pickers) ───────────────────────────────────
-
-class _OptionTile extends StatelessWidget {
-  const _OptionTile({
-    required this.title,
-    required this.subtitle,
-    required this.selected,
-    required this.onTap,
-  });
-
-  final String title;
-  final String subtitle;
-  final bool selected;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    return GlassListTile(
-      leading: Icon(
-        selected ? Icons.radio_button_checked : Icons.radio_button_unchecked,
-        color: selected
-            ? Theme.of(context).colorScheme.secondary
-            : context.glass.onGlassMuted,
-      ),
-      title: title,
-      subtitle: subtitle,
-      onTap: onTap,
-    );
-  }
-}
 
 // ── PIN lock: master switch + edit tile ───────────────────────────────────────
 
@@ -840,7 +798,27 @@ class _BlockModeSheet extends StatelessWidget {
   /// Applies [mode] and closes the sheet. "Lock app" gates the reel behind the
   /// user's PIN, so picking it without a PIN configured can't enforce anything —
   /// we send the user to PIN setup instead of silently selecting a dead mode.
+  /// "Block screen" needs the overlay grant the same way. Overlay has no
+  /// in-app disclosure (`permission_actions.dart`), so [requestPermission]
+  /// opens Android's own screen directly and returns false only for the
+  /// restricted-settings recovery sheet. The mode still commits while the
+  /// user is on that screen — "not granted yet" is not "not wanted" — and
+  /// [_BlockModeTile] renders the gap truthfully. The mode carries its own
+  /// wall (native `WallPolicy` bypasses the Appearance switch for it), so
+  /// nothing on the Appearance screen is touched here.
   Future<void> _select(BuildContext context, BlockingMode mode) async {
+    if (mode == BlockingMode.blockScreen) {
+      final permissions = context.read<PermissionsCubit>();
+      if (!permissions.effectivelyGranted(
+        permissions.statusFor(AppPermission.overlay),
+      )) {
+        final proceeded = await requestPermission(
+          context,
+          AppPermission.overlay,
+        );
+        if (!proceeded || !context.mounted) return;
+      }
+    }
     final needsPin =
         mode == BlockingMode.lockApp &&
         !context.read<PinCubit>().state.isConfigured;
@@ -868,20 +846,9 @@ class _BlockModeSheet extends StatelessWidget {
   Widget build(BuildContext context) {
     return BlocBuilder<SettingsCubit, AppSettings>(
       builder: (context, settings) {
-        return Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            for (final e in _blockModes)
-              Padding(
-                padding: const EdgeInsets.only(bottom: AppSpacing.xs),
-                child: _OptionTile(
-                  title: e.$2,
-                  subtitle: e.$3,
-                  selected: settings.defaultBlockMode == e.$1,
-                  onTap: () => unawaited(_select(context, e.$1)),
-                ),
-              ),
-          ],
+        return BlockModeOptions(
+          selected: settings.defaultBlockMode,
+          onSelect: (m) => unawaited(_select(context, m)),
         );
       },
     );
@@ -908,7 +875,7 @@ class _NudgeThresholdSheet extends StatelessWidget {
             for (final m in _nudgeMinutes)
               Padding(
                 padding: const EdgeInsets.only(bottom: AppSpacing.xs),
-                child: _OptionTile(
+                child: OptionTile(
                   title: '$m minutes',
                   subtitle: 'Counted from opening the app, not across the day',
                   selected: settings.nudgeThresholdMinutes == m,

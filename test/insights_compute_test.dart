@@ -257,5 +257,51 @@ void main() {
       expect(s.firstPickupMs, isNull);
       expect(s.complete, isFalse);
     });
+
+    test('wrong values are coerced, not only wrong types', () {
+      // Negative durations floor at zero; topApps is re-sorted on read, so
+      // the screen's "first is busiest" assumption holds for any document.
+      final s = DailyStats.fromJson('02-09-2026', const {
+        'screenTimeMs': -5,
+        'distractionMs': -1,
+        'topApps': [
+          {'package': 'pkg.small', 'ms': 10},
+          {'package': 'pkg.big', 'ms': 30},
+          {'package': 'pkg.negative', 'ms': -20},
+        ],
+      });
+
+      expect(s.screenTimeMs, 0);
+      expect(s.distractionMs, 0);
+      expect(s.topApps.map((a) => a.package), [
+        'pkg.big',
+        'pkg.small',
+        'pkg.negative',
+      ]);
+      expect(s.topApps.last.foregroundMillis, 0);
+    });
+  });
+
+  group('computeDailyStats — window bounds on usage rows', () {
+    test('a row longer than the window is clipped to it', () {
+      // `queryAndAggregateUsageStats` hands back bucket totals that are not
+      // clipped to the window: at 00:10 the "day" bucket can still carry
+      // most of yesterday, which used to persist as a five-hour "today".
+      final s = _compute(
+        usage: [_use(_reels, 300)],
+        end: DateTime(2026, 9, 2, 0, 10),
+      );
+
+      expect(s.screenTimeMs, 10 * 60000);
+      expect(s.distractionMs, 10 * 60000);
+      expect(s.topApps.single.foregroundMillis, 10 * 60000);
+    });
+
+    test('rows inside the window are untouched', () {
+      final s = _compute(usage: [_use(_reels, 70), _use(_drive, 20)]);
+
+      expect(s.screenTimeMs, 90 * 60000);
+      expect(s.topApps.first.foregroundMillis, 70 * 60000);
+    });
   });
 }

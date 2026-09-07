@@ -15,6 +15,7 @@ import 'package:detoxo/features/access_protection/domain/repositories/pin_reposi
 import 'package:detoxo/features/access_protection/presentation/pin_auto_relock.dart';
 import 'package:detoxo/features/access_protection/presentation/pin_cubit.dart';
 import 'package:detoxo/features/additional_feature/app_feedback/app_feedback.dart';
+import 'package:detoxo/features/analytics/analytics.dart';
 import 'package:detoxo/features/blocking/block_screen/domain/repositories/block_screen_repository.dart';
 import 'package:detoxo/features/blocking/block_screen/presentation/block_screen_style_cubit.dart';
 import 'package:detoxo/features/blocking/blocklist/presentation/targets_cubit.dart';
@@ -128,6 +129,17 @@ class DetoxoApp extends StatelessWidget {
         // "Days under your daily limit" streak — fed by the dashboard hero and
         // read back into its stat pill.
         BlocProvider(create: (_) => StreakCubit(sl<StreakRepository>())),
+        // EVO-058: the Activity tab's screen-time rollups. Lazy, so nothing
+        // is computed at boot — the first Activity open constructs it — and
+        // app-wide so the tab (rebuilt on every switch) and the drawer route
+        // share one instance: a later open paints the last numbers at once
+        // and refreshes in place instead of flashing a spinner and running
+        // two channel queries per mount. Not `..load()`ed: the view refreshes
+        // on mount.
+        BlocProvider(
+          create: (_) =>
+              InsightsCubit(sl<InsightsRepository>(), sl<EngineRepository>()),
+        ),
         // Blocking rules (schedules / limits) + THE Dart push path for the
         // native rules snapshot: cold start via `runBootstrap`, resume via
         // AppResumeSync, every edit, and native `ruleBoundary` events.

@@ -471,6 +471,100 @@ void main() {
     test('cached() returns null for an unknown day', () {
       expect(_repo(store: _FakeStore()).cached('31-12-1999'), isNull);
     });
+
+    test('the decode memo never masks a wipe or an outside write', () async {
+      final store = _FakeStore();
+      final repo = _repo(store: store);
+      await repo.today();
+      expect(repo.cached(_todayKey), isNotNull);
+
+      // "Reset app data" clears the box under the singleton repo.
+      store.values.clear();
+      expect(repo.cached(_todayKey), isNull);
+
+      // A document written by someone else is read, not the memo.
+      store.values[StoreKeys.usageDaily] = jsonEncode({
+        'days': {
+          '15-08-2026': {'screenTimeMs': 42, 'complete': true},
+        },
+      });
+      expect(repo.cached('15-08-2026')?.screenTimeMs, 42);
+      expect(repo.cached(_todayKey), isNull);
+    });
+  });
+
+  group('protected apps leave the whole document (doc 24 §6)', () {
+    const upi = 'com.phonepe.app';
+    const old = '25-08-2026';
+
+    test(
+      'a package protected after the fact leaves every stored day',
+      () async {
+        // A complete day from before the app was protected still names it.
+        // Only today and an unfinished yesterday are ever recomputed, so
+        // without a scrub it would stay there for up to 90 days.
+        final store = _FakeStore()
+          ..values[StoreKeys.usageDaily] = jsonEncode({
+            'days': {
+              old: {
+                'screenTimeMs': 3000000,
+                'topApps': [
+                  {'package': upi, 'ms': 2400000},
+                  {'package': _reels, 'ms': 600000},
+                ],
+                'complete': true,
+              },
+            },
+          });
+
+        await _repo(
+          store: store,
+          usage: _FakeUsage(
+            usage: const [AppUsage(package: _reels, foregroundMillis: 600000)],
+          ),
+        ).today();
+
+        final days = _days(store);
+        expect(jsonEncode(days), isNot(contains(upi)));
+        // The rest of the record — and the day itself — survive the scrub.
+        final oldDay = days[old] as Map<String, dynamic>;
+        final survivor = (oldDay['topApps'] as List).single as Map;
+        expect(survivor['package'], _reels);
+        expect(oldDay['screenTimeMs'], 3000000);
+        expect(oldDay['complete'], isTrue);
+      },
+    );
+
+    test(
+      'the engine-failure fallback is scrubbed before it is served',
+      () async {
+        // Today's record was written before the app was protected; the engine
+        // then fails to answer, so `today()` serves that record instead of
+        // recomputing. Only the granted exit writes — and only the write
+        // scrubbed — yet the screen renders `topApps` by name from this one.
+        final store = _FakeStore()
+          ..values[StoreKeys.usageDaily] = jsonEncode({
+            'days': {
+              _todayKey: {
+                'screenTimeMs': 3000000,
+                'topApps': [
+                  {'package': upi, 'ms': 2400000},
+                  {'package': _reels, 'ms': 600000},
+                ],
+              },
+            },
+          });
+
+        final result = await _repo(
+          store: store,
+          usage: _FakeUsage(result: const UsageUnavailable()),
+        ).today();
+
+        final served = result.dataOrNull!;
+        expect(served.screenTimeMs, 3000000);
+        expect(served.topApps.map((a) => a.package).toList(), [_reels]);
+      },
+    );
   });
 }
 

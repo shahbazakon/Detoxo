@@ -84,7 +84,7 @@ Method-name constants live in `ChannelMethods` (Dart) and are matched by string 
 | Key | Type (wire) | Notes |
 |---|---|---|
 | `activePlan` | `String` | `BlockingPlan.wire`: `BLOCK_ALL` \| `CURIOUS` \| `ONE_REEL` \| `PAUSED`. **`CURIOUS` = the "Conscious" plan** (internal token kept verbatim; UI label is "Conscious"). Stored **verbatim** — `pushSettings` no longer resets the earn-bank on a `*→CURIOUS` transition; the fresh-start reset is the separate `resetConsciousBank` command, so an auto-revert into Conscious keeps the bank. |
-| `defaultBlockMode` | `String` | `PRESS_BACK` \| `KILL_APP` \| `LOCK_SCREEN` \| `NONE` |
+| `defaultBlockMode` | `String` | `PRESS_BACK` \| `BLOCK_SCREEN` \| `KILL_APP` \| `LOCK_APP` \| `LOCK_SCREEN` \| `NONE`. `BLOCK_SCREEN` navigates like `PRESS_BACK` and is the only mode that raises the wall on a plan block (`WallPolicy`, [03](03-detection-engine.md)); `LOCK_APP` degrades to a back press natively. Any other string is **ignored** (`CommandHandler.BLOCK_MODES` whitelist) so the stored value is always one Dart can round-trip. |
 | `enabledPlatforms` | `List<String>` | stored as a set |
 | `vibration` | `bool` | |
 | `masterEnabled` | `bool` | engine master switch |
@@ -181,7 +181,7 @@ orphans).
 | `requestOverlayPermission` | — | `Boolean` | `requestOverlay()` |
 | `hasUsageAccess` | — | `Boolean` (`AppOpsManager` GET_USAGE_STATS) | *(none — read tri-state via `invokeBoolOrNull` from the permission repository)* |
 | `openUsageAccessSettings` | — | `Boolean` | `openUsageAccess()` |
-| `queryAppUsage` | `{startMillis: Long, endMillis: Long}` | `List<{package: String, foregroundMillis: Long}>` (`foregroundMillis > 0` only) — **throws** `PlatformException("BAD_ARGS")` on missing/inverted bounds and `("USAGE_ACCESS_DENIED")` without the grant; `("USAGE_QUERY_FAILED")` if the OS query throws. Off-thread on `ioExecutor`, posted back on the main looper | `queryAppUsage({startMillis, endMillis})` via `invokeOrThrow` — the usage repository maps the errors ([26](26-catalog-and-usage-signal.md)) |
+| `queryAppUsage` | `{startMillis: Long, endMillis: Long}` | `List<{package: String, foregroundMillis: Long}>` (`foregroundMillis > 0` only) — **throws** `PlatformException("BAD_ARGS")` on missing/inverted bounds and `("USAGE_ACCESS_DENIED")` without the grant; `("USAGE_QUERY_FAILED")` if the OS query throws — except a `SecurityException` from the query itself (a grant revoked between the main-thread check and the IO-thread query), which is `USAGE_ACCESS_DENIED`, so Dart never serves the cached day as if the grant were live. Off-thread on `ioExecutor`, posted back on the main looper | `queryAppUsage({startMillis, endMillis})` via `invokeOrThrow` — the usage repository maps the errors ([26](26-catalog-and-usage-signal.md)) |
 | `queryUsageEvents` | `{startMillis: Long, endMillis: Long}` | `List<{package: String, type: Int, timestampMillis: Long}>`, ascending, `type ∈ {1, 18}` only; same errors as `queryAppUsage` | `queryUsageEvents({startMillis, endMillis})` |
 | `isIgnoringBatteryOptimizations` | — | `Boolean` | *(none — read tri-state via `invokeBoolOrNull` from the permission repository)* |
 | `requestIgnoreBatteryOptimizations` | — | `Boolean` (launches `ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS` with the package Uri — the one-tap exemption dialog; the manifest holds `REQUEST_IGNORE_BATTERY_OPTIMIZATIONS`) | `requestIgnoreBattery()` |
@@ -280,7 +280,7 @@ setting the plan to `CURIOUS`.
 
 | Method | Args | Returns (map shape) | Dart wrapper |
 |---|---|---|---|
-| `blockStats` | — | `{today: Int, total: Int, date: String}` — `date` is today's `dd-MM-yyyy` key (`DateKeys.today()`); `ConfigStore.blockStats(dateKey)` does **read-time day rollover**, so after midnight `today` reads `0` before the day's first block instead of yesterday's number | `blockStats() → Map` |
+| `blockStats` | — | `{today: Int, total: Int, date: String, yesterday: Int, byPackage: Map<String, Int>}` — `date` is today's `dd-MM-yyyy` key (`DateKeys.today()`); `ConfigStore.blockStats(dateKey, yesterdayKey)` does **read-time day rollover**, so after midnight `today` reads `0` and `byPackage` `{}` before the day's first block instead of yesterday's numbers. `yesterday` is derived from the rotated slot only while its date is exactly yesterday (`BlockTally.yesterday`, EVO-060); `byPackage` is today's bounded per-package tally (≤ 20 entries, never a protected app, EVO-059) | `blockStats() → Map` |
 | `consciousState` | — | `{bankMs: Long, maxBankMs: Long, watching: Bool, blocked: Bool, active: Bool}` | `consciousState() → Map` |
 | `contentCounterSnapshot` | — | `{enabled: Bool, bubbleEnabled: Bool, today: Int, total: Int, date: String, perAppToday: Map<String,Int>, perAppTotal: Map<String,Int>, timeTodayMs: Long, timeTotalMs: Long, bubbleStyle: String, widgetStyle: String}` | `contentCounterSnapshot() → Map` |
 | `deviceInfo` | — | `{brand, manufacturer, model, sdkInt}` | *(no Dart wrapper)* |
@@ -382,7 +382,7 @@ Every payload carries `type` plus the fields below.
 | `type` | Emitted by | Payload (beyond `type`) | Dart consumer |
 |---|---|---|---|
 | `serviceStatus` | `DetoxoAccessibilityService` (connect / interrupt / unbind) | `{running: Bool}` | `engine_repository_impl.dart` |
-| `blocked` | `DetoxoAccessibilityService.onDetected` / `onAppBlocked` | `{package: String, platformId: String, mode: String, today: Int, total: Int, reason: "PLAN" \| "APP_BLOCK" \| "SCHEDULE" \| "DAILY_LIMIT"}` — `platformId` is `"rule"` for a rule's HOME bounce, `"app_block"` for an App Blocker lock | `engine_repository_impl.dart` (status + block history; `reason` is not read) |
+| `blocked` | `DetoxoAccessibilityService.onDetected` / `onAppBlocked` | `{package: String, platformId: String, mode: String, today: Int, total: Int, yesterday: Int, byPackage: Map<String, Int>, reason: "PLAN" \| "APP_BLOCK" \| "SCHEDULE" \| "DAILY_LIMIT", wall: Bool}` — `platformId` is `"rule"` for a rule's HOME bounce, `"app_block"` for an App Blocker lock; `wall` (reel site, EVO-057) is whether the block screen was shown — `mode` is the navigation, so the Block screen mode reports `PRESS_BACK` + `wall: true` | `engine_repository_impl.dart` (`BlockEvent.wall`, default false; `reason` is not read); `native_event_reporter.dart` → `block_triggered { platform, mode, wall }` |
 | `webBlocked` | `DetoxoAccessibilityService.handleBrowser` | `{source: "RULE" \| "ADULT", mode: "PRESS_BACK", today: Int, total: Int, host?: String}` — `host` only for `RULE` hits; adult-list blocks are counted, never named (EVO-018) | `web_block_stats_repository_impl.dart` |
 | `consciousState` | `DetoxoAccessibilityService` (1 Hz accountant) | `{bankMs: Long, maxBankMs: Long, watching: Bool, blocked: Bool, active: Bool}` | `engine_repository_impl.dart` |
 | `reelSessionState` | `DetoxoAccessibilityService` (One Reel / Unblock allow/block/arm) | `{consumed: Int, allowance: Int, blocked: Bool, active: Bool}` | `engine_repository_impl.dart` |

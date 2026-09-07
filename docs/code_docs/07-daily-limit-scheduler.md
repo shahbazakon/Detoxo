@@ -274,7 +274,10 @@ permission, by riding the rules engine ([27-rules-engine.md](27-rules-engine.md)
    the limit trips even under One Reel / Unblock / Conscious allowance:
    `onDetected(..., ruleReason = "DAILY_LIMIT")` bounces the reel and raises the
    wall with **"Your daily limit is used up"** ([25](25-block-screen.md)). The
-   `blocked` event carries `reason: "DAILY_LIMIT"`.
+   `blocked` event carries `reason: "DAILY_LIMIT"`. **The wall is forced here**
+   (`WallPolicy.forced`): it shows in every block mode and even with the
+   Appearance "Block screen" switch off — the only other way to get a wall on a
+   reel block is the `BLOCK_SCREEN` mode. Only the overlay grant can stop it.
 4. Midnight needs no Dart: the counter's `timeTodayMs` rolls with its day key, so
    the meter reads zero again and the block lifts. `main.dart` re-syncs the
    snapshot whenever the limit changes (a `BlocListener<DailyLimitCubit>`), and
@@ -287,9 +290,15 @@ depends on the reel counter: with counting **off**, `timeTodayMs` does not
 accrue and the limit cannot trip — the screen's banner says so
 (`ContentCount.enabled == false` → "Reel counter is off").
 
-The screen's banner now reads: *"When today's reel time reaches the limit,
-Detoxo blocks every reel feed until midnight. A Pause lifts it like any other
-block."*
+The screen's banner is a three-way branch: counter off → "Reel counter is off";
+overlay grant **definitely** missing (`ContentCount.overlayGranted == false`, the
+EVO-014 tri-state) → *"Block screen needs “Display over other apps” — Detoxo
+still closes every reel feed until midnight, but the block screen can only appear
+once you allow the permission"*; otherwise *"When today's reel time reaches the
+limit, Detoxo blocks every reel feed until midnight and shows the block screen in
+the app, whatever your block mode. A Pause lifts it like any other block."* The
+forced wall skips the Appearance switch, never the grant, so the banner must not
+promise it without one.
 
 ### The daily limit and a per-target unblock (M8)
 

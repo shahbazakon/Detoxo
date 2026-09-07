@@ -80,7 +80,7 @@ not on the wall, so `offersUnblock` is unchanged. That is the accepted ceiling.
 
 `ActiveUnblocksCard` (dashboard) is the one place that lists what is open right
 now, including a `REEL` grant, which had no surface at all. `OverrideHistoryCard`
-(Activity → Events) says what the override ledger recorded — the reasons the
+(the Activity tab, under the By app section) says what the override ledger recorded — the reasons the
 user picked themselves. Both hide entirely when there is nothing true to say.
 
 ### Durations

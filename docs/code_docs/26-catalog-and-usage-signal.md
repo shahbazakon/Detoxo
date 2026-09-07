@@ -113,7 +113,11 @@ caller's cache, not this layer's.
 `result.error("BAD_ARGS", …)` on missing/inverted bounds and `result.error("USAGE_ACCESS_DENIED",
 …)` when `hasUsageAccess()` (the existing AppOps check) is false, then runs the query on the
 existing `ioExecutor` and posts back on the main looper (the `installedApps` pattern); a query
-failure is `result.error("USAGE_QUERY_FAILED", …)`. These are the **only** `result.error` calls in
+failure is `result.error("USAGE_QUERY_FAILED", …)` — unless the query itself threw a
+`SecurityException` (the grant revoked between the main-thread check and the IO-thread query, or
+an OS that refuses the query outright), which is reported as `USAGE_ACCESS_DENIED`: a denial
+reported as a failure made Dart serve the cached day as if the grant were still live. These are
+the **only** `result.error` calls in
 the native tree: an empty list would be indistinguishable from a quiet day and would let a screen
 print a confident `0 m` (EVO-014).
 

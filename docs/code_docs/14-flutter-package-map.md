@@ -71,7 +71,7 @@ launcher icons) — run it bare for a menu or pass an entry name/number.
 | Package | Version | Status | Role in Detoxo |
 | --- | --- | --- | --- |
 | `hive` | `^2.2.3` | **Wired (backing)** | Key-value box engine. |
-| `hive_flutter` | `^1.1.0` | **Wired (backing)** | Flutter init for Hive. Together they back `LocalStore` (`lib/core/storage/local_store.dart`), which opens a single `Box<String>` named `detoxo` and exposes a deliberately **simple key→JSON-string** seam (`read`/`write`/`delete`). The rest of the app never touches Hive types directly. Keys are centralised in `StoreKeys` (`app_settings`, `web_blocklist`, `app_blocklist`, `daily_limit`, `premium_dev_unlock`, `analytics_events`, `dismissed_notices`, `install_id`, …). |
+| `hive_flutter` | `^1.1.0` | **Wired (backing)** | Flutter init for Hive. Together they back `LocalStore` (`lib/core/storage/local_store.dart`), which opens a single `Box<String>` named `detoxo` and exposes a deliberately **simple key→JSON-string** seam (`read`/`write`/`delete`). The rest of the app never touches Hive types directly. Keys are centralised in `StoreKeys` (`app_settings`, `web_blocklist`, `app_blocklist`, `daily_limit`, `premium_dev_unlock`, `usage_daily`, `dismissed_notices`, `install_id`, …). |
 | `flutter_secure_storage` | `^10.3.1` | **Wired** | Secret partition of `LocalStore` (`readSecret`/`writeSecret`). Holds the PIN config (`StoreKeys.pinConfig`). `clearAll()` wipes both the Hive box and every secret for "Reset app data". |
 | `local_auth` | `^3.0.1` | **Wired** | Biometric / device-credential unlock for the app-lock (PIN) flow (`lib/features/access_protection/`). |
 | `crypto` | `^3.0.6` | **Wired** | Hashing the app-lock PIN before storage — `lib/features/access_protection/domain/pin_hasher.dart` (PINs are never stored in plaintext). |
@@ -265,5 +265,4 @@ belongs in `tool/branding/` for the same reason.
 - `lib/core/design_system/foundations/animated_icons.dart`
 - `lib/features/onboarding/presentation/onboarding_screen.dart`
 - `lib/features/blocking/blocklist/presentation/widgets/block_app_tile.dart`
-- `lib/features/content_counter/content_counter_core/presentation/widgets/reel_counter_card.dart`
 - `lib/main.dart`

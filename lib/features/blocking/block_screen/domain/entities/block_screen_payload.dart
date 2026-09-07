@@ -17,8 +17,9 @@ enum BlockReferenceType {
   );
 }
 
-/// Why the wall was raised. `dailyLimit` / `schedule` are reserved for the
-/// rules engine (M3); native never emits them yet.
+/// Why the wall was raised. `dailyLimit` / `schedule` come from the rules
+/// engine; a `dailyLimit` wall is forced on native regardless of block mode
+/// or the Appearance switch.
 enum BlockReason {
   plan('PLAN'),
   appBlock('APP_BLOCK'),

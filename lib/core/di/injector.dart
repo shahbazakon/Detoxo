@@ -8,8 +8,6 @@ import 'package:detoxo/features/additional_feature/app_feedback/data/repositorie
 import 'package:detoxo/features/additional_feature/app_feedback/domain/repositories/feedback_repository.dart';
 import 'package:detoxo/features/additional_feature/app_upgrader/data/repositories/upgrader_app_upgrade_service.dart';
 import 'package:detoxo/features/additional_feature/app_upgrader/domain/repositories/app_upgrade_service.dart';
-import 'package:detoxo/features/analytics/data/repositories/analytics_repository_impl.dart';
-import 'package:detoxo/features/analytics/domain/repositories/analytics_repository.dart';
 import 'package:detoxo/features/analytics/insights/data/repositories/insights_repository_impl.dart';
 import 'package:detoxo/features/analytics/insights/domain/repositories/insights_repository.dart';
 import 'package:detoxo/features/blocking/block_screen/data/repositories/block_screen_repository_impl.dart';
@@ -118,9 +116,6 @@ Future<void> configureDependencies() async {
       () => BypassLedgerRepositoryImpl(sl()),
     )
     ..registerLazySingleton<StreakRepository>(() => StreakRepositoryImpl(sl()))
-    ..registerLazySingleton<AnalyticsRepository>(
-      () => AnalyticsRepositoryImpl(sl()),
-    )
     // Day rollups over the usage layer (real screen time, pickups, top apps).
     ..registerLazySingleton<InsightsRepository>(
       () => InsightsRepositoryImpl(sl(), sl(), sl(), sl()),

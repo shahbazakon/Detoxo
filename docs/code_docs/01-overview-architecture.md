@@ -167,7 +167,7 @@ settings re-push) every time, the heavy config/blocklist re-push at most every
   singleton, plus a lazy `EngineChannel`.
 - Registers every repository **interface → implementation** lazily
   (`ConfigRepository`, `SettingsRepository`, `EngineRepository`,
-  `PermissionRepository`, `PinRepository`, the `limits` repos, `AnalyticsRepository`,
+  `PermissionRepository`, `PinRepository`, the `limits` repos, `InsightsRepository`,
   `ContentRepository`, the content-counter repos, `FeedbackRepository`, …).
 
 Registering by interface keeps Cubits testable — a fake repo swaps in without
@@ -306,17 +306,14 @@ the day something actually links to a tab.
 
 `DashboardTab` renders its sections in order: `DashboardTopBar` → `_Hero`
 (`CommandCenterCard`) → `_ModeSection` (`ModeSelector`) → `_SessionBanners` →
-`ProtectionStatusCard` → `BlockerSection`. The house split is that a section
+`RulesCard` → `BlockerSection`. The house split is that a section
 needing cubits stays inline in `dashboard_tab.dart` as a private `_Xxx` widget
-while its presentational half lives in `presentation/widgets/`.
+while its presentational half lives in `presentation/widgets/`. (The former
+`ProtectionStatusCard` slot is now the `RulesCard`, styled as that status row;
+service status is surfaced by the permission gate / setup screen instead.)
 
-Two rebuild/state notes on the dashboard (EVO-014 + polish):
+Rebuild/state note on the dashboard (polish):
 
-- `ProtectionStatusCard` renders `ServiceStatus.unknown` (the cold-start
-  default of `ServiceSnapshot` — the status read simply hasn't answered) as a
-  **neutral "Protection Status / Checking…" card**, not the danger "Protection
-  off" card; the next refresh (resume/stream) settles it. A scare card that
-  cries wolf on every hiccup teaches the user to ignore the real one.
 - The `_Hero`'s Conscious countdown uses `context.select` on a **record of the
   four displayed fields** so the 1 Hz Conscious tick doesn't rebuild the whole
   hero, and the Conscious session banner is extracted into a private

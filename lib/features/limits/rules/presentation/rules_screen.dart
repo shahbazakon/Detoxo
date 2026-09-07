@@ -1,5 +1,4 @@
 import 'package:detoxo/core/design_system/design_system.dart';
-import 'package:detoxo/core/di/injector.dart';
 import 'package:detoxo/core/navigation/routes.dart';
 import 'package:detoxo/core/utils/clock_format.dart';
 import 'package:detoxo/core/widgets/common_widgets.dart';
@@ -266,8 +265,10 @@ class _UsageAccessHint extends StatelessWidget {
         ),
         SecondaryButton(
           label: 'Grant usage access',
+          // The one entry point: disclosure, the restricted-settings
+          // walkthrough and the cubit re-read live there, not here.
           onPressed: () =>
-              sl<PermissionRepository>().request(AppPermission.usageAccess),
+              requestPermission(context, AppPermission.usageAccess),
         ),
         const SizedBox(height: AppSpacing.md),
       ],

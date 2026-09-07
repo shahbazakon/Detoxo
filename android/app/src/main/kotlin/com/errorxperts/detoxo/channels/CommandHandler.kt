@@ -59,12 +59,17 @@ class CommandHandler(
         this.activity = activity
     }
 
-    private companion object {
+    companion object {
         /** Conscious plan token (shares the legacy "CURIOUS" wire). */
         const val PLAN_CONSCIOUS = "CURIOUS"
 
         /** One Reel / Unblock plan token (allow N reels, then re-block). */
         const val PLAN_ONE_REEL = "ONE_REEL"
+
+        /** `BlockingMode.wire` in `blocking/shared/domain/entities/enums.dart`, verbatim. */
+        val BLOCK_MODES = setOf(
+            "PRESS_BACK", "BLOCK_SCREEN", "KILL_APP", "LOCK_APP", "LOCK_SCREEN", "OVERLAY", "NONE",
+        )
     }
 
     override fun onMethodCall(call: MethodCall, result: MethodChannel.Result) {
@@ -89,7 +94,13 @@ class CommandHandler(
                 call.argument<String>("activePlan")?.let { plan ->
                     store.activePlan = plan
                 }
-                call.argument<String>("defaultBlockMode")?.let { store.defaultBlockMode = it }
+                // Whitelisted: the stored string is read as an enum by
+                // resolveBlockMode and WallPolicy, and Dart maps an unknown
+                // value to PRESS_BACK — storing it raw would let the two
+                // sides disagree until the next push.
+                call.argument<String>("defaultBlockMode")
+                    ?.takeIf { it in BLOCK_MODES }
+                    ?.let { store.defaultBlockMode = it }
                 call.argument<List<String>>("enabledPlatforms")?.let {
                     store.enabledPlatforms = it.toSet()
                 }
@@ -154,6 +165,9 @@ class CommandHandler(
                     val next = list.filterIsInstance<String>().toSet()
                     if (next != store.protectedPackages) {
                         store.protectedPackages = next
+                        // Today's per-package block tally must forget it too —
+                        // "nothing about them is stored" covers the past day.
+                        store.scrubBlockTally(next)
                         DetoxoAccessibilityService.instance?.refreshProtectedPackages()
                     }
                 }
@@ -333,7 +347,20 @@ class CommandHandler(
                     mainHandler.post {
                         out.fold(
                             { result.success(it) },
-                            { result.error("USAGE_QUERY_FAILED", it.message, null) },
+                            {
+                                // The grant was checked above, on the main thread,
+                                // and the query ran here later: a revocation in
+                                // between (or an OS that refuses the query outright)
+                                // surfaces as a SecurityException. That is a denial,
+                                // not a failure — reported as a failure, Dart serves
+                                // the cached day as if the grant were still live.
+                                val code = if (it is SecurityException) {
+                                    "USAGE_ACCESS_DENIED"
+                                } else {
+                                    "USAGE_QUERY_FAILED"
+                                }
+                                result.error(code, it.message, null)
+                            },
                         )
                     }
                 }
@@ -421,8 +448,13 @@ class CommandHandler(
                 ),
             )
             "blockStats" -> {
-                val (today, total, date) = store.blockStats(DateKeys.today())
-                result.success(mapOf("today" to today, "total" to total, "date" to date))
+                val s = store.blockStats(DateKeys.today(), DateKeys.dayBefore())
+                result.success(
+                    mapOf(
+                        "today" to s.today, "total" to s.total, "date" to s.date,
+                        "yesterday" to s.yesterday, "byPackage" to s.byPackage,
+                    ),
+                )
             }
             "contentCounterSnapshot" -> {
                 // Prefer the live service (fresh in-memory bubble/widget state),

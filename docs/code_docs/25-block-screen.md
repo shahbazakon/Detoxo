@@ -17,7 +17,9 @@ existing debounced block regions, and never inside `matches()`.
 - The wall **accompanies** the existing navigation (BACK for reels/websites, HOME for
   whole-app blocks); it never replaces it. With no overlay grant, with the wall switched off, or
   when the window cannot be added, the trigger site falls back to the legacy toast and the user is
-  still bounced.
+  still bounced. A reel block only *wants* a wall in the **Block screen** mode or when forced
+  (`WallPolicy`, [03](03-detection-engine.md) §wall rule); other modes bounce with no wall and no
+  toast, by design.
 - `BlockScreenOverlay.show(...)` returns `false` in every fail case; the trigger site shows the
   toast only then, so the two never stack.
 - A `BadTokenException` (overlay grant revoked between the check and the add) ejects to the
@@ -45,7 +47,9 @@ service callbacks and the MethodChannel run there, so no locking.
 attached wall for the **same** payload (the opens count aside) returns `true` and only widens its
 stays-over set; a standing wall for a **newer** payload (a drained bank, a fresh count) is rebuilt
 in place; a detached tracked window is torn down and re-added. Only then is the persisted style
-read (`enabled == false` → `false`), then the overlay grant: a denied check is memoised for
+read (`enabled == false` → `false`, unless `WallPolicy.bypassesSwitch(payload,
+store.defaultBlockMode)` — a forced block or a reel wall in the Block screen mode; a `preview`
+always honours the switch; the grant is never skipped), then the overlay grant: a denied check is memoised for
 `OVERLAY_RECHECK_MS = 5000` so a missing grant costs one binder call per 5 s, not one per block;
 the once-per-process `Log.w` names the reason. After a successful add the overlay arms the ghost
 exit's countdown and kicks off the opens-today query (§5).
@@ -90,15 +94,16 @@ over. When the service reports the foreground moved *within* the stays-over set 
 ## 3. Trigger sites — `accessibility/DetoxoAccessibilityService.kt`
 
 `raiseWall(payload, staysOver, raisedOver)` = `BlockScreenOverlay.show(this, payload.sanitised(),
-staysOver, raisedOver = raisedOver)`. Called after the `ServiceEventBus.post` and before the
+staysOver, raisedOver = raisedOver)`; the switch bypass is the overlay's own call (§2).
+Called before the `ServiceEventBus.post` (the event carries `wall: shown`, EVO-057) and before the
 existing navigation, always inside a debounced region (`BLOCK_DEBOUNCE_MS` 1200 for reels and apps,
 the per-host web debounce), so `show()` is never hammered per event. Every payload carries
 `packageName` (the app under the wall) for the opens-today query.
 
 | Site | Payload | `staysOver` |
 |---|---|---|
-| `onDetected` (reel surface blocked) | `REEL`, `referenceId = platformId`, `displayName = platformName(pkg, platformId)` (the config's `platformName`, else the app label), `blockReason = PLAN`, `plan = activePlan`, `allowance = store.reelAllowance`, `todayCount = contentCounter.todayCount()` (**-1 when counting is off** — a stale number is never shown), `allowanceLeft` (One Reel / Unblock only), `bankMs` (Conscious only). Skipped when the resolved block mode is `NONE`: nothing navigates then, and a wall over a still-playing reel would be a trap. | `backStaysOver(pkg)` |
-| `accountConscious` drain-to-empty (the 1 Hz accountant's own BACK when the bank hits 0) | the same reel payload for the foreground reel platform with `bankMs = 0`; skipped for a protected foreground | `backStaysOver(foregroundPkg)` |
+| `onDetected` (reel surface blocked) | `REEL`, `referenceId = platformId`, `displayName = platformName(pkg, platformId)` (the config's `platformName`, else the app label), `blockReason = PLAN`, `plan = activePlan`, `allowance = store.reelAllowance`, `todayCount = contentCounter.todayCount()` (**-1 when counting is off** — a stale number is never shown), `allowanceLeft` (One Reel / Unblock only), `bankMs` (Conscious only). **Gated by `WallPolicy.reelWall(store.defaultBlockMode, mode, forced)`**: raised only when the user's mode is `BLOCK_SCREEN` or the block is forced (`DAILY_LIMIT`, `SCHEDULE`, or Conscious with the bank at zero); never when the resolved mode is `NONE` — nothing navigates then, and a wall over a still-playing reel would be a trap. Wanted but not shown → `toast_blocked` with the platform name (EVO-056). | `backStaysOver(pkg)` |
+| `accountConscious` drain-to-empty (the 1 Hz accountant's own BACK when the bank hits 0) | the same reel payload for the foreground reel platform with `bankMs = 0`; skipped for a protected foreground. A drained bank is forced (EVO-054), so this walls in every mode | `backStaysOver(foregroundPkg)` |
 | `onAppBlocked` (whole-app HOME bounce) | `APP`, `referenceId = pkg`, `displayName = appLabel = appLabel(pkg)`, `blockReason = APP_BLOCK` | `appBlockStaysOver(pkg)` = `{pkg, resolved launcher}` — the HOME that follows lands on the launcher, so the wall stays over it until the user acts; `resolveActivity` returning the resolver (`"android"`) falls back to every HOME-capable package |
 | `handleBrowser` (website) | `WEBSITE`, `referenceId`/`displayName` = host for a user-rule hit, **`""` for an adult-list hit** (EVO-018), `appLabel` = the browser's label, `blockReason = WEB_RULE \| ADULT` | `backStaysOver(browser pkg)` |
 
@@ -226,8 +231,9 @@ The plan label itself lives with the enum — `planLabel(BlockingPlan?, {allowan
 dialog's base label delegate to it, so the wire token maps to "Conscious" in one Dart place.
 
 The **Appearance** hub gains a "Block screen" section: one full-width `_SurfaceCard` with the
-compact preview, the **on/off `AppToggle`**, a "Block screen off — blocks fall back to a short
-toast" hint, and the same overlay-permission notice the bubble card uses
+compact preview, the **on/off `AppToggle`**, a "Block screen off — app & website blocks fall back
+to a short toast" hint (reel walls follow the block mode, not this switch), and the same
+overlay-permission notice the bubble card uses
 (`ContentCount.overlayGranted == false`, tri-state — never "unknown reads as denied").
 
 "Try it" is gated on that tri-state: a definite `false` gets the permission hint; a `false` from
@@ -250,7 +256,10 @@ Event `blockScreenAction` — `{action, referenceType, referenceId, preview}`; n
 
 ## 8. Analytics
 
-`FirebaseNativeEventReporter` logs `block_screen_action { action }` for a non-preview event.
+`FirebaseNativeEventReporter` logs `block_screen_action { action }` for a non-preview event, and
+`block_triggered { platform, mode, wall }` — `wall` is 1 when the block screen was actually shown
+for that block (EVO-057), since `mode` reports the navigation (`PRESS_BACK` for the Block screen
+mode).
 `referenceId` (a host or package) is never forwarded — the same rule as `webBlocked`'s host.
 No Dart navigation happens on `OPEN_APP`: native foregrounds Detoxo where it was (cold start →
 splash → dashboard), so the PIN and permission gates win by construction. `ponytail:` a
@@ -263,7 +272,11 @@ deep-link landing on the dashboard is M6's shell work.
   (navy on both accents and the green band, white on the deep-red band); `wallTextTop` (room to
   spare, pulled up, never above the guard); the `planLabel` table and the "never contains
   `curious`" sweep; `sanitised()` for adult and app-block payloads; `fromMap` null cases and the
-  new field defaults; spec defaults (on, count + opens shown, 5 s). `engine/UsageQueryTest.kt`
+  new field defaults; spec defaults (on, count + opens shown, 5 s). `overlay/WallPolicyTest.kt`
+  pins the wall rule: Block screen mode walls and other modes do not, a forced block walls in
+  every mode but never over a `NONE` navigation, forced = daily limit / schedule / Conscious bank
+  at zero, and the Appearance switch is skipped by forced walls and by a reel wall in the chosen
+  mode — never by an app or website wall. `engine/UsageQueryTest.kt`
   pins `startOfDay` (two zones) and `countOpens` (transitions only). Window lifecycle and `org.json`
   parsing need a device (the unit-test stub jar has no real `JSONObject`).
 - Dart: `test/block_screen_test.dart` (payload/style round-trips incl. the new fields, the
@@ -271,7 +284,10 @@ deep-link landing on the dashboard is M6's shell work.
   / Unblock-5 / app / adult, the locked ghost label, the opens line and its toggle, `showCount`,
   `onColorFor`, `backDelaySec` clamping), `test/block_screen_cubit_test.dart` (hydrate, debounce,
   dirty guard, `enabled=false` push, failed hydrate), `native_event_reporter_test.dart`
-  (`blockScreenAction` logged, preview skipped).
+  (`blockScreenAction` logged, preview skipped; `block_triggered` carries `wall`),
+  `test/block_mode_picker_test.dart` (the four-row picker, the selected row reaches Semantics,
+  the entry tile's "Needs Display over other apps" row only without the grant),
+  `test/domain_test.dart` (`BLOCK_SCREEN` round-trips).
 - Device sanity (not automatable here): wall on an Instagram Reel within the debounce; both edge
   swipes swallowed, also after a rotation; "Back to Instagram · 5" ticks to 0 and unlocks while
   "Go home" stays instant, and the Friction toggle off makes it instant; a reel opened from a
@@ -284,7 +300,11 @@ deep-link landing on the dashboard is M6's shell work.
   over the launcher; a third app foregrounding hides it; the Conscious bank draining mid-reel raises
   it; revoking "Display over other apps" mid-session falls back to toast + BACK with no crash;
   TalkBack reaches every button, reads the late opens line, and its menu does not take the wall
-  down; the Appearance switch off restores the toast-only behaviour.
+  down; the Appearance switch off restores the toast-only behaviour for app and website blocks;
+  a reel block walls only in the **Block screen** mode — and still does with the Appearance switch
+  off; a spent daily limit, a schedule and a drained Conscious bank wall in every mode with the
+  switch off; Block screen mode with the overlay grant revoked toasts the platform name; toggling
+  the Appearance switch while a forced wall stands keeps it up.
 
 ## 10. Play policy notes
 
@@ -321,6 +341,7 @@ Pinned by `UsageQueryTest`.
 
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/overlay/BlockScreenOverlay.kt`
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/overlay/BlockScreenRenderer.kt` (payload, style spec, `planLabel`, `onColorFor`, `wallTextTop`, `WallCopy`, `WallView`)
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/overlay/WallPolicy.kt` (`forced`, `reelWall`, `bypassesSwitch`, `MODE_BLOCK_SCREEN`)
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/overlay/OverlayWindows.kt` (`overlayType`, `launchDetoxo` — shared with the bubble)
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/accessibility/DetoxoAccessibilityService.kt` (`raiseWall`, `reelPayload`, `appLabel`, `platformName`, `appBlockStaysOver`, `backStaysOver`, `prevForegroundPkg`, `a11yPkgs`, `screenOffReceiver`, `tearDownBlockScreen`)
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/channels/CommandHandler.kt` (six arms, `jsonToMap`)
@@ -330,13 +351,16 @@ Pinned by `UsageQueryTest`.
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/ContentCounter.kt` (`todayCount()`)
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/widget/WidgetBitmapRenderer.kt` (`Palette` / `paletteFor` / `blend` / `withAlpha` / `isSystemDark`, `internal`)
 - `android/app/src/main/res/values/strings.xml` (`wall_*`)
-- `android/app/src/test/kotlin/com/errorxperts/detoxo/overlay/BlockScreenGeometryTest.kt`, `engine/UsageQueryTest.kt`
+- `android/app/src/test/kotlin/com/errorxperts/detoxo/overlay/BlockScreenGeometryTest.kt`, `WallPolicyTest.kt`, `engine/UsageQueryTest.kt`
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/channels/CommandHandler.kt` (`BLOCK_MODES` whitelist on `pushSettings`)
 - `lib/features/blocking/block_screen/**`
 - `lib/features/blocking/blocking.dart`
-- `lib/features/blocking/shared/domain/entities/enums.dart` (`planLabel`)
+- `lib/features/blocking/shared/domain/entities/enums.dart` (`planLabel`, `BlockingMode.blockScreen`), `engine_event.dart` (`BlockEvent.wall`)
+- `lib/features/settings/presentation/widgets/block_mode_picker.dart` (`blockModes`, `BlockModeOptions`, `BlockModeTile`, `OptionTile`, `PermissionNeededRow`) and the `_BlockModeSheet` / `_BlockModeTile` wrappers in `settings_screen.dart`
+- `lib/features/limits/daily_limit/presentation/daily_limit_screen.dart` (the overlay-missing banner branch)
 - `lib/features/content_counter/content_counter_appearance/presentation/widgets/widget_palette.dart` (`widgetPaletteFor`, `onColorFor`)
 - `lib/features/additional_feature/appearance/presentation/appearance_screen.dart` (`_BlockScreenSection`)
 - `lib/core/constants/channel_constants.dart`, `lib/core/platform_channels/engine_channel.dart`
 - `lib/core/services/firebase/analytics/{analytics_events,analytics_service,native_event_reporter}.dart`
 - `lib/core/navigation/{routes,app_router}.dart`, `lib/core/di/injector.dart`, `lib/main.dart`
-- `test/block_screen_test.dart`, `test/block_screen_cubit_test.dart`, `test/core/services/firebase/native_event_reporter_test.dart`
+- `test/block_screen_test.dart`, `test/block_screen_cubit_test.dart`, `test/block_mode_picker_test.dart`, `test/core/services/firebase/native_event_reporter_test.dart`

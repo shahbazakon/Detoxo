@@ -36,6 +36,9 @@ abstract final class AnalyticsParam {
   static const String durationMin = 'duration_min';
   static const String platform = 'platform';
   static const String mode = 'mode';
+
+  /// 1 when the block screen was shown for the block (EVO-057).
+  static const String wall = 'wall';
   static const String count = 'count';
   static const String action = 'action';
   static const String step = 'step';

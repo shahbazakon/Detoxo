@@ -21,10 +21,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 /// re-read [PermissionsCubit] afterwards; callers that don't may ignore this.
 Future<bool> requestPermission(BuildContext context, AppPermission kind) async {
   final cubit = context.read<PermissionsCubit>();
-  final status = cubit.state.firstWhere(
-    (s) => s.kind == kind,
-    orElse: () => PermissionStatus(kind: kind),
-  );
+  final status = cubit.statusFor(kind);
 
   if (status.blockedByRestrictedSettings) {
     await RestrictedSettingsSheet.show(context);

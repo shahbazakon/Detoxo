@@ -1,6 +1,5 @@
 import 'package:detoxo/core/theme/app_theme.dart';
 import 'package:detoxo/features/analytics/analytics.dart';
-import 'package:detoxo/features/analytics/insights/presentation/insights_cubit.dart';
 import 'package:detoxo/features/analytics/insights/presentation/widgets/insights_view.dart';
 import 'package:detoxo/features/blocking/shared/domain/repositories/blocking_repositories.dart';
 import 'package:detoxo/features/usage/usage.dart';
@@ -23,6 +22,9 @@ class _FakeRepo implements InsightsRepository {
 
   @override
   DailyStats? cached(String dayKey) => yesterday;
+
+  @override
+  Future<bool?> hasAccess() async => result is! UsageDenied;
 }
 
 /// EVO-014 on a new surface: a missing grant and a failed read must each say so
@@ -104,7 +106,7 @@ void main() {
     await tester.tap(find.text('Retry'));
     await tester.pumpAndSettle();
 
-    expect(find.text('1h'), findsOneWidget);
+    expect(find.text('App switches'), findsOneWidget);
     expect(find.text('Retry'), findsNothing);
   });
 
@@ -124,11 +126,18 @@ void main() {
       ),
     );
 
-    expect(find.text('3h 12m'), findsOneWidget);
-    expect(find.textContaining('1h 48m distracting'), findsOneWidget);
+    expect(find.text('1h 48m · 56% of screen time'), findsOneWidget);
+    // The section header — uppercase, and there in every state, which is why
+    // the other tests pin a granted-only string instead.
+    expect(find.text('DISTRACTION'), findsOneWidget);
+    expect(find.text('App switches'), findsOneWidget);
+    expect(find.text('Distracting opens'), findsOneWidget);
+    // The headline figures (screen time, pickups, reels) are the Activity
+    // screen's Today grid — a second, snapshot copy here would disagree with
+    // the live one by evening.
+    expect(find.text('3h 12m'), findsNothing);
+    expect(find.text('Reels'), findsNothing);
     expect(find.text('Usage access'), findsNothing);
-    // The honesty footnote is not optional.
-    expect(find.textContaining('Digital Wellbeing'), findsOneWidget);
   });
 
   testWidgets('a genuinely quiet day says so instead of nothing', (
@@ -136,88 +145,67 @@ void main() {
   ) async {
     await pump(tester, const UsageGranted(DailyStats(dayKey: '02-09-2026')));
 
-    expect(find.text('0m'), findsOneWidget);
-    expect(find.text('Nothing recorded yet today'), findsOneWidget);
+    expect(find.text('Nothing yet today'), findsOneWidget);
     // Crucially, this is NOT the denied state.
     expect(find.text('Grant'), findsNothing);
   });
 
-  testWidgets('a top app is labelled, timed, and offers a limit', (
+  testWidgets('the info button opens the note on where the numbers come from', (
     tester,
   ) async {
-    await pump(
-      tester,
-      UsageGranted(
-        DailyStats(
-          dayKey: '02-09-2026',
-          screenTimeMs: const Duration(hours: 2).inMilliseconds,
-          topApps: const [
-            AppUsage(
-              package: 'com.instagram.android',
-              foregroundMillis: 4200000,
-            ),
-          ],
-        ),
-      ),
-    );
+    await pump(tester, const UsageGranted(DailyStats(dayKey: '02-09-2026')));
+    // Nothing on the screen itself; the note is one tap away.
+    expect(find.textContaining('Digital Wellbeing'), findsNothing);
 
-    expect(find.text('Where it went'), findsOneWidget);
-    // No installed-app match, so it falls back to the package name.
-    expect(find.text('com.instagram.android'), findsOneWidget);
-    expect(find.text('1h 10m'), findsOneWidget);
-    // EVO-033: the row is the entry point to a limit, not just a readout.
-    expect(
-      tester.getSemantics(find.byType(InkWell).first),
-      matchesSemantics(
-        isButton: true,
-        isFocusable: true,
-        hasTapAction: true,
-        hasFocusAction: true,
-        label: 'com.instagram.android, 1h 10m. Set a daily limit',
-      ),
-    );
+    await tester.tap(find.byTooltip('About these numbers'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('About these numbers'), findsOneWidget);
+    expect(find.textContaining('Digital Wellbeing'), findsOneWidget);
   });
 
-  testWidgets('a complete yesterday is shown as a neutral reference', (
+  // EVO-058: the cubit outlives the view (app-wide, lazy). The shell rebuilds
+  // the Activity tab on every switch; a later mount must paint the last
+  // numbers on its first frame and refresh them in place, never spin.
+  testWidgets('a later mount keeps the numbers on screen while refreshing', (
     tester,
   ) async {
-    await pump(
-      tester,
+    final repo = _FakeRepo(
       UsageGranted(
         DailyStats(
           dayKey: '02-09-2026',
-          screenTimeMs: const Duration(hours: 2).inMilliseconds,
+          screenTimeMs: const Duration(hours: 1).inMilliseconds,
         ),
       ),
-      yesterday: DailyStats(
-        dayKey: '01-09-2026',
-        screenTimeMs: const Duration(hours: 4).inMilliseconds,
-        complete: true,
+    );
+    final cubit = InsightsCubit(
+      repo,
+      engine,
+      clock: () => DateTime(2026, 9, 2, 12),
+    );
+    Future<void> mount() => tester.pumpWidget(
+      MaterialApp(
+        theme: AppTheme.dark(),
+        home: Scaffold(
+          body: BlocProvider.value(
+            value: cubit,
+            child: const SingleChildScrollView(child: InsightsView()),
+          ),
+        ),
       ),
     );
 
-    // Never a percentage while today is still running: a part-day against a
-    // whole one reads as a triumph every morning.
-    expect(find.text('Yesterday: 4h'), findsOneWidget);
-    expect(find.textContaining('than yesterday'), findsNothing);
-  });
+    await mount();
+    await tester.pumpAndSettle();
+    expect(find.text('App switches'), findsOneWidget);
 
-  testWidgets('an incomplete yesterday is not shown at all', (tester) async {
-    await pump(
-      tester,
-      UsageGranted(
-        DailyStats(
-          dayKey: '02-09-2026',
-          screenTimeMs: const Duration(hours: 2).inMilliseconds,
-        ),
-      ),
-      // complete: false — comparing against a part-day would flatter today.
-      yesterday: DailyStats(
-        dayKey: '01-09-2026',
-        screenTimeMs: const Duration(hours: 4).inMilliseconds,
-      ),
-    );
+    // Leave the tab and come back.
+    await tester.pumpWidget(const SizedBox());
+    await mount();
 
-    expect(find.textContaining('Yesterday'), findsNothing);
+    expect(find.text('Reading your screen time…'), findsNothing);
+    expect(find.text('App switches'), findsOneWidget);
+    await tester.pumpAndSettle();
+    await cubit.close();
   });
 }

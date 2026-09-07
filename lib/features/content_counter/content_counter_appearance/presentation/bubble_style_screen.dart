@@ -1,5 +1,4 @@
 import 'package:detoxo/core/design_system/design_system.dart';
-import 'package:detoxo/core/widgets/common_widgets.dart';
 import 'package:detoxo/features/content_counter/content_counter_appearance/presentation/widgets/bubble_preview.dart';
 import 'package:detoxo/features/content_counter/content_counter_bubble/domain/entities/bubble_style.dart';
 import 'package:detoxo/features/content_counter/content_counter_core/domain/entities/counter_appearance.dart';

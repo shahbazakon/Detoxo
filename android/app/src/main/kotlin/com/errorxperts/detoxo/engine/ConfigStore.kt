@@ -200,30 +200,69 @@ class ConfigStore(context: Context) {
         prefs.edit().putInt(KEY_REELS_CONSUMED, 0).apply()
     }
 
-    fun recordBlock(dateKey: String) {
-        val storedDate = prefs.getString(KEY_BLOCK_DATE, "")
-        val todayCount = if (storedDate == dateKey) prefs.getInt(KEY_BLOCK_TODAY, 0) else 0
-        prefs.edit()
-            .putString(KEY_BLOCK_DATE, dateKey)
+    /**
+     * One block of [pkg] on [dateKey]. Besides today/total, the per-package
+     * tally (EVO-059) rides the same day and the same rollover; on a day
+     * change the count that was "today" is rotated into yesterday's slot
+     * (EVO-060) — if the stored day really was [yesterdayKey], else yesterday
+     * had no blocks and the slot records 0.
+     */
+    fun recordBlock(dateKey: String, yesterdayKey: String, pkg: String) {
+        val storedDate = prefs.getString(KEY_BLOCK_DATE, "") ?: ""
+        val sameDay = storedDate == dateKey
+        val storedToday = prefs.getInt(KEY_BLOCK_TODAY, 0)
+        val todayCount = if (sameDay) storedToday else 0
+        val edit = prefs.edit()
+        if (!sameDay) {
+            edit.putString(KEY_BLOCK_YESTERDAY_DATE, yesterdayKey)
+                .putInt(KEY_BLOCK_YESTERDAY, if (storedDate == yesterdayKey) storedToday else 0)
+        }
+        edit.putString(KEY_BLOCK_DATE, dateKey)
             .putInt(KEY_BLOCK_TODAY, todayCount + 1)
             .putInt(KEY_BLOCK_TOTAL, prefs.getInt(KEY_BLOCK_TOTAL, 0) + 1)
+            .putString(
+                KEY_BLOCK_BY_PKG,
+                BlockTally.record(if (sameDay) prefs.getString(KEY_BLOCK_BY_PKG, null) else null, pkg),
+            )
             .apply()
     }
 
     /**
-     * (today, total, date) block counts for [dateKey]. Read-time rollover as in
-     * [webBlockStats]: after midnight, today reads 0 before the day's first
-     * block instead of yesterday's number.
+     * Block counts for [dateKey]. Read-time rollover as in [webBlockStats]:
+     * after midnight, today (and its per-package tally) read 0 / empty before
+     * the day's first block instead of yesterday's numbers, and yesterday is
+     * derived from whatever the store holds ([BlockTally.yesterday]).
      */
-    fun blockStats(dateKey: String): Triple<Int, Int, String> = Triple(
-        if (prefs.getString(KEY_BLOCK_DATE, "") == dateKey) {
-            prefs.getInt(KEY_BLOCK_TODAY, 0)
-        } else {
-            0
-        },
-        prefs.getInt(KEY_BLOCK_TOTAL, 0),
-        dateKey,
-    )
+    fun blockStats(dateKey: String, yesterdayKey: String): BlockStats {
+        val storedDate = prefs.getString(KEY_BLOCK_DATE, "") ?: ""
+        val sameDay = storedDate == dateKey
+        val storedToday = prefs.getInt(KEY_BLOCK_TODAY, 0)
+        return BlockStats(
+            today = if (sameDay) storedToday else 0,
+            total = prefs.getInt(KEY_BLOCK_TOTAL, 0),
+            date = dateKey,
+            yesterday = BlockTally.yesterday(
+                storedDate = storedDate,
+                storedToday = storedToday,
+                rotatedDate = prefs.getString(KEY_BLOCK_YESTERDAY_DATE, "") ?: "",
+                rotatedCount = prefs.getInt(KEY_BLOCK_YESTERDAY, 0),
+                todayKey = dateKey,
+                yesterdayKey = yesterdayKey,
+            ),
+            byPackage = if (sameDay) BlockTally.parse(prefs.getString(KEY_BLOCK_BY_PKG, null)) else emptyMap(),
+        )
+    }
+
+    /**
+     * A newly protected app leaves today's tally as well as tomorrow's
+     * (`docs/code_docs/24-protected-apps.md`: nothing about it is stored).
+     * No write unless one of [packages] was actually named.
+     */
+    fun scrubBlockTally(packages: Set<String>) {
+        BlockTally.without(prefs.getString(KEY_BLOCK_BY_PKG, null), packages)?.let {
+            prefs.edit().putString(KEY_BLOCK_BY_PKG, it).apply()
+        }
+    }
 
     // ── Custom whole-app blocks ─────────────────────────────────────────────
 
@@ -443,6 +482,9 @@ class ConfigStore(context: Context) {
         private const val KEY_BLOCK_DATE = "block_date"
         private const val KEY_BLOCK_TODAY = "block_today"
         private const val KEY_BLOCK_TOTAL = "block_total"
+        private const val KEY_BLOCK_YESTERDAY = "block_yesterday"
+        private const val KEY_BLOCK_YESTERDAY_DATE = "block_yesterday_date"
+        private const val KEY_BLOCK_BY_PKG = "block_by_pkg_today"
         private const val KEY_WEB_BLOCKLIST = "web_blocklist_json"
         private const val KEY_BLOCK_ADULT = "block_adult_websites"
         private const val KEY_BLOCK_FOR_APPS = "block_websites_for_blocked_apps"

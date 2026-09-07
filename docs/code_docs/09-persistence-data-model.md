@@ -7,7 +7,7 @@ boundary:
 
 | Store | Layer | Backing tech | What lives here |
 |-------|-------|--------------|-----------------|
-| `LocalStore` (`detoxo` box) | Dart | Hive `Box<String>` | User-facing config: settings, blocklists, daily limit, analytics buffer |
+| `LocalStore` (`detoxo` box) | Dart | Hive `Box<String>` | User-facing config: settings, blocklists, daily limit, insight rollups |
 | `flutter_secure_storage` | Dart | Keystore / EncryptedSharedPreferences | Secrets only (the PIN config) |
 | `detoxo_engine_prefs` | Native (Kotlin) | `SharedPreferences` | The engine's own runtime state: plan, counters, blocklists, Conscious bank, watchdog markers |
 | `detoxo_platforms_config` | Native (Kotlin) | `SharedPreferences` | Just the pushed ~31 KB `platforms_config_json` — split out so hot-path counter writes stop re-serialising it (§2.1) |
@@ -97,7 +97,6 @@ Each key maps to exactly one repository that owns its JSON shape:
 | `temporaryUnblocks` | `temporary_unblocks` | no | `TemporaryUnblockRepositoryImpl` | `{grants: [{targetType, targetId, startMs, endMs, cancelledMs, source}]}` — M8's per-target unblocks, newest first, **capped at 50 and pruned on write**. Only the active ones cross the channel; native enforces their expiry, so a grant lapses on time with Detoxo closed. A corrupt blob **throws** — pushing `[]` would yank a live grant out from under the user ([31](31-locked-rules-and-unblock.md) §2) |
 | `bypassLedger` | `bypass_ledger` | no | `BypassLedgerRepositoryImpl` | `{config: {overrideLimit, overridePeriod, overrideMaxWindowMs, grantLimit, grantPeriod}, entries: [{kind, atMs, untilMs, ruleId, reason}]}` — the rationed-escape ledger, newest first, capped at 50 **per kind** (a flat cap let a burst of grants evict an override still inside its window, which refunds it). **One store with a `kind` discriminator from day one**: M8 wrote only `OVERRIDE`; EVO-053 added `GRANT` with no migration, which is exactly what the discriminator was for, and M2.2's emergency pass will add `EMERGENCY` the same way. `grantLimit` is **0 = unlimited** and is the shipped default. `remaining` / `resetsAt` are **derived**, never stored. A corrupt blob **throws** — reading it as empty would hand out a fresh quota every time ([31](31-locked-rules-and-unblock.md) §4) |
 | `streak` | `daily_limit_streak` | no | `StreakRepositoryImpl` | `Streak.toJson()` — `{base, lastDay, todayFailed}` |
-| `analyticsEvents` | `analytics_events` | no | `AnalyticsRepositoryImpl` | JSON list of block events (capped) |
 | `usageDaily` | `usage_daily` | no | `InsightsRepositoryImpl` | `{days: {"dd-MM-yyyy": DailyStats}}` — one document, **pruned to the newest 90 days on write**; day keys always from `daySignature` ([28](28-insights.md) §4) |
 | `grantedPermissions` | `granted_permissions` | no | `PermissionRepositoryImpl` | JSON list of `AppPermission.name`s granted on the last successful check — the permission gate's memory when a live read comes back `unknown` ([13](13-onboarding-permissions.md) §3.2) |
 | `premiumDevUnlock` | `premium_dev_unlock` | no | *(reserved — no live consumer)* | — |
@@ -175,13 +174,12 @@ Each key maps to exactly one repository that owns its JSON shape:
   install; a corrupt blob is logged and read as empty. Day keys come from
   `daySignature` (`dd-MM-yyyy`) — see §2.3 below. See
   [28-insights.md](28-insights.md).
-- **`analytics_events`** — a capped JSON list of block events, newest-first.
-  `AnalyticsRepositoryImpl` prepends each new event and truncates to
-  **`_maxEvents = 500`**. Each event serialises as
-  `{platformId, packageName, mode, ts}` where `ts` is epoch millis. This is a
-  **local buffer only** — the class comment notes a cloud sink (Firebase
-  Analytics) "can be added behind the same interface later"; none is bundled.
-  See [12-analytics-notifications-resilience.md](12-analytics-notifications-resilience.md).
+- **`analytics_events`** — **retired.** It held the Dart-side block-event buffer
+  behind the Activity tab's old Events feed; the feed was replaced by tiles over
+  the native `block_today` / `block_total` counters and the key was deleted with
+  it ([12](12-analytics-notifications-resilience.md) §1.1). An upgraded install's
+  stale document is deleted once at bootstrap (`lib/app/bootstrap.dart`, beside
+  `migrateWebPauses`); nothing reads it.
 
 ### 1.3 Wiping Dart data ("Reset app data")
 
@@ -229,7 +227,7 @@ Written by Dart via `CommandHandler` (`pushConfig`, `pushSettings`,
 |---|---|---|---|
 | `platforms_config_json` | String? | null | The Dart-pushed `platforms_config.json` the detector parses — stored in the separate **`detoxo_platforms_config`** file (migrated out of the hot file on first init) |
 | `active_plan` | String | `BLOCK_ALL` | Plan **wire token**: `BLOCK_ALL`, `CURIOUS` (= *Conscious* in the UI), `ONE_REEL`, `PAUSED` |
-| `default_block_mode` | String | `PRESS_BACK` | `PRESS_BACK` / `KILL_APP` / `LOCK_SCREEN` / `NONE` |
+| `default_block_mode` | String | `PRESS_BACK` | `PRESS_BACK` / `BLOCK_SCREEN` / `KILL_APP` / `LOCK_APP` / `LOCK_SCREEN` / `NONE` (`BLOCK_SCREEN` = back press + wall; read by `WallPolicy`) |
 | `enabled_platforms` | Set<String> | ∅ | Enabled `platformId`s (e.g. `ig_reel`, `yt_shorts`) |
 | `protected_packages` | Set<String> | ∅ | Privacy-protected package names the service ignores entirely (survives reboot with Flutter dead) |
 | `app_blocklist_packages` | Set<String> | ∅ | Custom whole-app blocks — packages the service HOME-bounces on foreground (pushed via `pushAppBlocklist`) |
@@ -272,14 +270,21 @@ push / reload, never per event ([27](27-rules-engine.md)).
 | `block_date` | String | Last-recorded day key (`dd-MM-yyyy`) |
 | `block_today` | Int | Blocks recorded today (durably reset on rollover) |
 | `block_total` | Int | All-time block count |
+| `block_by_pkg_today` | String (JSON `{pkg: count}`) | Today's per-package tally, ≤ 20 packages (a newcomer past the cap evicts the smallest); rolled with `block_date`; never a protected package — `scrubBlockTally` drops one protected later (EVO-059) |
+| `block_yesterday` / `block_yesterday_date` | Int / String | The count that was "today" when the day last changed, rotated in by the first block of the new day; read back only while its date is exactly yesterday (EVO-060) |
 
-`recordBlock(dateKey)` compares the stored day to `dateKey`; on a mismatch it
-resets today's count to 0 **and writes** the new date in the same edit, then
-increments today + total. `blockStats(dateKey)` returns `(today, total, date)`
-with **read-time rollover** (mirroring `ContentCounterStore.snapshot` and
-`webBlockStats(dateKey)`): a stale stored date reads `today` as 0 without
-writing — the next `recordBlock` does the durable reset. Whole-app blocks
-(`onAppBlocked`) record into these same counters.
+`recordBlock(dateKey, yesterdayKey, pkg)` compares the stored day to `dateKey`;
+on a mismatch it rotates the old count into the yesterday slot (or `0` when the
+stored day was older than yesterday), resets today's count and tally **and
+writes** the new date in the same edit, then increments today + total and the
+package's tally entry. `blockStats(dateKey, yesterdayKey)` returns a
+`BlockStats(today, total, date, yesterday, byPackage)` with **read-time
+rollover** (mirroring `ContentCounterStore.snapshot` and
+`webBlockStats(dateKey)`): a stale stored date reads `today` as 0 and
+`byPackage` as empty without writing — the next `recordBlock` does the durable
+reset — and `yesterday` is derived by the pure `BlockTally.yesterday`
+(`engine/BlockTally.kt`, pinned on the JVM). Whole-app blocks (`onAppBlocked`)
+record into these same counters.
 
 **Website block counters** (`recordWebBlock` / `webBlockStats`) — kept separate
 from the reel counter:
@@ -392,7 +397,6 @@ but they are not interchangeable:
 | Native (all callers — `DateKeys.today()`, the single shared `dd-MM-yyyy` formatter in `engine/DateKeys.kt`; ThreadLocal, since the widget provider / job service can run off the main thread) | `dd-MM-yyyy` | `03-07-2026` |
 | Dart `daySignature()` (`core/utils/day_signature.dart`; the streak, the daily-limit rollover and the `usage_daily` insight rollups) — pinned to `en_US` so a localized default can't change a persisted key | `dd-MM-yyyy` | `03-07-2026` |
 | Dart `WebBlockStatsRepositoryImpl._todayKey()` — **the one outlier**, and a known cleanup | `yyyy-MM-dd` | `2026-07-03` |
-| Dart analytics events | epoch millis (`ts`) | `1751500800000` |
 
 ---
 
@@ -440,7 +444,6 @@ copy) was removed on 2026-08-29; native never read it.
 - `lib/features/protected_apps/data/repositories/protected_apps_repository_impl.dart`
 - `lib/features/limits/daily_limit/data/repositories/daily_limit_repository_impl.dart`
 - `lib/features/limits/streak/data/repositories/streak_repository_impl.dart`
-- `lib/features/analytics/data/repositories/analytics_repository_impl.dart`
 - `lib/features/settings/presentation/settings_screen.dart`
 - `lib/features/content_counter/home_content_counter/data/repositories/home_widget_repository_impl.dart`
 - `lib/features/permissions/data/repositories/permission_repository_impl.dart` (`granted_permissions`)

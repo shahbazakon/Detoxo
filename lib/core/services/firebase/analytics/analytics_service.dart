@@ -25,6 +25,7 @@ abstract interface class AnalyticsService {
   Future<void> logBlockTriggered({
     required String platform,
     required String mode,
+    bool wall = false,
   });
   Future<void> logReelsCounted(int count);
   Future<void> logWebBlocked({required String mode});
@@ -95,9 +96,11 @@ class FirebaseAnalyticsService implements AnalyticsService {
   Future<void> logBlockTriggered({
     required String platform,
     required String mode,
+    bool wall = false,
   }) => _log(AnalyticsEvent.blockTriggered, {
     AnalyticsParam.platform: platform,
     AnalyticsParam.mode: mode,
+    AnalyticsParam.wall: wall ? 1 : 0,
   });
 
   @override

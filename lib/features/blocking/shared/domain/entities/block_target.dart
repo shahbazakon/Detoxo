@@ -11,7 +11,6 @@ class BlockTarget extends Equatable {
     required this.displayName,
     required this.iconUrl,
     required this.detectionType,
-    required this.supportedModes,
     required this.premiumExclusive,
     required this.defaultEnabled,
     required this.isBrowser,
@@ -24,7 +23,6 @@ class BlockTarget extends Equatable {
   final String displayName;
   final String iconUrl;
   final DetectionType detectionType;
-  final List<BlockingMode> supportedModes;
   final bool premiumExclusive;
   final bool defaultEnabled;
   final bool isBrowser;

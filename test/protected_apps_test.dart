@@ -44,7 +44,6 @@ BlockTarget _target(String pkg) => BlockTarget(
   displayName: pkg,
   iconUrl: '',
   detectionType: DetectionType.legacy,
-  supportedModes: const [],
   premiumExclusive: false,
   defaultEnabled: true,
   isBrowser: false,

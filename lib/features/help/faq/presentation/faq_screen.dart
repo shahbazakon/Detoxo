@@ -1,5 +1,4 @@
 import 'package:detoxo/core/design_system/design_system.dart';
-import 'package:detoxo/core/widgets/common_widgets.dart';
 import 'package:detoxo/features/help/faq/data/faq_data.dart';
 import 'package:detoxo/features/help/faq/domain/entities/faq_entry.dart';
 import 'package:detoxo/features/help/faq/presentation/faq_cubit.dart';

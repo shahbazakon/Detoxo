@@ -46,6 +46,7 @@ class FirebaseNativeEventReporter {
         _analytics.logBlockTriggered(
           platform: (event['platformId'] as String?) ?? 'unknown',
           mode: (event['mode'] as String?) ?? 'unknown',
+          wall: (event['wall'] as bool?) ?? false,
         );
         _crash.setKey('blocks_today', (event['today'] as num?)?.toInt() ?? 0);
         _crash.setKey('blocks_total', (event['total'] as num?)?.toInt() ?? 0);

@@ -3,20 +3,18 @@ import 'package:detoxo/core/di/injector.dart';
 import 'package:detoxo/core/navigation/routes.dart';
 import 'package:detoxo/features/additional_feature/showcase_view/showcase_view.dart';
 import 'package:detoxo/features/dashboard/presentation/widgets/blocker_tile.dart';
-import 'package:detoxo/features/dashboard/presentation/widgets/rules_card.dart';
 import 'package:detoxo/features/limits/limits.dart';
 import 'package:detoxo/gen/assets.gen.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 /// The dashboard's blocker pair — App Blocker and Web Blocker side by side —
-/// with the full-width Rules card beneath them.
+/// with the active-unblocks card beneath them.
 ///
 /// Owns the live entry counts. Both blocker cubits are screen-scoped (created
 /// inside their own `BlocProvider`s), so there is nothing to watch from here;
 /// the section reads the repositories through [sl] instead and refreshes when
-/// the user pops back from either screen. (Rules have an app-wide cubit, so
-/// [RulesCard] watches it directly.)
+/// the user pops back from either screen.
 class BlockerSection extends StatefulWidget {
   const BlockerSection({super.key});
 
@@ -60,10 +58,9 @@ class _BlockerSectionState extends State<BlockerSection> {
       children: [
         _tiles(context),
         const SizedBox(height: AppSpacing.sm),
-        // EVO-051: above the rules card, and absent entirely when nothing is
-        // allowed — it exists to be noticed exactly when something is.
+        // EVO-051: absent entirely when nothing is allowed — it exists to be
+        // noticed exactly when something is.
         const ActiveUnblocksCard(),
-        const RulesCard(),
       ],
     );
   }

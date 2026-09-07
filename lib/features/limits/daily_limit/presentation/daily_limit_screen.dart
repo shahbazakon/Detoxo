@@ -115,12 +115,25 @@ class _DailyLimitViewState extends State<_DailyLimitView> {
                         'cannot be enforced until you turn the counter back on '
                         'in Appearance.',
                   )
+                // Only a *definite* missing grant (tri-state, EVO-014): the
+                // wall is forced past the Appearance switch when the limit
+                // runs out, but it can never be drawn without this permission.
+                else if (count.overlayGranted == false)
+                  const InfoBanner(
+                    title: 'Block screen needs “Display over other apps”',
+                    text:
+                        "When today's reel time reaches the limit, Detoxo "
+                        'still closes every reel feed until midnight — but the '
+                        'block screen can only appear once you allow the '
+                        'permission in Settings → Permissions.',
+                  )
                 else
                   const InfoBanner(
                     text:
                         "When today's reel time reaches the limit, Detoxo "
-                        'blocks every reel feed until midnight. A Pause lifts '
-                        'it like any other block.',
+                        'blocks every reel feed until midnight and shows the '
+                        'block screen in the app, whatever your block mode. A '
+                        'Pause lifts it like any other block.',
                   ),
               ],
             );

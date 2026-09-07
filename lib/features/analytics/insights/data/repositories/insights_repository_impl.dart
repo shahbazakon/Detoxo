@@ -47,6 +47,9 @@ class InsightsRepositoryImpl implements InsightsRepository {
   @override
   DailyStats? cached(String dayKey) => _dayFrom(_readDays(), dayKey);
 
+  @override
+  Future<bool?> hasAccess() => _usage.hasAccess();
+
   /// One record out of an already-decoded document.
   static DailyStats? _dayFrom(Map<String, dynamic> days, String dayKey) {
     final day = days[dayKey];
@@ -85,10 +88,14 @@ class InsightsRepositoryImpl implements InsightsRepository {
 
     switch (computed) {
       case UsageGranted<DailyStats>(:final data):
-        await _persist({
-          if (!_wouldDowngrade(days, key, data)) key: data,
-          ...await _backfillYesterday(start, days),
-        }, days);
+        await _persist(
+          {
+            if (!_wouldDowngrade(days, key, data)) key: data,
+            ...await _backfillYesterday(start, days, protectedPackages),
+          },
+          days,
+          protectedPackages,
+        );
         return UsageGranted(data);
       case UsageDenied<DailyStats>():
         // Denied is denied: never fall back to a stale figure the user would
@@ -96,7 +103,12 @@ class InsightsRepositoryImpl implements InsightsRepository {
         return const UsageDenied();
       case UsageUnavailable<DailyStats>():
         // The engine did not answer (iOS, a dead service, a query throw). A
-        // record already computed for *this* day is still the truth we had.
+        // record already computed for *this* day is still the truth we had —
+        // scrubbed first: only `_persist` (the granted exit) scrubs, so a
+        // package protected since that record was written would otherwise be
+        // named on screen (doc 24 §6). The document itself is scrubbed on the
+        // next write, as documented.
+        _scrubProtected(days, protectedPackages);
         final fallback = _dayFrom(days, key);
         return fallback == null
             ? const UsageUnavailable()
@@ -125,12 +137,9 @@ class InsightsRepositoryImpl implements InsightsRepository {
   Future<Map<String, DailyStats>> _backfillYesterday(
     DateTime todayStart,
     Map<String, dynamic> days,
+    Set<String> protectedPackages,
   ) async {
-    final start = DateTime(
-      todayStart.year,
-      todayStart.month,
-      todayStart.day - 1,
-    );
+    final start = previousDay(todayStart);
     final key = daySignature(start);
     final stored = _dayFrom(days, key);
     if (stored?.complete ?? false) return const {};
@@ -143,7 +152,7 @@ class InsightsRepositoryImpl implements InsightsRepository {
       reelCount: stored?.reelCount ?? 0,
       complete: true,
       now: _clock(),
-      protectedPackages: await _protectedPackages(),
+      protectedPackages: protectedPackages,
     );
     return switch (result) {
       UsageGranted<DailyStats>(:final data) => {key: data},
@@ -209,19 +218,52 @@ class InsightsRepositoryImpl implements InsightsRepository {
     }
   }
 
-  /// Merges [records] into the stored document and prunes to [maxDays].
+  /// Merges [records] into the stored document, scrubs [protectedPackages]
+  /// from every stored day, and prunes to [maxDays].
   Future<void> _persist(
     Map<String, DailyStats> records,
     Map<String, dynamic> days,
+    Set<String> protectedPackages,
   ) async {
-    if (records.isEmpty) return;
     for (final entry in records.entries) {
       days[entry.key] = entry.value.toJson();
     }
-    await _store.write(
-      StoreKeys.usageDaily,
-      jsonEncode({'days': _prune(days)}),
-    );
+    // EVO-032's promise covers the whole document, not only the days being
+    // recomputed now: only today and an unfinished yesterday are ever
+    // recomputed, so a package protected *today* would otherwise stay named
+    // under every already-complete day for up to 90 days.
+    final scrubbed = _scrubProtected(days, protectedPackages);
+    if (records.isEmpty && !scrubbed) return;
+    final pruned = _prune(days);
+    final encoded = jsonEncode({'days': pruned});
+    await _store.write(StoreKeys.usageDaily, encoded);
+    _memoRaw = encoded;
+    _memoDays = pruned;
+  }
+
+  /// Drops [protectedPackages] from every stored day's `topApps`; true when
+  /// anything was removed. Aggregate totals are left alone — they are not
+  /// identifying, and the day must keep matching Digital Wellbeing.
+  static bool _scrubProtected(
+    Map<String, dynamic> days,
+    Set<String> protectedPackages,
+  ) {
+    if (protectedPackages.isEmpty) return false;
+    var scrubbed = false;
+    for (final day in days.values) {
+      if (day is! Map) continue;
+      final apps = day['topApps'];
+      if (apps is! List) continue;
+      final kept = [
+        for (final a in apps)
+          if (a is! Map || !protectedPackages.contains(a['package'])) a,
+      ];
+      if (kept.length != apps.length) {
+        day['topApps'] = kept;
+        scrubbed = true;
+      }
+    }
+    return scrubbed;
   }
 
   /// Keeps the newest [maxDays] keys. Ordered by the day the key *names*, not
@@ -240,16 +282,27 @@ class InsightsRepositoryImpl implements InsightsRepository {
     return p.length == 3 ? '${p[2]}${p[1]}${p[0]}' : '';
   }
 
+  /// The last decoded document and the exact raw string it came from. The
+  /// cubit reads `cached()` right after `today()` decoded the same document,
+  /// which used to parse all 90 days a second time. Keyed on the raw string,
+  /// the memo can never serve a stale document: a wipe or any outside write
+  /// changes the string, and `today()`'s own write re-memoises what it wrote.
+  String? _memoRaw;
+  Map<String, dynamic> _memoDays = const {};
+
   /// The stored `days` map, or an empty one. A corrupt blob is logged and
   /// treated as absent — it must never take the screen down with it.
   Map<String, dynamic> _readDays() {
     final raw = _store.read(StoreKeys.usageDaily);
     if (raw == null || raw.isEmpty) return {};
+    if (raw == _memoRaw) return _memoDays;
     try {
       final decoded = jsonDecode(raw);
       if (decoded is! Map) return {};
       final days = decoded['days'];
-      return days is Map ? Map<String, dynamic>.from(days) : {};
+      if (days is! Map) return {};
+      _memoRaw = raw;
+      return _memoDays = Map<String, dynamic>.from(days);
     } on Object catch (e, s) {
       AppLogger.e('insights: corrupt usage_daily blob, starting fresh', e, s);
       return {};

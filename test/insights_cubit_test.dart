@@ -1,8 +1,6 @@
 import 'dart:async';
 
 import 'package:detoxo/features/analytics/analytics.dart';
-import 'package:detoxo/features/analytics/insights/presentation/insights_cubit.dart';
-import 'package:detoxo/features/analytics/insights/presentation/insights_state.dart';
 import 'package:detoxo/features/blocking/shared/domain/repositories/blocking_repositories.dart';
 import 'package:detoxo/features/usage/usage.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -20,6 +18,10 @@ class _FakeRepo implements InsightsRepository {
   /// dayKey → record, standing in for the rollup store.
   final Map<String, DailyStats> days = {};
 
+  /// The live grant, as the resume path re-reads it (`null` = could not read).
+  bool? access = true;
+  int accessReads = 0;
+
   @override
   Future<UsageQueryResult<DailyStats>> today() async {
     final t = throws;
@@ -30,6 +32,12 @@ class _FakeRepo implements InsightsRepository {
 
   @override
   DailyStats? cached(String dayKey) => days[dayKey];
+
+  @override
+  Future<bool?> hasAccess() async {
+    accessReads++;
+    return access;
+  }
 }
 
 DailyStats _day(String key, {int ms = 0, bool complete = false}) =>
@@ -71,6 +79,29 @@ void main() {
 
       await expectLater(build().load(), completes);
     });
+
+    test(
+      'labels resolve even without the grant, for the reel and block rows',
+      () async {
+        // The Activity screen's one installed-app lookup: reels and blocks
+        // need no permission, so a denied screen-time read must still label.
+        when(() => engine.installedApps()).thenAnswer(
+          (_) async => const [
+            InstalledApp(
+              packageName: 'com.instagram.android',
+              appName: 'Instagram',
+            ),
+          ],
+        );
+        repo.result = const UsageDenied();
+        final cubit = build();
+
+        await cubit.load();
+
+        expect(cubit.state.status, InsightsStatus.denied);
+        expect(cubit.state.apps['com.instagram.android']?.appName, 'Instagram');
+      },
+    );
 
     test('closing during the installed-apps scan does not throw', () async {
       // The scan resolves after the cubit is gone — the second emit must not
@@ -182,6 +213,36 @@ void main() {
         expect(cubit.state.status, InsightsStatus.granted);
       },
     );
+
+    test('re-checks the grant within the same day, and only then', () async {
+      repo.result = UsageGranted(_day(_today, ms: 1000));
+      final cubit = build();
+      await cubit.load();
+      expect(cubit.state.status, InsightsStatus.granted);
+
+      // Still granted: one cheap read, no recompute.
+      await cubit.refreshIfStale();
+      expect(repo.accessReads, 1);
+      expect(cubit.state.stats?.screenTimeMs, 1000);
+
+      // Revoked in Settings while the app was away. The day key still
+      // matches, so the old check returned early and the stale numbers stayed
+      // on screen as if live.
+      repo
+        ..access = false
+        ..result = const UsageDenied();
+      await cubit.refreshIfStale();
+      expect(cubit.state.status, InsightsStatus.denied);
+      expect(cubit.state.stats, isNull);
+
+      // A read that did not answer is not a revocation.
+      repo
+        ..access = null
+        ..result = UsageGranted(_day(_today, ms: 2000));
+      await cubit.load();
+      await cubit.refreshIfStale();
+      expect(cubit.state.stats?.screenTimeMs, 2000);
+    });
   });
 
   test('numbers are emitted before the app labels resolve', () async {

@@ -469,7 +469,7 @@ in-app previews render the same color/emoji at the same count.
 
 Four sub-modules, registered in `lib/core/di/injector.dart`, behind one public
 barrel `lib/features/content_counter/content_counter.dart` (entities, contracts,
-the two cubits, `ReelCounterCard`, `BubblePreview`, `WidgetPreview`) — the only
+the two cubits, `BubblePreview`, `WidgetPreview`) — the only
 import other features may use (`tool/check_boundaries.sh`). The bubble- and
 home-widget editors are routed at `/content-counter/bubble` and
 `/content-counter/widget` (`lib/core/navigation/routes.dart`); the counter's
@@ -516,11 +516,15 @@ background, reached from the drawer and Settings. There is no longer a standalon
   recents across midnight, and what clears a "needs permission" state after the
   user returns from Settings). Provided once, globally, in `lib/main.dart`
   (the Activity screen no longer creates a second instance).
-- **UI**: `ReelCounterCard` (hero count-up card with today / all-time toggle and
-  an animated per-app breakdown; reduce-motion safe) — shown on the **Activity**
-  screen (`analytics_screen.dart`). Per-app icons render via the shared
-  `AppIconAvatar` (bundled `social_icon_pack` asset, with a letter-tile fallback)
-  — the same widget the blocklist uses. The old `ContentCounterScreen` hub was
+- **UI**: the counter has no card of its own any more. The **Activity** screen
+  reads `ContentCounterCubit` directly — a compact **Reels** tile (today,
+  with the all-time total as its caption) in the Today panel, and a **Reels**
+  segment in the By app section whose rows are the shared `AppLimitRow`
+  ([28](28-insights.md) §6). The former `ReelCounterCard` hero (count-up, today /
+  all-time toggle, its own per-app rows) is gone; its all-time per-app breakdown
+  has no surface. Per-app icons still render via the shared `AppIconAvatar`
+  (bundled `social_icon_pack` asset via `AppContentCount.iconUrl`, with a
+  letter-tile fallback) — the same widget the blocklist uses. The old `ContentCounterScreen` hub was
   removed: its counting controls and the Bubble-style / Home-widget entries
   migrated to the shared **Appearance** screen
   (`features/additional_feature/appearance/presentation/appearance_screen.dart`).
@@ -701,7 +705,6 @@ Dart (`lib/…`):
 - `features/content_counter/content_counter_core/data/repositories/counter_appearance_repository_impl.dart`
 - `features/content_counter/content_counter_core/presentation/content_counter_cubit.dart`
 - `features/content_counter/content_counter_core/presentation/counter_appearance_cubit.dart`
-- `features/content_counter/content_counter_core/presentation/widgets/reel_counter_card.dart`
 - `features/content_counter/content_counter_bubble/domain/entities/bubble_style.dart`
 - `features/content_counter/content_counter_bubble/domain/repositories/bubble_repository.dart`
 - `features/content_counter/content_counter_bubble/data/repositories/bubble_repository_impl.dart`

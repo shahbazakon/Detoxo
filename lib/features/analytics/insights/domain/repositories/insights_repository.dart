@@ -18,4 +18,9 @@ abstract interface class InsightsRepository {
   /// The stored record for [dayKey] (`dd-MM-yyyy`), or null. Synchronous
   /// because `LocalStore.read` is; used for the previous-day comparison.
   DailyStats? cached(String dayKey);
+
+  /// Whether Usage access is granted right now — tri-state like the usage
+  /// layer beneath (`null` = could not read). One cheap channel call, so the
+  /// resume path can notice a grant revoked in Settings without recomputing.
+  Future<bool?> hasAccess();
 }

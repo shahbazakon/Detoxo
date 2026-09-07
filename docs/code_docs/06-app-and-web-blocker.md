@@ -214,7 +214,8 @@ Only the `AppBlockCubit` is route-scoped (`BlocProvider` in the screen);
 
 Like the web blocker, the screen carries no intro paragraph: the app-bar
 `InfoButton` explains the feed-vs-whole-app split, and section labels use the
-shared `SectionHeader` / `InlineHint` from `core/widgets/common_widgets.dart`.
+shared `SectionHeader` (`design_system/components/section_header.dart`) and
+`InlineHint` (`core/widgets/common_widgets.dart`).
 
 The practical takeaway: adding a *custom app* takes effect immediately — the
 list syncs to native and the service HOME-bounces the app on open; toggling a

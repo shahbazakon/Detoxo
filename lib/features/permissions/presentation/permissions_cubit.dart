@@ -78,6 +78,13 @@ class PermissionsCubit extends Cubit<List<PermissionStatus>> {
   /// progress row and the Continue button can never contradict each other:
   /// granted, or a live `unknown` reading backed by the last successful check.
   /// A definitive `denied` is false, regardless of history.
+  /// The live row for [kind]; a default (`unknown`) row when the list has no
+  /// entry yet, so callers never null-check or re-implement the lookup.
+  PermissionStatus statusFor(AppPermission kind) => state.firstWhere(
+    (s) => s.kind == kind,
+    orElse: () => PermissionStatus(kind: kind),
+  );
+
   bool effectivelyGranted(PermissionStatus s) =>
       s.granted ||
       (s.state == PermissionState.unknown &&

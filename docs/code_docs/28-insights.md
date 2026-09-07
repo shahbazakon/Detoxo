@@ -60,7 +60,7 @@ assumption.
 
 | Metric | Rule |
 |---|---|
-| `screenTimeMs` | Σ `foregroundMillis` (rows with `≤ 0` skipped, though native already drops them) |
+| `screenTimeMs` | Σ `foregroundMillis` over rows **clipped to the window length** — `queryAndAggregateUsageStats` returns bucket totals that are not clipped to the window, so a short post-midnight window could carry most of yesterday's bucket into a multi-hour "today"; non-positive rows dropped (native already drops them) |
 | `distractionMs` | the same sum restricted to `catalog.behaviorForPackage(pkg) == distracting` |
 | `distractionOpens` | Σ `countOpens(events)` over distracting packages |
 | `contextSwitches` | `Σ countOpens(events).values − 1`, floored at 0 |
@@ -118,7 +118,8 @@ per-day keys or a real store.
 
 `InsightsRepositoryImpl(UsageRepository, ContentCounterRepository, ProtectedAppsRepository,
 LocalStore, {clock, catalog})` — `clock` and `catalog` are injected so rollover and backfill are
-testable without waiting for midnight. Registered in `injector.dart` beside `AnalyticsRepository`.
+testable without waiting for midnight. Registered in `injector.dart` as a lazy singleton, like
+every repository.
 
 `today()`:
 
@@ -135,10 +136,16 @@ testable without waiting for midnight. Registered in `injector.dart` beside `Ana
    `ponytail:` one day, not seven — UsageStats retains ~7 days; deeper backfill lands with the
    history UI.
 4. Persists both and prunes — **unless the write would replace a `complete: true` day with a
-   partial one**, which is what a device clock moved backwards produces.
+   partial one**, which is what a device clock moved backwards produces. Every write also
+   **scrubs the current protected set from every stored day's `topApps`** (`_scrubProtected`):
+   only today and an unfinished yesterday are ever recomputed, so a package protected *today*
+   would otherwise stay named under every already-complete day for up to 90 days.
 
-The document is decoded **once** per `today()` and threaded through the backfill and the write;
-each `cached()` call re-parses all 90 days, and this method used to make four of them.
+The document is decoded **once** per `today()` and threaded through the backfill and the write,
+and the decoded map is memoised against the exact raw string it came from: the cubit reads
+`cached()` right after `today()` decoded the same document, which used to parse all 90 days a
+second time. A wipe or any outside write changes the string, so the memo can never serve a stale
+document (pinned by the rollup test).
 
 Grant handling is the whole reason the return type is `UsageQueryResult<DailyStats>`:
 
@@ -146,9 +153,10 @@ Grant handling is the whole reason the return type is `UsageQueryResult<DailySta
 |---|---|
 | granted | `UsageGranted(stats)` |
 | `UsageDenied` | `UsageDenied` — **never** a cached fallback and never an empty day. A stale figure presented as live is the same lie as `0 m`. |
-| `UsageUnavailable` | today's cached record if one exists (the engine failed, but that number was real), otherwise `UsageUnavailable` |
+| `UsageUnavailable` | today's cached record if one exists (the engine failed, but that number was real) — scrubbed of the current protected set in memory first, because only the granted exit's write scrubs and the screen names `topApps` from this record ([24](24-protected-apps.md) §6) — otherwise `UsageUnavailable` |
 
-`cached(dayKey)` is synchronous because `LocalStore.read` is.
+`cached(dayKey)` is synchronous because `LocalStore.read` is. `hasAccess()` proxies the usage
+layer's tri-state grant read for the cubit's resume path (§6).
 
 Every recompute also reads `protectedPackagesFor(ProtectedAppsRepository.load())` and passes it
 to the fold. A failed read degrades to the **bundled catalog** rather than to an empty set, so
@@ -160,8 +168,10 @@ the seeded banking / UPI / password-manager packages stay hidden either way.
 `InsightsState { status, stats, yesterday, apps }` with
 `enum InsightsStatus { loading, granted, denied, unavailable }`.
 
-- `load()` / `refresh()` / `refreshIfStale()` — the last is a no-op unless the cached `dayKey` has
-  gone stale, which is the resume path for a session held across midnight.
+- `load()` / `refresh()` / `refreshIfStale()` — the last recomputes when the cached `dayKey` has
+  gone stale (a session held across midnight) **or when the grant was revoked in Settings while
+  the app was away**: one `hasAccess()` read, a recompute only on an explicit `false` (`null` =
+  could not read). The day key alone let a revoked grant keep numbers on screen as if live.
 - An `_inFlight` guard stops a pull-to-refresh and a resume racing into two identical pairs of
   channel queries. Only the first read shows a spinner; a refresh keeps the numbers on screen.
 - **`_compute` never throws.** Every failure path emits — a repository throw lands the user on
@@ -176,18 +186,38 @@ the seeded banking / UPI / password-manager packages stay hidden either way.
   record after a rollover and labelled it "yesterday".
 - `yesterday` is populated **only when that day is `complete`** — comparing against a part-day
   would flatter today's figure.
-- `apps` maps package → `InstalledApp` from `EngineRepository.installedApps()` (already
-  process-cached) for labels and icons in the top-apps list. A failure costs the labels, not the
-  numbers: rows fall back to the package name.
+- `apps` maps package → `InstalledApp` for **every** installed app, from
+  `EngineRepository.installedApps()` (already process-cached), resolved on every compute
+  **whatever the grant said** — it labels the By app section's reels and blocks rows too, which need
+  no permission, and it is the Activity screen's one lookup, so pull-to-refresh renews labels.
+  A failure costs the labels, not the numbers: rows fall back to the package name and the last
+  good map stays.
 
-`InsightsView` is a `StatefulWidget` + `WidgetsBindingObserver` purely for that resume hook.
-**No ticker, no stream, no background job, and it is not provided app-wide** — nothing is computed
-at boot, and `AppResumeSync` is untouched.
+`InsightsView` is a `StatefulWidget` + `WidgetsBindingObserver` for that resume hook, and calls
+`refresh()` on every mount. **No ticker, no stream, no background job.** Since EVO-058 the cubit
+is provided app-wide in `main.dart` — but **lazily**, so nothing is computed at boot: the first
+Activity open constructs it. The shell rebuilds the tab on every switch and the drawer pushes a
+second route over it, so one shared instance means a later open paints the last numbers at once
+and refreshes in place, instead of flashing a spinner and running two channel queries per mount
+(or two concurrent computes racing on `usage_daily` from the drawer). `AppResumeSync` is
+untouched.
 
-What it draws, in order: a screen-time hero (`formatHm`, the distracting share as a shared
-`ProgressBar`, and yesterday's finished total as a plain `"Yesterday: 4h"` reference); four
-`StatCard`s (pickups, app switches, distracting opens, reels); the first/last-pickup row; the
-top five apps as tappable bars; and a footnote stating the limits of the numbers.
+What `InsightsView` itself draws is the **Distraction** section: a `SectionHeader('Distraction')`
+in every state — its header row also carrying the screen's one `IconButton` (tooltip "About these
+numbers", 48 dp), which opens the source note as a `GlassBottomSheet` (`_showAboutSheet`, same
+file) — over one `GlassCard` panel (`_DistractionCard`) when granted — the distracting share as a
+shared `ProgressBar` with its caption (`"1h 48m · 56% of screen time"` — a share of screen time,
+which is what `distractionShare` is — or `"Nothing yet today"`), a content-aligned hairline, then two flat
+`StatCard(compact: true, contained: false)` tiles (app switches, distracting opens). The `loading`
+state is the `LoadingState` spinner inside a panel of its own, so the section keeps its height
+while the numbers arrive. The headline figures live in the Activity screen's **Today** panel
+(`TodayOverview`, `analytics/presentation/widgets/today_overview.dart`): **Screen time**
+(`formatHm`, yesterday's finished total as a plain `"Yesterday: 4h"` caption) and **Pickups**
+(`"First 7:12"` caption — one reference per tile) sit under Detoxo's own **Reels** and **Blocked**
+tiles, and appear only when the status is `granted`. The top five apps are the **Time** segment
+of the **By app** section (`ByAppSection`, `widgets/by_app_section.dart`), also only when granted.
+Both widgets read the same app-wide cubit, so nothing is a second snapshot of a live number. There
+is no footnote under the sections: the source note lives behind the info button (above).
 
 **No percentage against yesterday** (EVO-035). Today is still running, so a percentage against
 yesterday's *whole* day rendered "95% less than yesterday" every morning — true arithmetic, false
@@ -197,43 +227,108 @@ screen and available to a future history view.
 **Each top-app row opens a pre-filled daily-limit rule** (EVO-033) — `Routes.ruleEditor` with
 `RuleEditorArgs(kind: timeLimit, ...)`, never a silent save. This is the one place the screen
 stops being a report: seeing "1h 10m" against an app is the moment a limit gets set. It is why
-`RuleEditorArgs` lives in `limits/rules/domain/` rather than `presentation/`.
+`RuleEditorArgs` lives in `limits/rules/domain/` rather than `presentation/`. The row is the shared
+`AppLimitRow` (`analytics/presentation/widgets/app_limit_row.dart`), the one row for all three
+**By app** segments — reels, blocks (EVO-059), time; its label is trimmed so a blank launcher
+label falls back to the row's own `name` (the reel counter's display name) and then the package
+name instead of a blank row and a rule named `"Limit  "`, and it takes an `iconUrl` for rows that
+carry an asset icon rather than installed-app bytes.
 
-The footnote is scoped to what Android actually produced: screen time, distraction time and the
-app list are OS figures; reels seen is Detoxo's own count (which undercounts quiet playback), and
-opens and switches are derived from app changes. Vouching for all six with one sentence was a
-precision over-claim on three of them.
+The **About these numbers** sheet is scoped to what Android actually produced: screen time,
+distraction time and the app list are OS figures; opens and switches are derived from app changes;
+reels and blocks (both drawn above this view) are Detoxo's own counts, and reels undercount quiet
+playback. Vouching for all of them with one sentence was a precision over-claim on half of them.
+It is four short paragraphs of static text — it no longer reads the cubit (the "Today is still
+running" line went with the on-screen footnote).
 
 ### The unknown state (EVO-014 on a new surface)
 
-`denied` and `unavailable` each render the shared `PermissionCard` — `denied` with a **Grant**
+`denied` and `unavailable` each render the shared `PermissionCard` under the same **Distraction**
+header, so the section keeps its heading with or without numbers — a one-sentence `why`
+("Needed to show your screen time." / "Couldn't read your screen time.") and nothing under the
+card — `denied` with a **Grant**
 action wired to `sl<PermissionRepository>().request(AppPermission.usageAccess)` (the
 `rules_screen` precedent), `unavailable` with `unknown: true` so it reads the neutral "Checking…" row, plus **Retry** —
 which required `PermissionCard` to render an action in its unknown state at all (it previously
 dropped it, so this button was dead code that this doc described as working). **Neither ever renders `0 m`**, because that is indistinguishable from a
 genuinely quiet day. A genuinely quiet day is a separate, granted state and says
-"Nothing recorded yet today".
+"Nothing yet today".
 
 ### Entry point — the Activity tab
 
-`analytics_screen.dart`'s `_ActivityBody` became stateful and gained a `GlassSegmented`
-**Insights | Events** control; Insights is the default segment, and the reel counter card plus the
-block-event feed stay on Events exactly as before. `_withCubit` is now a `MultiBlocProvider`
-supplying both `AnalyticsCubit` and `InsightsCubit`. The list is wrapped in a `RefreshIndicator`
-with `AlwaysScrollableScrollPhysics`, so pull-to-refresh works even on the short permission-card
-page.
+`analytics_screen.dart` is **one scroll of three headed sections** — an uppercase `SectionHeader`
+(`lib/core/design_system/components/section_header.dart`, the Settings / Rules grouped-list idiom) over **one**
+`GlassCard` panel each — then the override card. Each section widget owns its
+header, so the headers carry the vertical rhythm (`md` above, `sm` below) and `_ActivityBody`,
+which is stateless, places nothing between them; on the pushed route the list has no top inset
+of its own, the app bar and the first header supply it. Top to bottom:
+
+1. **Today** — `TodayOverview`: a 2×2 grid of flat `StatCard(compact: true, contained: false)`
+   tiles in one panel, with a content-aligned hairline (`Divider`, `context.glass.border`,
+   `indent: sm`) between the rows. **Reels** (live from the app-wide `ContentCounterCubit`,
+   `All time: N` caption) and **Blocked** (the app-wide `ServiceCubit`'s native counters via
+   `context.select`; one reference — `Yesterday: N` once there is history, `All time: N` before —
+   [12](12-analytics-notifications-resilience.md) §1) always; **Screen time** and **Pickups** join
+   them, hairline included, once Usage access is granted. Rows are `IntrinsicHeight`
+   (`StatCardPair`) so a wrapped caption at a large text scale stretches both tiles.
+2. **Distraction** — `InsightsView` (above): the share bar and its two counts in a panel, or the
+   permission / loading panel in its place, under the same header in every state. Detoxo's own
+   counts lead because they never need a permission — a user without Usage access still gets real
+   numbers above the Grant card.
+3. **By app** — `ByAppSection`: a `GlassSegmented` **Reels | Blocks | Time** (Time only when
+   granted; the index clamps if a grant is revoked from under it) sits bare between the header and
+   the panel, `AppSpacing.lg` above it — the control is the one glass surface that casts a shadow,
+   the card around it used to clip that, and a narrower gap would let the panel's backdrop blur
+   smear it across the rim. The panel is one list of `AppLimitRow`s, busiest first with bars
+   relative to the busiest, each row an `AppPressable` (press scale, haptic, focus ring — the app's
+   one custom-tappable idiom, never a raw `InkWell`) at least 48 dp tall (`vertical:
+   AppSpacing.xs`). The rows are the
+   pure, static `ByAppSection.rowsFor(segment, count:, blocks:, stats:)` — sort, top-five cap for
+   Time, bar normalisation with the zero guard — dispatched on the `ByAppSegment` enum, never a
+   positional index (`test/by_app_rows_test.dart`). Labels for all three come from
+   `InsightsState.apps`, the screen's one lookup (below). Every segment is *today* — the block
+   tally is native and rolled at read time. An empty segment says why in one muted sentence
+   (`ByAppSection.emptyCopy`, one sentence each: "Counting is off. Turn it on under Appearance." /
+   "No reels counted yet." / "No blocks yet today." / "Nothing yet today."). The state is kept alive
+   (`AutomaticKeepAliveClientMixin`), as is `InsightsView`'s: the `ListView` is lazy, and a section
+   scrolled past the cache extent would otherwise lose its chosen segment or re-run the mount
+   refresh on the way back.
+4. **Overrides** — `OverrideHistoryCard` (EVO-052, hides itself at zero), after an `md` gap.
+
+Twelve glass surfaces on a granted scroll became four (three panels and the segmented control):
+the tiles no longer paint glass inside glass, and `SectionHeader` is a `Semantics(header: true)`
+node, so TalkBack's swipe-by-heading lands on each section as it did on the `AppCard` titles this
+replaced (`test/activity_screen_test.dart` pins the heading and the one-`GlassContainer`-per-section
+rule). Those four titled `AppCard`s had themselves replaced three per-app lists in three styles
+(the reel card's own rows, "Where it happened", "Where it went"), two hero cards and four loose
+`StatCard`s. The `ReelCounterCard` hero is gone with its Today / All toggle; the all-time reel
+total is the tile's caption. No provider of its own: `InsightsCubit` comes from `main.dart`
+(EVO-058, above). The list is a `RefreshIndicator` with `AlwaysScrollableScrollPhysics`; the pull
+recomputes insights **and** re-reads the block counters (error-guarded, the resume path's rule),
+because native rolls `today` over at read time and a session pulled across midnight may see no
+`blocked` event. The reel tile is stream-fed and already live. The tab header's feedback + menu
+pair is the Dashboard header's, gap included, with `DrawerMenuButton` a design-system component.
+
+This replaced a `GlassSegmented` **Insights | Events** control whose Events segment listed one
+tile per block from a Dart-side buffer (`AnalyticsCubit`) that only recorded while the tab was
+open — the buffer and its feed are gone, see [12](12-analytics-notifications-resilience.md) §1.1.
 
 **No new route, no new nav entry, no dashboard tile** — the Activity tab is already a nav
 destination, so a dashboard tile would only have switched tabs.
 
 ### Accessibility
 
-`StatCard` announces one merged sentence (`"Pickups: 84"`) instead of two loose nodes, and honours
-"remove animations" — its count-up used to churn the semantics tree on every frame, the exact
-thing `ReelCounterCard` wraps in `excludeSemantics`. The hero number announces once; each top-app
-row is a labelled button (`"Instagram, 1h 10m. Set a daily limit"`) with `ExcludeSemantics` **inside**
-the tappable, so the row keeps its tap action. The proportion bar is the shared `ProgressBar`,
-which takes an optional `semanticLabel` because a bare bar contributes no semantics node at all.
+`StatCard` announces one merged sentence (`"Screen time: 3h 12m, Yesterday: 4h"`,
+`"Pickups: 84, First 7:12"`, `"Blocked: 12, Yesterday: 52"` — the visual "·" is spoken as a comma, since TalkBack
+renders U+00B7 as silence) instead of loose nodes, and honours "remove animations" —
+its count-up used to churn the semantics tree on every frame; a `text` figure is never animated.
+The Distraction card's bar and caption are **one spoken sentence** (`"1h 48m, 56 percent of
+screen time"`, derived from the visible line) rather than a bare progress node followed by a raw
+"·"; the header's info button announces as "About these numbers". Each **By app**
+row is a labelled button (`"Instagram, 1h 10m. Set a daily limit"`, `"Instagram, 9 blocks. …"`)
+with `ExcludeSemantics` **inside** the tappable, so the row keeps its tap action. The proportion
+bar is the shared `ProgressBar`, which takes an optional `semanticLabel` because a bare bar
+contributes no semantics node at all.
 
 ## 7. Channel & permission delta
 
@@ -244,7 +339,7 @@ which takes an optional `semanticLabel` because a bare bar contributes no semant
 ## 8. Honesty & privacy
 
 - `UsageStatsManager` foreground time includes a **visible-but-idle** app. That is the same number
-  the OS shows in Digital Wellbeing, which is the right bar — the footnote says so rather than the
+  the OS shows in Digital Wellbeing, which is the right bar — the About sheet says so rather than the
   code quietly "improving" it.
 - Per-app usage is sensitive. It stays on device, is written only to the local Hive box, and is
   **never** sent to Firebase — the telemetry layer ([19](19-firebase-telemetry.md)) has no insights
@@ -262,7 +357,8 @@ which takes an optional `semanticLabel` because a bare bar contributes no semant
   mint a second open; out-of-order events sorted, never negative; an event exactly at `start` kept
   and exactly at `end` dropped; a zero-foreground app absent from `topApps`; an uncatalogued app
   counted as screen time but never as distraction; `topApps` descending and capped at ten; a JSON
-  round trip; a partial document read as zeros.
+  round trip; a partial document read as zeros; negative values floor at zero and `topApps` is
+  re-sorted on read; a row longer than the window is clipped to it and rows inside are untouched.
 - `test/insights_rollup_test.dart` (14) — the store: today `complete: false` and yesterday
   backfilled `complete: true` exactly once; midnight answers without querying; a reel-count failure
   degrades to 0; `UsageDenied` never becomes an empty day and never falls back to cache;
@@ -271,17 +367,30 @@ which takes an optional `semanticLabel` because a bare bar contributes no semant
   persisted key matches `dd-MM-yyyy`; a protected app is absent from `topApps` **and** from the
   written document while still counting toward the aggregate; a user's own protected addition is
   excluded too, and an unreadable protected store still hides the catalog; a backwards clock never
-  downgrades a finished day; the midnight fast path still reports a missing grant as denied.
-- `test/insights_cubit_test.dart` (11) — a throwing repository lands on `unavailable` rather than
+  downgrades a finished day; the midnight fast path still reports a missing grant as denied; a
+  package protected after the fact is scrubbed from every stored day; the decode memo never masks
+  a wipe or an outside write.
+- `test/insights_cubit_test.dart` (12) — a throwing repository lands on `unavailable` rather than
   a stuck spinner; `load()` never throws, so the unawaited resume leg is safe; closing during the
   installed-apps scan does not throw; the numbers emit before the labels; a stale `yesterday` is
-  dropped on a rollover rather than relabelled; `refreshIfStale` is a no-op within a day, recomputes
-  across one, and re-checks a previously denied grant; concurrent refreshes coalesce.
-- `test/insights_view_test.dart` (8) — denied offers Grant and prints no zero; unavailable renders
-  the neutral state **and a Retry that actually recomputes**; granted draws `3h 12m` and the
-  footnote; a quiet day says so instead of showing the denied card; a complete yesterday shows as a
-  neutral reference and an incomplete one is not shown at all; a top-app row is labelled, timed and
-  exposed as a button.
+  dropped on a rollover rather than relabelled; `refreshIfStale` recomputes across a day, re-checks
+  a previously denied grant, and within a day recomputes only when the grant reads `false` (a
+  `null` read is not a revocation); concurrent refreshes coalesce.
+- `test/insights_view_test.dart` (7) — denied offers Grant and prints no zero; unavailable renders
+  the neutral state **and a Retry that actually recomputes** (the Distraction card appears); granted
+  draws the distracting line and the switches / opens tiles, and neither `3h 12m` nor a **Reels**
+  tile (those are the Today grid's); a quiet day says so instead of showing the denied card; the
+  info button opens the About sheet with the Digital Wellbeing note; a later mount over the same
+  cubit shows the card on its first frame, never the spinner (EVO-058).
+- `test/activity_screen_test.dart` (5) — the Activity screen over real cubits and fakes in `sl`
+  (the `web_block_screen_semantics_test` idiom): a native status event lands in the Blocked tile
+  (`"Blocked: 12, Yesterday: 52"`) and, behind the Blocks segment, the per-app
+  rows (most-blocked first, each a button offering a limit); the scroll reads Today → Distraction →
+  By app with `1h` on screen and the info button in place of a footnote; a fresh install claims no
+  yesterday; without Usage access the OS tiles and the Time segment are absent; a complete
+  yesterday reads as `Yesterday: 4h`, pickups carry their first-pickup caption, and the Time
+  segment's top app is
+  labelled, timed and exposed as a button.
 
 ## Source files
 
@@ -293,7 +402,18 @@ which takes an optional `semanticLabel` because a bare bar contributes no semant
 - `lib/features/analytics/insights/presentation/insights_cubit.dart`
 - `lib/features/analytics/insights/presentation/widgets/insights_view.dart`
 - `lib/features/analytics/analytics.dart` (barrel)
-- `lib/features/analytics/presentation/analytics_screen.dart` (the segmented entry point)
+- `lib/features/analytics/presentation/analytics_screen.dart` (the Activity screen: the three
+  headed sections this view sits second in)
+- `lib/features/analytics/presentation/widgets/today_overview.dart` (the Today panel: reels,
+  blocks, screen time, pickups as flat tiles)
+- `lib/features/analytics/presentation/widgets/by_app_section.dart` (the By app section: Reels |
+  Blocks | Time over one panel of one row type)
+- `lib/features/analytics/presentation/widgets/app_limit_row.dart` (the shared per-app row)
+- `lib/core/design_system/components/section_header.dart` (`SectionHeader` — the section headers,
+  semantic headings; re-exported from `core/widgets/common_widgets.dart` for its older importers)
+- `lib/core/design_system/components/cards.dart` (`StatCard.contained`, `GlassCard`)
+- `lib/main.dart` (the lazy, app-wide `InsightsCubit` provider — EVO-058)
+- `test/activity_screen_test.dart`
 - `lib/core/storage/local_store.dart` (`StoreKeys.usageDaily`)
 - `lib/core/utils/duration_format.dart` (`formatHm` — the app's one duration form, shared with the
   dashboard hero and the onboarding dial, mirrored by Kotlin `UsageQuery.formatHm`)

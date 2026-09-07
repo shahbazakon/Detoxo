@@ -24,15 +24,15 @@ required.
 | Blocking plans (`blockAll` / `curious`=**Conscious** / `oneReel` / `paused`) + pause window | **Honored by the engine** — `activePlan` gate + `pauseUntil` clock window + Conscious time-bank accountant | [05-plans-pause-conscious.md](05-plans-pause-conscious.md) |
 | Web blocklist enforcement | **Wired natively** — `WebBlockEngine` reads the browser address bar in the hot path, matches wildcards, presses Back with per-host debounce, records stats | [06-app-and-web-blocker.md](06-app-and-web-blocker.md), `engine/WebBlockEngine.kt` |
 | Custom whole-app blocking | **Wired natively** — `pushAppBlocklist` → `ConfigStore.blockedAppPackages`; the service HOME-bounces a blocked app with the block screen (toast fallback) + vibration, recorded to the shared block counter | [06-app-and-web-blocker.md](06-app-and-web-blocker.md), [25-block-screen.md](25-block-screen.md), `DetoxoAccessibilityService.kt` (`onAppBlocked`) |
-| Block screen (intervention wall) | **Shipped** — a native full-screen overlay at every block (reel, Conscious drain, app, website) with Go home / Open Detoxo / Back to the app; own on/off switch and style editor under Appearance | [25-block-screen.md](25-block-screen.md) |
+| Block screen (intervention wall) | **Shipped** — a native full-screen overlay with Go home / Open Detoxo / Back to the app. Reel blocks wall in the **Block screen** block mode (Settings → When a reel is detected) or when forced (daily limit, schedule, drained Conscious bank); app and website blocks wall behind the on/off switch under Appearance, which also hosts the style editor | [25-block-screen.md](25-block-screen.md) |
 | Category catalog + usage signal | **Shipped as foundations** — `Catalog.bundled` (10 categories) and the pull-only `UsageStatsManager` layer; both now have consumers — the rule editor picks categories and `syncRules` / the native `LimitReconciler` meter rule limits against UsageStats ([27](27-rules-engine.md)), and the insights rollups read both ([28](28-insights.md)) | [26-catalog-and-usage-signal.md](26-catalog-and-usage-signal.md) |
-| Insights (real screen time) | **Shipped** — a pure daily fold over `UsageStatsManager` (screen time, distraction time + share, pickups, context switches, distracting opens, top apps) cached as a 90-day `usage_daily` rollup, shown as the default segment of the Activity tab. No new permission, no new channel method. Denied Usage access renders a grant card, never a `0 m` | [28-insights.md](28-insights.md) |
+| Insights (real screen time) | **Shipped** — a pure daily fold over `UsageStatsManager` (screen time, distraction time + share, pickups, context switches, distracting opens, top apps) cached as a 90-day `usage_daily` rollup, shown on the Activity tab beneath the reel counter and the native block-count tiles. No new permission, no new channel method. Denied Usage access renders a grant card, never a `0 m` | [28-insights.md](28-insights.md) |
 | Soft nudge (advisory dwell reminder) | **Shipped** — Android-free `NudgeTracker` ticked from the accessibility event stream above the master switch; its own bottom-anchored, touch-passthrough card with a one-tap Leave. Never blocks, never presses BACK, off by default, no new permission | [30-soft-nudge.md](30-soft-nudge.md) |
 | Per-target unblock + locked rules | **Shipped** — a grant frees ONE target (`"Instagram for 15 minutes"`) with expiry enforced natively by the Android-free `UnblockRegistry` on a monotonic deadline, from the block screen or a blocklist row; a **locked** rule has no off switch at all and is lifted only by a rationed override that splits that rule's own windows. Strict rules never consult a grant — that absence is the guarantee | [31-locked-rules-and-unblock.md](31-locked-rules-and-unblock.md) |
 | Content counter (decoupled from blocking) + bubble + home-screen widget | **Works** — side-effect-free counting pass runs even when blocking is off; drives overlay bubble + `home_widget` | [17-content-counter.md](17-content-counter.md) |
 | Blocklist (data-driven) | **Works** — parsed from bundled `assets/config/platforms_config.json`; per-platform enable/disable persisted natively | [02-detection-config-schema.md](02-detection-config-schema.md) |
 | PIN lock + biometric/device-credential + retry-lockout ladder + Smart Auto Lock (resume re-lock, FLAG_SECURE Recents privacy) | **Works** — `local_auth` + `flutter_secure_storage`. **No recovery channel by design**; the `000000` dev backdoor was removed, not wired | [08-pin-lock-recovery.md](08-pin-lock-recovery.md) |
-| Analytics (block-event history) | **Works, local only** — capped in-memory/JSON block-event buffer (recent ~100); no cloud sink. Now the **Events** segment of the Activity tab, beside Insights | [12-analytics-notifications-resilience.md](12-analytics-notifications-resilience.md) |
+| Block counts | **Works** — the native `block_today` / `block_total` counters, plus yesterday's rotated count and a bounded per-package tally (EVO-059 / EVO-060), shown as the Activity tab's **Blocked** tile (yesterday as its caption) and its **By app → Blocks** rows (each a tap from a daily limit); the Dart block-event buffer and its **Events** feed were removed (they only saw blocks while the tab was open) | [12-analytics-notifications-resilience.md](12-analytics-notifications-resilience.md) |
 | Firebase telemetry | **Wired** — Analytics (screen views + usage events), Crashlytics, Performance; anonymised, collection on in every build | [19-firebase-telemetry.md](19-firebase-telemetry.md) |
 | Persistence | **Works, on-device only** — Dart `local_store` + native `detoxo_engine_prefs` + secure storage + widget keys `cc_today`/`cc_total` | [09-persistence-data-model.md](09-persistence-data-model.md) |
 | Config load | **Works, offline** — bundled JSON assets via `ConfigRepositoryImpl`; no live fetch | [10-networking-config-sync.md](10-networking-config-sync.md) |
@@ -85,8 +85,8 @@ replaced without touching feature code.
   are live (see [19-firebase-telemetry.md](19-firebase-telemetry.md)). Performance runs with **manual
   traces only** — the auto-trace Gradle plugin is omitted (its 1.4.2 release is incompatible with
   AGP 9). Collection is unconditional — a **consent / opt-out gate is the main follow-up** (see §6).
-- **Still swap-ins:** FCM push is not bundled, and the local `AnalyticsRepository` block-event buffer
-  has no cloud sink (it stays on-device).
+- **Still swap-ins:** FCM push is not bundled. (The Dart `AnalyticsRepository` block-event buffer,
+  once listed here as a cloud-sink seam, was removed — the native block counts stay on-device.)
 
 ### Play Billing / Premium & AdMob — SDKs removed
 - `in_app_purchase` and `google_mobile_ads` were **deleted from `pubspec.yaml`**, along with the
@@ -327,7 +327,6 @@ release.
 - `lib/core/storage/local_store.dart`
 - `lib/features/blocking/shared/data/repositories/config_repository_impl.dart`
 - `lib/features/access_protection/data/repositories/pin_repository_impl.dart`
-- `lib/features/analytics/data/repositories/analytics_repository_impl.dart`
 - `lib/features/limits/app_blocker/`, `lib/features/limits/daily_limit/`, `lib/features/limits/web_blocker/`
 - `lib/features/settings/presentation/settings_screen.dart`
 - `lib/main.dart`

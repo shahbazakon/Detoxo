@@ -19,6 +19,8 @@ class EngineRepositoryImpl implements EngineRepository {
 
   int _today = 0;
   int _total = 0;
+  int _yesterday = 0;
+  Map<String, int> _byPackage = const {};
 
   @override
   Stream<ServiceSnapshot> statusStream() async* {
@@ -26,24 +28,42 @@ class EngineRepositoryImpl implements EngineRepository {
     await for (final e in _channel.events()) {
       final type = e['type'] as String?;
       if (type == ChannelEvents.serviceStatus) {
-        yield ServiceSnapshot(
-          status: (e['running'] as bool? ?? false)
+        yield _snapshot(
+          (e['running'] as bool? ?? false)
               ? ServiceStatus.running
               : ServiceStatus.stopped,
-          blocksToday: _today,
-          blocksTotal: _total,
         );
       } else if (type == ChannelEvents.blocked) {
-        _today = e['today'] as int? ?? _today;
-        _total = e['total'] as int? ?? _total;
-        yield ServiceSnapshot(
-          status: ServiceStatus.running,
-          blocksToday: _today,
-          blocksTotal: _total,
-        );
+        _readCounts(e);
+        yield _snapshot(ServiceStatus.running);
       }
     }
   }
+
+  /// The counters as the last event or status query left them. Read with
+  /// `as num?`, never `as int?`: a throwing cast inside this `async*` would
+  /// end the subscription and freeze every tile for the process lifetime.
+  void _readCounts(Map<String, dynamic> m) {
+    _today = (m['today'] as num?)?.toInt() ?? _today;
+    _total = (m['total'] as num?)?.toInt() ?? _total;
+    _yesterday = (m['yesterday'] as num?)?.toInt() ?? _yesterday;
+    final by = m['byPackage'];
+    if (by is Map) {
+      _byPackage = {
+        for (final e in by.entries)
+          if (e.key is String && e.value is num)
+            e.key as String: (e.value as num).toInt(),
+      };
+    }
+  }
+
+  ServiceSnapshot _snapshot(ServiceStatus status) => ServiceSnapshot(
+    status: status,
+    blocksToday: _today,
+    blocksTotal: _total,
+    blocksYesterday: _yesterday,
+    blocksByPackage: _byPackage,
+  );
 
   @override
   Stream<BlockEvent> blockStream() async* {
@@ -54,6 +74,7 @@ class EngineRepositoryImpl implements EngineRepository {
         packageName: e['package'] as String? ?? '',
         mode: BlockingMode.fromWire(e['mode'] as String?),
         timestamp: DateTime.now(),
+        wall: e['wall'] as bool? ?? false,
       );
     }
   }
@@ -101,14 +122,8 @@ class EngineRepositoryImpl implements EngineRepository {
     // setting — some OEMs (ColorOS force-stop) kill the service while the
     // Settings.Secure string keeps listing it, and never rebind it.
     final alive = enabled && await _channel.serviceAlive();
-    final stats = await _channel.blockStats();
-    _today = stats['today'] as int? ?? 0;
-    _total = stats['total'] as int? ?? 0;
-    return ServiceSnapshot(
-      status: alive ? ServiceStatus.running : ServiceStatus.stopped,
-      blocksToday: _today,
-      blocksTotal: _total,
-    );
+    _readCounts(await _channel.blockStats());
+    return _snapshot(alive ? ServiceStatus.running : ServiceStatus.stopped);
   }
 
   @override

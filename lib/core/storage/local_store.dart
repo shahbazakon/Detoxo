@@ -78,7 +78,6 @@ abstract final class StoreKeys {
   /// newest 90 days on every write. Day keys always come from `daySignature`.
   static const String usageDaily = 'usage_daily';
   static const String premiumDevUnlock = 'premium_dev_unlock';
-  static const String analyticsEvents = 'analytics_events';
   static const String dismissedNotices = 'dismissed_notices';
 
   /// JSON list of `AppPermission.name`s that were granted on the last

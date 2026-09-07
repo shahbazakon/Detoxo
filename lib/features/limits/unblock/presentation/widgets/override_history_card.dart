@@ -23,7 +23,10 @@ class OverrideHistoryCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return BlocBuilder<UnblockCubit, UnblockState>(
-      buildWhen: (p, c) => p.ledger != c.ledger || p.config != c.config,
+      // No `buildWhen`: the builder reads the clock and `overridesLeft`, and
+      // the resume / timer resync re-derives `overridesLeft` on an unchanged
+      // ledger — a ledger-only guard filtered out exactly the emit that would
+      // correct "1 left" after the period rolled over.
       builder: (context, state) {
         final summary = UnblockQuota.overrideSummary(
           state.ledger,

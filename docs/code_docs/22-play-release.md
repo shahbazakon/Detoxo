@@ -146,7 +146,8 @@ and disclosed.
 > scrolling. It uses AccessibilityService for two closely related purposes, both on-device
 > and in real time. The first is to recognise when a short-form video feed (Instagram Reels,
 > YouTube Shorts, and similar infinite feeds) is on screen inside an app the user has
-> explicitly added to their own blocklist — and then to close the feed with a Back action and
+> explicitly added to their own blocklist — and then to close the feed with a Back action and,
+> when the user has chosen the "Block screen" mode or a limit or schedule they set has run out,
 > show Detoxo's own full-screen block screen, drawn with the user-granted "Display over other
 > apps" permission, which names what was blocked and offers "Go home", "Open Detoxo" and
 > "Back to the app". The second is to measure how long the user has been in an app they asked
@@ -266,8 +267,11 @@ bounds straight through to the app underneath, and blocks nothing. It never read
 prompt is an ordinary in-app screen — it does not use this permission.) The block screen
 ([25](25-block-screen.md)) is raised by the accessibility service at the moment of a block. It
 is always dismissible from an on-screen action ("Go home" and "Open Detoxo" are never delayed;
-only the way back into the blocked app waits a few user-configurable seconds), can be switched
-off by the user (Appearance → Block screen), never imitates system UI, never covers a system
+only the way back into the blocked app waits a few user-configurable seconds), is under the
+user's control (for reel blocks it appears only in the "Block screen" mode the user picks under
+Settings → When a reel is detected, for app and website blocks it can be switched off under
+Appearance → Block screen, and for a daily limit, schedule or Conscious bank the user set it is
+removed by removing that rule), never imitates system UI, never covers a system
 dialog or an app that comes to the foreground other than the one the block came from, the
 launcher, or the app that block was opened from (where it waits for the user's own exit), captures
 no input meant for other apps, and is removed on screen-off, on Pause, when protection is
@@ -369,4 +373,4 @@ conservative.
 | Privacy-policy page content unverified (lives outside this repo) | Data-safety form may contradict the published policy |
 | No store screenshots / feature graphic in repo | Listing cannot be completed |
 | ~~Daily limit is UI-only~~ — **resolved by M3** ([27](27-rules-engine.md)): the rules snapshot carries `daily_reel_limit`, metered natively against `ContentCounter.timeTodayMs()` | It may now be listed, along with the natively enforced app blocker (HOME-bounce via `pushAppBlocklist`) |
-| 7 grandfathered feature-boundary violations (`tool/boundaries_baseline.txt`) | Engineering debt, not a Play blocker |
+| ~~7 grandfathered feature-boundary violations~~ — **resolved**: `tool/boundaries_baseline.txt` has been empty since M6, and on 2026-09-06 the gate's own extraction regex was repaired so a feature's top-level `presentation/` import is no longer skipped | — |

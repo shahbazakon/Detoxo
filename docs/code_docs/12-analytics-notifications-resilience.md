@@ -1,9 +1,9 @@
 # Analytics, Notifications & Resilience
 
-How Detoxo records what it blocked, keeps its engine alive and OS-visible,
+How Detoxo counts what it blocked, keeps its engine alive and OS-visible,
 survives reboots/updates, and (optionally) protects itself
-from being uninstalled. The `analytics` **feature** documented here is **local and
-on-device** — its block-event buffer never uploads. It is distinct from the app's
+from being uninstalled. The block counts documented here are **native and
+on-device** — nothing about a block is uploaded. They are distinct from the app's
 separate **Firebase telemetry layer** (usage analytics, Crashlytics, Performance),
 which *does* send anonymised data off-device — see
 [19-firebase-telemetry.md](19-firebase-telemetry.md). FCM push is still not bundled.
@@ -15,174 +15,77 @@ decoupled counting pipeline), [13-onboarding-permissions.md](13-onboarding-permi
 
 ---
 
-## 1. Local analytics (block-event history)
+## 1. Block counts (the Activity tab's "Blocked" tiles and rows)
 
-The `analytics` feature is a thin, local **block-event buffer** plus a read-only
-"Activity" feed. It records one record per native `blocked` event and shows the
-recent history; there is no aggregation, upload, or dashboard beyond a list.
+What Detoxo blocked is counted **natively**, not in Dart.
+`ConfigStore.recordBlock(dateKey, yesterdayKey, pkg)` keeps, in its
+SharedPreferences and all rolled by `block_date` ([09](09-persistence-data-model.md)):
 
-> The same feature also hosts **`insights/`** — the day rollups over real
-> `UsageStatsManager` screen time, which share the Activity tab behind a
-> segmented control but share no storage, no cubit and no repository with this
-> buffer. They are documented separately in [28-insights.md](28-insights.md);
-> everything in §1 below is the block-event buffer only.
+| Key | What |
+|---|---|
+| `block_today` / `block_total` | the counters, with read-time midnight rollover — after midnight `today` reads 0 before the day's first block |
+| `block_by_pkg_today` | today's per-package tally, `{pkg: count}` JSON, at most 20 packages — a newcomer past the cap evicts the smallest entry (EVO-059) |
+| `block_yesterday` / `block_yesterday_date` | the count that was "today" when the day last changed, rotated in by the first block of the new day and read back only while its date is exactly yesterday (EVO-060) |
 
-### 1.1 Feature layout & boundary
+The arithmetic is the pure `engine/BlockTally.kt` (`record` / `parse` / `without` /
+`yesterday`), pinned on the JVM by `BlockTallyTest`; `DateKeys.dayBefore(now)`
+supplies yesterday's key by Calendar arithmetic, so a DST day is still one day.
+Every `blocked` event and the `blockStats` reply carry `today`, `total`,
+`yesterday` and `byPackage` ([18](18-platform-channel-contracts.md));
+`EngineRepositoryImpl._readCounts` folds them into `ServiceSnapshot`
+(`blocksToday`, `blocksTotal`, `blocksYesterday`, `blocksByPackage`) with `as num?`
+reads — a throwing cast inside that `async*` would end the subscription and freeze
+every tile for the process. The snapshot is held by the app-wide `ServiceCubit`
+(`main.dart`) and re-read on every app resume (`AppResumeSync` →
+`ServiceCubit.refresh()`, §3.2) and on the Activity tab's pull-to-refresh, because
+native rolls `today` over at read time and there may be no `blocked` event to
+carry the new day in.
 
-```
-lib/features/analytics/
-  analytics.dart                                   # public barrel (domain only)
-  domain/repositories/analytics_repository.dart    # AnalyticsRepository interface
-  data/repositories/analytics_repository_impl.dart # LocalStore-backed impl
-  presentation/analytics_cubit.dart                # AnalyticsCubit
-  presentation/analytics_screen.dart               # AnalyticsScreen + AnalyticsTab
-```
+The Activity screen (`lib/features/analytics/presentation/analytics_screen.dart`,
+layout in [28](28-insights.md) §6) draws them as one flat `StatCard` in the
+**Today** panel (`widgets/today_overview.dart`) — **Blocked**, with
+`Yesterday: N` as its one caption once there is any history (`All time: N` before
+then); never a percentage, today is still running — via `context.select`, and as the **Blocks**
+segment of the **By app** section (`widgets/by_app_section.dart`): one `AppLimitRow`
+per package, most-blocked first with a bar relative to the most-blocked app, each
+opening the rule editor pre-filled with a daily limit for that app (EVO-033's rule,
+shared with the Reels and Time segments). Labels and icons are `InsightsState.apps` —
+the Activity screen's one installed-app lookup, resolved by `InsightsCubit` on every
+refresh whatever the usage grant said, from the engine's process-cached list; a
+failure costs the labels, never the rows. The row-building (sort, cap, bar
+normalisation) is the pure `ByAppSection.rowsFor`, unit-tested in
+`test/by_app_rows_test.dart`. Because
+the counters are native, every number is right for blocks that happened while the
+app was closed. `ServiceCubit` is reached through the `blocking.dart` barrel
+(exported like `settings_cubit`), which keeps `tool/check_boundaries.sh` clean.
 
-The barrel exports **only** the domain contract, so other features depend on the
-interface, never the `LocalStore`-backed implementation or the UI (boundary
-enforced by `tool/check_boundaries.sh`).
+Protected apps never enter the tally — the service's privacy guard precedes every
+block — and a package protected later leaves it at once: the `pushProtectedApps` arm
+calls `ConfigStore.scrubBlockTally` ([24](24-protected-apps.md)).
 
-### 1.2 Domain contract
+### 1.1 What was removed, and why
 
-`AnalyticsRepository` is deliberately tiny:
+Until this change the `analytics` feature also carried a Dart-side **block-event
+buffer**: `AnalyticsRepository` / `AnalyticsRepositoryImpl` over
+`StoreKeys.analyticsEvents` (`analytics_events`, a capped newest-first JSON list of
+`{platformId, packageName, mode, ts}`), fed by `AnalyticsCubit` subscribing to
+`EngineRepository.blockStream()`. Its only reader was an **Events** feed — one
+tile per block — behind a segmented **Insights | Events** control on the Activity
+tab. The cubit was created per Activity mount, so the buffer only recorded blocks
+**while the Activity view was open**: its "today" was never the real number, and
+the count tile that replaced the feed needed the native counters anyway.
 
-```dart
-abstract interface class AnalyticsRepository {
-  Future<void> logBlock(BlockEvent event);
-  Future<List<BlockEvent>> recent({int limit = 50});
-  Future<int> countToday();
-}
-```
+The feed, the segmented control, the cubit, the repository and its interface, the
+DI registration, the store key and `test/analytics_buffer_test.dart` are gone. An
+upgraded install's stale `analytics_events` document (up to 500 records — tens of KB
+that a non-lazy box decoded into RAM on every cold start) is deleted once at bootstrap
+(`lib/app/bootstrap.dart`, the `unblocks` step beside `migrateWebPauses`; a missing key
+is a no-op); nothing reads it. Nothing ever uploaded from it, and
+nothing does now — the block counts are local, and the Firebase layer
+([19](19-firebase-telemetry.md)) records block *categories*, not this count.
 
-`BlockEvent` (defined in the blocking feature,
-`lib/features/blocking/shared/domain/entities/engine_event.dart`) carries
-`platformId`, `packageName`, `mode` (`BlockingMode`), and a `timestamp`.
-
-### 1.3 Storage implementation
-
-`AnalyticsRepositoryImpl` persists to the Dart key-value store
-(`lib/core/storage/local_store.dart`) under key
-`StoreKeys.analyticsEvents = 'analytics_events'` as a single JSON array. Key
-behaviours:
-
-- **Newest-first, capped at 500.** `logBlock` reads the existing list, prepends
-  the new event, and truncates with `.take(_maxEvents)` where
-  `_maxEvents = 500`. So the buffer is a rolling window of the most recent ~500
-  blocks (older entries fall off).
-- **Explicit wire (de)serialization.** Each record is
-  `{ platformId, packageName, mode, ts }` where `mode` is `BlockingMode.wire`
-  (e.g. `"PRESS_BACK"`, `"KILL_APP"`) and `ts` is
-  `timestamp.millisecondsSinceEpoch`. Reads use `BlockingMode.fromWire(...)`,
-  which falls back to `pressBack` for unknown/legacy tokens, and default empty
-  strings / epoch-0 for missing fields — so a malformed record never throws.
-- **`recent({limit})`** decodes the array and returns the first `limit`
-  entries (default 50; the UI asks for 100). Returns `const []` when the key is
-  unset.
-- **`countToday()`** loads up to `_maxEvents` and counts entries whose
-  `timestamp` falls on the local calendar day (year/month/day match
-  `DateTime.now()`). This is the Dart-side "blocks today"; note the native engine
-  keeps its own authoritative counters (see [03-detection-engine.md](03-detection-engine.md)
-  and §2.4 below) — this local count is derived only from the buffered events.
-
-> Design note (from the impl's own comment): the interface is the seam for a
-> future cloud sink. "A cloud sink (Firebase Analytics) can be added behind the
-> same interface later." That is a **planned swap-in**, not shipped — nothing
-> uploads today.
-
-### 1.4 Cubit — the sink and the loader
-
-`AnalyticsCubit extends Cubit<List<BlockEvent>>` (state is just the list;
-initial `const []`):
-
-```dart
-AnalyticsCubit(this._repo, this._engine) : super(const []) {
-  _engine.blockStream().listen(_repo.logBlock);   // persist every block
-}
-Future<void> load() async => emit(await _repo.recent(limit: 100));
-```
-
-Two responsibilities:
-
-1. **Persistence sink.** In its constructor it subscribes to
-   `EngineRepository.blockStream()` and pipes every `BlockEvent` straight into
-   `_repo.logBlock`. `blockStream()`
-   (`lib/features/blocking/shared/data/repositories/engine_repository_impl.dart`)
-   filters the multiplexed EventChannel for `type == "blocked"` and maps
-   `platformId` / `package` / `mode` into a `BlockEvent`, stamping
-   `timestamp: DateTime.now()` on the Dart side (the native `today`/`total`
-   counters on that event feed the status stream, not the history record).
-2. **UI loader.** `load()` reads the last 100 records for display.
-
-> Caveat worth knowing: the sink lives on the cubit, and the cubit is created
-> where the Activity view mounts (see §1.5). Persistence therefore runs while an
-> Activity view has been opened at least once and its cubit is alive — it is not
-> an app-lifetime background logger. The native engine's own counters and events
-> are the source of truth for "what was blocked"; this buffer is a UI-facing
-> convenience history.
-
-### 1.5 Presentation — one cubit, two entry points
-
-`analytics_screen.dart` exposes the same feed two ways that differ only in
-chrome, both wired through `_withCubit(...)` — a `MultiBlocProvider` supplying an
-`AnalyticsCubit` (`sl<AnalyticsRepository>()`, `sl<EngineRepository>()`) and an
-`InsightsCubit` (`sl<InsightsRepository>()`, `sl<EngineRepository>()`), both
-already `..load()`-ed; the `ContentCounterCubit` comes from `main.dart`:
-
-- **`AnalyticsScreen`** — full-screen drawer route ("Activity") with a
-  `GlassAppBar` + back button.
-- **`AnalyticsTab`** — the second HomeShell tab, with an in-tab header, a
-  feedback button, and a drawer menu button, wired to the floating nav bar's
-  scroll controller for hide-on-scroll.
-
-The body (`_ActivityBody`) is a stateful, always-scrollable `ListView` inside a
-`RefreshIndicator`, led by a `GlassSegmented` **Insights | Events** control.
-Insights is the default segment and renders `InsightsView` ([28](28-insights.md));
-pull-to-refresh recomputes it. The **Events** segment is this buffer: the
-always-visible `ReelCounterCard` (from the content-counter feature), then either
-an `EmptyState` ("Nothing blocked yet" / "Block events will show up here as they
-happen.") or one `_EventTile` per event. A tile renders a red "ban" `IconBadge`,
-`platformId` as the title, `packageName · mode.wire` as the subtitle, and a
-`DateFormat('MMM d, HH:mm')` timestamp.
-
-### 1.5a Lifetime and write safety
-
-`AnalyticsCubit` holds its `blockStream()` subscription and cancels it in
-`close()`. It is constructed per `_ActivityBody` mount and `AnalyticsScreen` is
-a pushed drawer route, so without the cancel every visit left a permanent
-listener behind — and each one ran its own read-modify-write of the same Hive
-key on every block, so the user's own block events could be lost to the race.
-
-`AnalyticsRepositoryImpl.logBlock` additionally serialises appends through a
-future chain, which is what actually makes concurrent writers safe. It
-deliberately re-reads rather than caching the list in memory: the repo is a lazy
-singleton and "Reset app data" (`LocalStore.clearAll`) wipes the box underneath
-it, so a buffer would write the wiped events straight back. Pinned by
-`test/analytics_buffer_test.dart`.
-
-### 1.6 Dependency injection
-
-`lib/core/di/injector.dart` registers the repo as a lazy singleton over the
-`LocalStore`:
-
-```dart
-..registerLazySingleton<AnalyticsRepository>(
-  () => AnalyticsRepositoryImpl(sl()),
-)
-```
-
-The cubit itself is not a singleton — it is created per-view by the
-`BlocProvider` in `_withCubit`.
-
-### 1.7 This buffer vs. the Firebase telemetry layer
-
-The block-event buffer above is **local-only and never uploads**. It is *not* the
-app's product analytics: Detoxo now also ships a **Firebase telemetry layer**
-(Analytics, Crashlytics, Performance) that sends anonymised usage/crash/performance
-data off-device — see [19-firebase-telemetry.md](19-firebase-telemetry.md). The two
-are independent: this `AnalyticsRepository` records *what was blocked* for the
-on-device Activity feed; Firebase records app-usage events and crashes. **FCM push
-is still not bundled**; AdMob uses Google **test** IDs only (see the monetization
-doc).
+The `analytics` feature is therefore **insights** ([28](28-insights.md)) plus the
+Activity screen that hosts it; its barrel exports the insights domain only.
 
 ---
 
@@ -428,8 +331,8 @@ resolution.
 
 | Capability | Status |
 |---|---|
-| Local block-event history (rolling ~500, buffer key `analytics_events`) | Shipped |
-| Activity feed UI (tab + drawer route) | Shipped |
+| Block counts (native `block_today` / `block_total`, plus yesterday's rotated count and a bounded per-package tally — the Activity tab's **Blocked** tile and the **By app → Blocks** rows) | Shipped (EVO-059 / EVO-060) |
+| Activity screen (tab + drawer route; three headed sections — Today, Distraction, By app — one glass panel each, then the Overrides card; the source note is behind an info button) | Shipped — layout in [28](28-insights.md) §6 |
 | Foreground-service notification (`detoxo_protection_channel`, id `1125`, special-use FGS) | Shipped |
 | Protection watchdog (`WatchdogJobService`, job `1126`; "Protection stopped" notification `1127` on `detoxo_watchdog_channel`) | Shipped — detect + notify only (a rebind cannot be forced) |
 | BootReceiver (schedules the watchdog; OS auto-rebinds the accessibility service) | Shipped |
@@ -437,7 +340,7 @@ resolution.
 | Device Admin uninstall protection + `lockNow()` for `LOCK_SCREEN` | Shipped, optional/opt-in |
 | Firebase Analytics / Crashlytics / Performance (off-device telemetry) | **Shipped** — see [19-firebase-telemetry.md](19-firebase-telemetry.md) |
 | FCM push | **Not bundled** |
-| Cloud sink for the local `AnalyticsRepository` buffer | **Not wired** — the buffer stays on-device |
+| Dart block-event buffer + Events feed | **Removed** — it only saw blocks while the Activity view was open; the native counters are the record (§1.1) |
 | Notification suppression (`DetoxoNotificationListener` cancels notifications from apps blocked right now) | Shipped, optional/opt-in and **off by default** — see [29](29-notification-suppression.md). The only notification surface Detoxo *consumes* rather than posts; it unbinds itself whenever it connects with the toggle off, reads a notification's package name, key, user and category only, lets messages and calls through (EVO-038), and never touches Detoxo's own `1125` / `1127` notifications. |
 | `LOCK_SCREEN` block mode UI | Retained on the wire, removed from the picker |
 
@@ -446,16 +349,23 @@ resolution.
 ## Source files
 
 - `lib/features/analytics/analytics.dart`
-- `lib/features/analytics/domain/repositories/analytics_repository.dart`
-- `lib/features/analytics/data/repositories/analytics_repository_impl.dart`
-- `lib/features/analytics/presentation/analytics_cubit.dart`
-- `lib/features/analytics/presentation/analytics_screen.dart`
-- `lib/features/blocking/shared/domain/entities/engine_event.dart`
+- `lib/features/analytics/presentation/analytics_screen.dart` (the three-section scroll)
+- `lib/features/analytics/presentation/widgets/today_overview.dart` (the **Blocked** tile)
+- `lib/features/analytics/presentation/widgets/by_app_section.dart` (the **Blocks** segment rows)
+- `lib/features/analytics/presentation/widgets/app_limit_row.dart`
+- `lib/core/design_system/components/cards.dart` (`StatCard.caption`, `StatCard.compact`,
+  `StatCard.contained`)
+- `lib/features/blocking/blocking.dart` (exports `ServiceCubit`)
+- `lib/features/blocking/engine/presentation/service_cubit.dart`
+- `lib/features/blocking/shared/domain/entities/engine_event.dart` (`ServiceSnapshot`, `BlockEvent`)
 - `lib/features/blocking/shared/domain/entities/enums.dart`
 - `lib/features/blocking/shared/domain/repositories/blocking_repositories.dart`
 - `lib/features/blocking/shared/data/repositories/engine_repository_impl.dart`
-- `lib/core/storage/local_store.dart`
-- `lib/core/di/injector.dart`
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/ConfigStore.kt` (`recordBlock` / `blockStats` / `scrubBlockTally`)
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/BlockTally.kt` (+ `BlockStats`)
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/DateKeys.kt` (`dayBefore`)
+- `android/app/src/test/kotlin/com/errorxperts/detoxo/engine/BlockTallyTest.kt`
+- `test/activity_screen_test.dart`
 - `lib/app/app_resume_sync.dart`
 - `lib/app/engine_sync.dart` (`syncEngineBlocklists` + `guardedSync`)
 - `test/resume_sync_test.dart`

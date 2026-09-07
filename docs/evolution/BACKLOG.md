@@ -60,6 +60,244 @@ forever — the settled-decisions memory). IDs are monotonic and never reused.
 | EVO-051 | One place that lists what is currently unblocked | limits/unblock, dashboard | 2 | done (in the working tree; stamp the hash on commit) | S | 2026-09-06 | 2026-09-06 |
 | EVO-052 | Make overrides visible: the cost before, the history after | limits/unblock, analytics | 2 | done (in the working tree; stamp the hash on commit) | S | 2026-09-06 | 2026-09-06 |
 | EVO-053 | Ration the grants, not only the overrides | limits/unblock, settings | 2 | done (in the working tree; stamp the hash on commit) | M | 2026-09-06 | 2026-09-06 |
+| EVO-058 | Keep the Activity numbers warm across visits | analytics | 2 | done (in the working tree; stamp the hash on commit) | S | 2026-09-06 | 2026-09-06 |
+| EVO-059 | Show where the blocks happened, and act on it | analytics + native engine | 2 | done (in the working tree; stamp the hash on commit) | M | 2026-09-06 | 2026-09-06 |
+| EVO-060 | Yesterday's blocks as a neutral reference on the tile | analytics + native engine, design_system | 2 | done (in the working tree; stamp the hash on commit) | S | 2026-09-06 | 2026-09-06 |
+| EVO-061 | Show and edit an app's existing limit from its Activity row | analytics + limits/rules | 2 | approved | S | 2026-09-07 | 2026-09-07 |
+| EVO-062 | Today tiles as entry points to the By app segments | analytics | 2 | approved | XS | 2026-09-07 | 2026-09-07 |
+| EVO-063 | Say "Blocking is off" instead of "No blocks yet today" when the service is stopped | analytics + blocking | 2 | approved | XS | 2026-09-07 | 2026-09-07 |
+| EVO-064 | Web blocker adopts the Activity tile pattern and its own label | limits/web_blocker, design_system | 2 | approved | S | 2026-09-07 | 2026-09-07 |
+| EVO-065 | Name the apps Detoxo counts but is not blocking, and arm them from the Reels list | analytics + blocking (settings / targets) | 2 | approved | S | 2026-09-08 | 2026-09-08 |
+| EVO-066 | Turn the day's reach pattern into a standing schedule rule | analytics/insights + limits/rules | 2 | approved | M | 2026-09-08 | 2026-09-08 |
+| EVO-067 | Say which plan produced these numbers, and offer the stricter gate from Activity | analytics + blocking (settings) | 2 | approved | S | 2026-09-08 | 2026-09-08 |
+
+## 2026-09-08 — Activity screen: copy trim (user-requested UI change)
+
+Corrective, no proposal file, no new id. The user found the restyled screen wordy. Every label,
+caption, empty state and permission sentence is shorter, and every tile stays: **Reels** /
+**Blocked** (the header already says "today"); one reference per tile (`Yesterday: N` once there
+is history, `All time: N` before that; the first pickup only); the Distraction line reads
+`1h 48m · 56% of screen time` — which is what the share is, it was never a share of the day — and
+`Nothing yet today` on a quiet day; the permission card's `why` is one sentence with no paragraph
+under it; the By app empty states are one sentence each. The 60-word footnote is gone from the
+screen: an info button beside the DISTRACTION header (`IconButton`, tooltip "About these numbers",
+48 dp) opens a `GlassBottomSheet` with the same explanation in four short paragraphs;
+`InsightsFootnote` is deleted and nothing under the sections reads the cubit any more. Tests follow
+the strings (`Reels` is scoped to its section — the segment pill says it too).
+`docs/info_docs/02` §15 and `04-faqs.md:291` still quote the old labels — handed over, the user
+owns those edits. Manual device check owed: the ⓘ level with the header in both themes, the sheet
+at 2× text scale.
+
+## 2026-09-08 — Tier-1 batch (analytics evolution run)
+
+Corrective, no proposal files. A full `/detoxo-evolution analytics` cycle the day after the
+headed-sections restyle: four read-only auditors over the twelve dimensions, every finding
+adversarially refuted, eleven of nineteen refuted or settled. Fixed:
+
+1. **The protected-app scrub ran only on the granted exit** (`_persist`), so the record `today()`
+   serves when the engine fails to answer could name a package protected since it was written —
+   on the screen, the worse half of the doc 24 §6 promise. Scrubbed in memory before it is served;
+   the document is still scrubbed on the next write, as documented. Pinned in
+   `test/insights_rollup_test.dart`. MEDIUM.
+2. **`SectionHeader` lived in legacy `common_widgets.dart`**, and the restyle had added three new
+   analytics imports of that file for it alone (dimension 1's spreading-debt case). Moved to
+   `design_system/components/section_header.dart`, exported from the barrel, re-exported from
+   `common_widgets.dart` (the `EmptyState` / `DrawerMenuButton` precedent) — 49 call sites in 18
+   files untouched; analytics imports the barrel only. MEDIUM.
+3. **`OverrideHistoryCard`'s `buildWhen` watched the ledger and config only**, while the builder
+   reads the clock and `overridesLeft`: the resume / timer resync re-derives `overridesLeft` on an
+   unchanged ledger, and the guard filtered out exactly that emit, so "1 left" and the period count
+   went stale with the screen open. Guard dropped (the builder is trivial); pinned in
+   `test/override_history_card_test.dart`. LOW.
+4. The Activity tab's title is a `Semantics(header: true)` node, so swipe-by-heading lands on the
+   screen's name before TODAY (the pushed route had this from `AppBar`). LOW.
+5. `AppLimitRow` is an `AppPressable` instead of one of the two raw `InkWell`s in `lib/`: haptic,
+   press scale and a focus ring, matching the segmented control above it; the four spoken-label
+   assertions are unchanged. LOW.
+6. The retired `analytics_events` Hive document (up to 500 block records, decoded into RAM on
+   every cold start) is deleted once at bootstrap beside `migrateWebPauses`. LOW.
+7. `BlocklistTab` was unreachable (not exported, routed or referenced) — deleted. Outside the
+   run's target; surfaced by a refutation. LOW.
+
+Reported, not fixed: `DailyStats.computedAtMs` has no reader, but it sits in `props` and in the
+stored schema, so dropping it is Tier 2 — left as is on recommendation. Refuted or settled, for the
+record: the O(retention) document rewrite (the `ponytail:` marker in doc 28 §4 names it and its
+upgrade path); `_scrubProtected`'s per-day allocations; the fold's `limits` barrel import (doc 28
+§3 calls the shared `countOpens` deliberate); the "quiet day" predicate (it guards the share
+denominator); the `rowsFor` statics (item 6 of the 2026-09-07 batch); the midnight tri-state (a
+one-microsecond window with a correct answer either way); an empty-package guard on
+`AppUsage.fromChannel` (same-process channel, no producer); the row's budget comment (the
+30-minute house default is visible before Save); `InlineHint` for the empty panel (an explainer
+component; the panel already pads 16 dp); a hairline component (two shapes, stdlib `Divider` is
+the right rung); a tab-header component (only two tabs exist); the stackless `AppLogger.e`
+(Crashlytics substitutes the current stack). Proposals written and approved in the same turn, not
+implemented: EVO-065, EVO-066, EVO-067. Manual device checks owed: unchanged from the 2026-09-07
+note, plus the row's new press feedback on a real phone.
+
+## 2026-09-07 — Tier-1 batch (analytics / Activity screen restructure run)
+
+Corrective, no proposal files. Found by auditing the Activity screen right after it was
+restructured into four cards (Today, Distraction, By app, Overrides) and the reel hero card was
+deleted:
+
+1. **The lazy `ListView` disposed cards scrolled past the cache extent** — the By app card's
+   chosen segment reset to Reels and `InsightsView` re-ran its mount refresh (two channel queries,
+   the fold, a Hive write) on every scroll back. A restructure regression: the segment index used
+   to live in the list's parent. Both states are kept alive. MEDIUM.
+2. **Two installed-app label lookups in one feature**, merged in the widget to paper over the
+   race, and the widget copy was a `late final Future` that pull-to-refresh could not renew (a
+   transient null left every row on package names for the widget's life). `InsightsCubit` now
+   resolves labels for all apps on every compute whatever the grant said; the By app card reads
+   `state.apps`. MEDIUM.
+3. **"Yesterday: 0" on day one** — the `total > 0` guard printed exactly the caption its comment
+   said it prevented, from the first block ever. Yesterday now shows only once a prior day holds
+   blocks (`total > today`); the reels caption follows the same zero rule. Pinned. MEDIUM.
+4. **Captions were spoken with the "·"**, which TalkBack renders as silence, so "Yesterday: 52
+   All time: 340" ran together — the rule the Distraction card already followed. `StatCard` speaks
+   the separator as a comma; "Last" capitalised. MEDIUM.
+5. **Compact tile labels clipped from ~1.3× text scale** ("Distracting op…"). They wrap; the new
+   `StatCardPair` stretches the neighbour. MEDIUM.
+6. **Row-building was private State methods dispatched on a positional index** into a
+   conditionally built segment list, with a `stats!` safe only by coincidence and nothing testable.
+   Now `ByAppSegment` (enum) + static `ByAppSection.rowsFor` / `emptyCopy` with
+   `test/by_app_rows_test.dart`, plus Reels-segment and revoke-after-Time cases in the screen
+   test. MEDIUM.
+7. `InsightsCubit` exported from the analytics barrel; `main.dart` no longer reaches into
+   `presentation/`. MEDIUM.
+8. Pull-to-refresh now re-reads the reel counter too (across midnight with the tab held open the
+   reel tile kept yesterday's number while the block tile rolled). LOW.
+9. Dropped a re-sort of a list the producer documents as sorted; `TodayOverview` selects the three
+   fields it reads instead of watching the whole state (the labels-only second emit re-ran four
+   tweens). LOW.
+10. `StatCardPair` in the design system replaces two inlined `IntrinsicHeight` pairs. LOW.
+11. `AppCard` titles are headings (`Semantics(header: true)` — first use app-wide);
+    `GlassSegmented` segments are `inMutuallyExclusiveGroup`. LOW.
+12. Dead legacy `StatTile` deleted; the row's dartdoc and bar-height comment no longer cite
+    deleted widgets (bar uses the default height); three stale doc lines (14, 16, 17). LOW.
+
+Reported, not fixed: literal `14`/`18` in `cards.dart` (settled-adjacent); the reels empty state
+reads `enabled` without `loaded` (no visible effect — the placeholder is `enabled = true`); the
+boot-window `0` and the westward-timezone rollover are unchanged. `docs/info_docs/02` §15 still
+describes the old layout — a patch was handed over, the user owns those edits. Manual device
+checks owed: the four-tile grid at 1.3× / 2.0× text scale, TalkBack reading the Today card as one
+heading plus four sentences, the By app segment surviving a long scroll with 20 block rows.
+
+## 2026-09-07 — Activity screen: headed sections (user-requested UI change)
+
+Corrective, no proposal file, no new id. The four titled `AppCard`s (Today, Distraction, By app,
+Overrides) were glass nested in glass — twelve `GlassContainer`s on one granted scroll, three deep
+at the segmented control — so the categories did not read as categories. The screen now uses the
+app's majority idiom: an uppercase `SectionHeader` over **one** `GlassCard` panel per section,
+flat `StatCard(contained: false)` tiles with a content-aligned hairline between rows, and the
+`GlassSegmented` bare between the By app header and its panel (`lg` gap: its drop shadow is no
+longer clipped by a card). Four surfaces remain. Alongside: `SectionHeader` is a
+`Semantics(header: true)` node app-wide (the `AppCard` titles it replaces here were the only
+headings); `AppLimitRow` meets the 48 dp floor (`vertical: xs`, was ≈42 dp); the pushed route no
+longer doubles its top inset under the app bar; and the children order (By app first in the
+working tree) was restored to the documented Today → Distraction → By app, which two assertions
+in `test/activity_screen_test.dart` already required. **EVO-061 / 062 / 063 / 064 quote line
+ranges in `cards.dart`, `today_overview.dart` and `by_app_section.dart` that have drifted — re-read
+the target files before executing. EVO-062 must also decide the `contained` × `onTap` affordance
+(an uncontained tile is a bare `Padding`); EVO-064's web-blocker tiles stay `contained` — they
+have no panel around them.**
+
+Verified: `flutter analyze`, the full test suite, native unit tests and the boundary check; the
+new heading and one-`GlassContainer`-per-section assertions in `test/activity_screen_test.dart`;
+rendered snapshots of the pushed route in dark, light and denied states (structure, hairline
+alignment, shadow gap, no dead space under the app bar). Manual device check owed: both entry
+points on a real phone, light mode especially — if the segmented control's shadow shows as a band
+on the By app panel's top rim, move the control inside the panel as its first row above a hairline
+(the `lg` gap was sized to clear it). The `vPhone_6.7` emulator could not be used: its first-run
+splash never routes (the repo's own `qa.sh e2e` walk fails there at the post-Skip splash bounce).
+
+## 2026-09-06 — Tier-1 batch (analytics / Activity tab evolution run)
+
+Corrective, no proposal files. Found by auditing the Activity tab right after its Insights |
+Events segments were merged into one scroll and the Dart block-event buffer was removed:
+
+1. **The boundary gate could not see a feature's top-level `presentation/` imports.** Its `sed`
+   required a nested module segment where its `grep` made one optional, so the extraction came
+   back empty and the import was skipped — the same "passed vacuously" failure the script's own
+   header records, reintroduced. Two live violations hid behind it (the Activity and Blocklist
+   tabs reaching into `dashboard/presentation/widgets/menu_button.dart`). Regex repaired;
+   `DrawerMenuButton` moved to `design_system/components/` (three features draw it). HIGH.
+2. **A newly protected app stayed named in every already-complete day record** for up to 90 days
+   (`usage_daily`): only today and an unfinished yesterday are ever recomputed. Every write now
+   scrubs the current protected set from every stored day. Pinned. MEDIUM, doc 24's promise.
+3. **Both usage-access Grant buttons bypassed `requestPermission()`**, the documented single entry
+   point, skipping the Android 13+ restricted-settings walkthrough and the cubit re-read. Exported
+   from the permissions barrel; both sites (insights, rules) route through it.
+4. **A grant revoked mid-query was reported as "unavailable"** (`SecurityException` →
+   `USAGE_QUERY_FAILED`), so Dart served the cached day as if granted. Now `USAGE_ACCESS_DENIED`.
+5. **A grant revoked in Settings stayed invisible on an open Activity tab** — the resume path
+   compared only the day key. It now also re-reads `hasAccess()` (recompute on an explicit `false`).
+6. **`StatCard` rewound to 0 on every value change** (`ValueKey(value)` on the tween) — on the
+   Activity tab, on every live `blocked` event, both tiles for 700 ms. Design-system wide fix.
+7. **`GlassSegmented` segments were 36 dp tall bare `GestureDetector`s**, under the 48 dp floor the
+   token file states. The hit layer now spans a box padded to the floor; the visual is unchanged.
+8. The insights hero read "Screen time today" twice and the distraction figures twice; the pickups
+   row was two loose nodes with a spoken "·". Both are one sentence now.
+9. **Usage rows had no upper bound**: `queryAndAggregateUsageStats` returns bucket totals not
+   clipped to the window, so a post-midnight window could persist a multi-hour "today". Rows are
+   clipped to the window before anything is summed or ranked.
+10. **`e['today'] as int?` inside `statusStream`'s `async*`** with no `onError` on the cubit — one
+    drifted payload would freeze every tile for the process. `as num?`, like every other reader.
+11. Pull-to-refresh re-reads the block counters too (native rolls `today` over at read time, and a
+    pull across midnight may see no `blocked` event).
+12. Smaller truths: the two-entry-points comment claimed a shared cubit (EVO-058 made it true); the
+    footnote's "history starts…" now names screen time; a whitespace-only app label no longer makes
+    a blank row and a rule named `"Limit  "`; `DailyStats.fromJson` floors negatives and re-sorts
+    `topApps`; the hero badge matches the reel card's; the tab header has the Dashboard header's
+    gap; "yesterday" is derived once (`previousDay`); the 90-day document is no longer decoded a
+    second time for `cached()` (memo keyed on the raw string, pinned against a wipe); three stale
+    doc lines (`AnalyticsRepository`, "7 grandfathered violations", a contradictory cache comment).
+13. New tests: `test/activity_screen_test.dart` (the merged screen over real cubits), plus cases in
+    the cubit, view, rollup, compute and segmented-control tests, and `BlockTallyTest.kt`.
+
+Reported, not fixed (outside the target): the reel card's `_Bar` rebuilds its fill every frame and
+the card has no `buildWhen`; the native single-date rollover zeroes a block count on a westward
+timezone move (the reel and web counters share the shape); tiles render `0` for the boot-only window
+before the first status resolves; the top-app tap can mint a duplicate limit for an app that already
+has one; an unresolvable Settings intent on Grant is a silent no-op (`launch()`'s result is
+discarded by `invokeVoid`). Manual device checks still owed: tile rows at 1.3× / 2.0× text scale,
+the pickups subtitle at 2.0×, the footnote's contrast on the light ambient background.
+| EVO-054 | Treat an empty Conscious bank as a spent budget on the wall | native overlay/WallPolicy | 2 | done (in the working tree; stamp the hash on commit) | XS | 2026-09-06 | 2026-09-06 |
+| EVO-055 | Force the wall for schedule blocks, like daily limits | native overlay/WallPolicy | 2 | done (in the working tree; stamp the hash on commit) | XS | 2026-09-06 | 2026-09-06 |
+| EVO-056 | Name the block when a wanted reel wall cannot show | native service (reel site) | 2 | done (in the working tree; stamp the hash on commit) | XS | 2026-09-06 | 2026-09-06 |
+| EVO-057 | Mark whether the wall showed on the `blocked` event | native service + blocking/shared + analytics | 2 | done (in the working tree; stamp the hash on commit) | S | 2026-09-06 | 2026-09-06 |
+
+## 2026-09-06 — Tier-1 batch (block screen as a block mode evolution run)
+
+Corrective, no proposal files. Found by auditing the "Block screen" block mode + auto-wall on
+daily limit the moment it landed:
+
+1. **The mode went dead once the Appearance switch was off.** `BlockScreenOverlay.show` gated on
+   `spec.enabled` with `force` true only for `DAILY_LIMIT`, so Block screen mode + switch off =
+   Press back, while the picker still showed it selected. The bypass is now decided inside `show`
+   from the payload and the stored mode (`WallPolicy.bypassesSwitch`): forced blocks, and a reel
+   wall in the mode the user picked it for. The `force` parameter is gone, which also fixes
+   `onStyleChanged` (it re-showed without it, tearing down a standing forced wall).
+2. **Picking the mode silently flipped the Appearance switch** for app and web walls too, with a
+   120 ms debounce race against the immediate settings push. Deleted; the comment claiming an
+   overlay disclosure gate (there is none) rewritten.
+3. **Play/roadmap declarations said the wall shows on every reel block and "can be switched off".**
+   `22-play-release.md` §3/§5 and `16-implementation-roadmap.md` now describe the mode and the
+   forced cases.
+4. **`_OptionTile` never forwarded `selected:` to `GlassListTile`** — TalkBack read four identical
+   rows in every picker. Forwarded; pinned by `block_mode_picker_test.dart`.
+5. **`pushSettings` stored any `defaultBlockMode` string** while Dart maps unknowns to Press back.
+   Whitelisted to `BlockingMode`'s wire values (`CommandHandler.BLOCK_MODES`).
+6. **The daily-limit banner promised the wall unconditionally.** A third branch on the overlay
+   tri-state (`overlayGranted == false`) says the wall needs the permission.
+7. **No Dart test for the picker.** `BlockModeOptions` / `BlockModeTile` / `PermissionNeededRow` /
+   `OptionTile` extracted to `settings/presentation/widgets/block_mode_picker.dart` (cubit-free,
+   the `ModeSelector` precedent) and covered.
+8. **`BlockTarget.supportedModes` was computed on every config load and read nowhere.** Deleted.
+9. `WallPolicy.MODE_BLOCK_SCREEN` used in its test; `BlockingMode.overlay` documented as
+   wire-compat; `BadTokenException` no longer ejects to the launcher during a style preview;
+   the three "Needs permission — tap to allow" rows and six `firstWhere(kind)` lookups collapsed
+   into `PermissionNeededRow` + `PermissionsCubit.statusFor`.
+
 
 ## 2026-09-04 — Tier-1 batch (notification suppression / M5 evolution run)
 

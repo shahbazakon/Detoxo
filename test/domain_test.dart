@@ -14,6 +14,7 @@ void main() {
 
     test('BlockingMode falls back to pressBack', () {
       expect(BlockingMode.fromWire('KILL_APP'), BlockingMode.killApp);
+      expect(BlockingMode.fromWire('BLOCK_SCREEN'), BlockingMode.blockScreen);
       expect(BlockingMode.fromWire(null), BlockingMode.pressBack);
     });
   });

@@ -234,6 +234,7 @@ The channel methods themselves are thin wrappers over the `com.errorxperts.detox
 
 - `refresh()` → loads `_repo.statuses()` **and** `_repo.lastKnownGranted()`, then emits (with the restricted-settings rewrite of §3.5 applied).
 - `request(permission)` → calls `_repo.request(...)`, waits **400 ms** (system dialogs/settings are async), then `refresh()`s to reflect the new state.
+- **`statusFor(kind)`** — the live row for one permission, or a default `unknown` row when the list has no entry yet. The one lookup every truthful "Needs X — tap to allow" row and `requestPermission` use, instead of re-implementing the `firstWhere`.
 - **`effectivelyGranted(status)`** — the gate's per-permission truth, public so the UI shares it: `granted`, **or** a live `unknown` reading that is in `lastKnownGranted`. A definitive `denied` is `false`, regardless of history. Shared with the screen so the cards, the "N of M" progress row and the Continue button can never contradict each other (EVO-014).
 - `allRequiredGranted` — the getter the splash gate reads; it simply runs `effectivelyGranted` over every required permission — one flaky channel call at cold start must not send a set-up user back to the setup wall. On an empty state (iOS) `.every` on an empty list is `true`.
 - `needsRestrictedFix` (§3.5) explicitly **never fires for an `unknown` reading** — a channel hiccup is not a refusal and must not be relabelled `permanentlyDenied`.

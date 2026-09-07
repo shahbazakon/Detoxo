@@ -5,7 +5,6 @@ import 'package:detoxo/core/di/injector.dart';
 import 'package:detoxo/core/navigation/routes.dart';
 import 'package:detoxo/core/utils/clock_format.dart';
 import 'package:detoxo/core/widgets/app_picker_sheet.dart';
-import 'package:detoxo/core/widgets/common_widgets.dart';
 import 'package:detoxo/features/blocking/blocking.dart';
 import 'package:detoxo/features/limits/app_blocker/domain/app_block_sync.dart';
 import 'package:detoxo/features/limits/app_blocker/domain/entities/app_block_entry.dart';

@@ -38,9 +38,10 @@ class InsightsState extends Equatable {
   /// make every comparison read low.
   final DailyStats? yesterday;
 
-  /// Package → installed app, for labels and icons in the top-apps list.
-  /// Missing entries fall back to the package name; an empty map is normal on
-  /// the first frame and off-device.
+  /// Package → installed app, for labels and icons in every per-app row on
+  /// the Activity screen (reels, blocks and screen time alike — the one
+  /// lookup). Missing entries fall back to the package name; an empty map is
+  /// normal on the first frame and off-device.
   final Map<String, InstalledApp> apps;
 
   bool get isLoading => status == InsightsStatus.loading;
