@@ -1,10 +1,5 @@
-import 'package:detoxo/core/design_system/components/cards.dart';
-import 'package:detoxo/core/design_system/foundations/motion.dart';
-import 'package:detoxo/core/design_system/tokens/app_spacing.dart';
 import 'package:flutter/material.dart';
 
-/// The hamburger control that opens the app's right-side drawer. A single
-/// source of truth so the Dashboard, Blocklist and Activity headers stay
 /// identical: a primary-tinted circle with a [Icons.menu_rounded] glyph.
 ///
 /// Lives in the design system rather than under the dashboard because three
@@ -21,22 +16,26 @@ class DrawerMenuButton extends StatelessWidget {
     return Semantics(
       button: true,
       label: 'Menu',
-      child: InkWell(
-        borderRadius: AppRadius.brPill,
-        onTap: onTap == null
-            ? null
-            : () {
-                AppHaptics.selection();
-                onTap!();
-              },
-        child: IconBadge(
-          size: AppSizes.minTapTarget,
-          color: scheme.primary,
-          fillAlpha: 0.12,
-          bordered: true,
-          borderWidth: 2,
-          child: Icon(Icons.menu_rounded, size: 22, color: scheme.primary),
-        ),
+      child: GestureDetector(
+        // child: FenceIcon(
+        //   size: 20.0, // Icon size
+        //   color: Colors.white, // Default color
+        //   hoverColor: Colors.blue, // Hover color
+        //   animationDuration: Duration(milliseconds: 600), // Animation duration
+        //   strokeWidth: 2.0, // Stroke width
+        //   reverseOnExit: true, // Reverse animation on exit
+        //   enableTouchInteraction: true, // Enable touch interaction
+        //   infiniteLoop: false, // Enable infinite loop
+        //   onTap: onTap == null
+        //       ? null
+        //       : () {
+        //           AppHaptics.selection();
+        //           onTap!();
+        //         }, // Tap callback
+        //   interactive: true, // Enable/disable internal gestures
+        //   controller: AnimatedIconController(), // External animation controller
+        // ),
+        child: Icon(Icons.view_sidebar_rounded, size: 22, color: scheme.primary),
       ),
     );
   }

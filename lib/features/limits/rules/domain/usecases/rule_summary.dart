@@ -45,8 +45,7 @@ abstract final class RuleSummary {
                   '${time(r.schedule!.endMin)}'
                   '${r.schedule!.isOvernight ? ' (next day)' : ''}',
       RuleKind.timeLimit => '${r.thresholdMs ~/ 60000} min a day',
-      RuleKind.openLimit =>
-        '${r.maxOpens} ${r.maxOpens == 1 ? 'open' : 'opens'} a day',
+      RuleKind.openLimit => '${count(r.maxOpens, 'open', 'opens')} a day',
     };
     // Locked implies strict on the wire, so the chip is derived from the same
     // question native is asked — `isStrict` — and the two can never disagree.
@@ -64,12 +63,12 @@ abstract final class RuleSummary {
   /// list must not need the installed-apps scan to render.
   static String targets(RuleSelection s) {
     final parts = <String>[
-      if (s.apps.isNotEmpty) _count(s.apps.length, 'app', 'apps'),
+      if (s.apps.isNotEmpty) count(s.apps.length, 'app', 'apps'),
       if (s.categories.isNotEmpty)
-        _count(s.categories.length, 'category', 'categories'),
-      if (s.websites.isNotEmpty) _count(s.websites.length, 'site', 'sites'),
+        count(s.categories.length, 'category', 'categories'),
+      if (s.websites.isNotEmpty) count(s.websites.length, 'site', 'sites'),
       if (s.platforms.isNotEmpty)
-        _count(s.platforms.length, 'reel feed', 'reel feeds'),
+        count(s.platforms.length, 'reel feed', 'reel feeds'),
     ];
     return parts.isEmpty ? 'No targets' : parts.join(', ');
   }
@@ -152,6 +151,8 @@ abstract final class RuleSummary {
     return sameDay ? at : '${_day[t.weekday - 1]} $at';
   }
 
-  static String _count(int n, String one, String many) =>
+  /// "1 app" / "3 apps" — the one pluraliser the list, the pills and the
+  /// editor's tile subtitles and headline all read, so the copy cannot drift.
+  static String count(int n, String one, String many) =>
       '$n ${n == 1 ? one : many}';
 }

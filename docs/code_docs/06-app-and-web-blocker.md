@@ -428,12 +428,13 @@ Latent since inception, first triggered 2026-08-17 by the first on-device
 - **Stats dashboard** (`_StatsSection`) — three `StatCard`s (Blocked today,
   Total blocked, Focus saved [min]) plus a "Most blocked" line; only shown
   when `state.hasStats`.
-- **Popular sites** — `AppChip`s from `PopularSites.all` split across two rows
-  inside one horizontal `SingleChildScrollView` (both rows scroll together);
-  selected state driven by `state.activePopularIds`. A **Protection pill**
-  (`_ProtectionChip`) leads the first row and a trailing "Add website" chip
-  closes the second (each row carries one extra chip, so the site split is an
-  even half). The pill is deliberately not an `AppChip`: always seed-tinted
+- **Popular sites** — `AppChip`s from `PopularSites.all` in a `ChipRail`
+  (design system, `components/selection.dart`: two rows inside one horizontal
+  scroll, both rows scroll together; the rule editor's categories use the same
+  widget); selected state driven by `state.activePopularIds`. A **Protection
+  pill** (`_ProtectionChip`) is the rail's `leading` and opens the first row, a
+  trailing "Add website" chip closes the second (each row carries one extra
+  chip, so the site split is an even half). The pill is deliberately not an `AppChip`: always seed-tinted
   with a trailing chevron so it reads as "opens a screen", not "toggles a
   site"; it shows how many batch protections are on ("Protection · N"),
   pushes `Routes.webProtection`, and re-`load()`s the cubit on return so the

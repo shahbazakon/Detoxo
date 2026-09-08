@@ -147,11 +147,16 @@ class EngineChannel {
 
   /// Pushes the resolved rules snapshot (JSON array, see
   /// [ChannelMethods.pushRules]) and the earliest window edge (0 = none);
-  /// native enforces the windows itself. No-op off-Android.
-  Future<void> pushRules(String json, int nextBoundaryMs) => invokeVoid(
-    ChannelMethods.pushRules,
-    {'json': json, 'nextBoundaryMs': nextBoundaryMs},
-  );
+  /// native enforces the windows itself. A null [json] pushes the boundary
+  /// alone and native keeps the snapshot it has. False when the call failed
+  /// (already logged) or there is no native side — the caller must not then
+  /// assume native holds what it sent.
+  Future<bool> pushRules(String? json, int nextBoundaryMs) async =>
+      await _invoke<bool>(ChannelMethods.pushRules, {
+        'json': json,
+        'nextBoundaryMs': nextBoundaryMs,
+      }) ??
+      false;
 
   /// The ACTIVE per-target temporary unblocks (M8) as a JSON array of
   /// `{targetType, targetId, endMs}`; native enforces their expiry. No-op

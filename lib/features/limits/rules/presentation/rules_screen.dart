@@ -11,6 +11,7 @@ import 'package:detoxo/features/limits/rules/domain/entities/rule_preset.dart';
 import 'package:detoxo/features/limits/rules/domain/entities/rule_snapshot.dart';
 import 'package:detoxo/features/limits/rules/domain/usecases/rule_summary.dart';
 import 'package:detoxo/features/limits/rules/presentation/rules_cubit.dart';
+import 'package:detoxo/features/limits/rules/presentation/widgets/rule_kind_icon.dart';
 import 'package:detoxo/features/permissions/permissions.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -57,6 +58,12 @@ class _RulesScreenState extends State<RulesScreen> {
       body: BlocConsumer<RulesCubit, RulesState>(
         listenWhen: (p, c) => p.error != c.error && c.error != null,
         listener: (context, state) {
+          // The editor is pushed OVER this screen, which stays mounted, so a
+          // refusal raised from the editor would toast here as well — and
+          // clear the message before the editor read it, leaving it the
+          // generic "Couldn't save". The editor owns its own errors; this
+          // listener speaks only while the list is the screen on top.
+          if (!(ModalRoute.of(context)?.isCurrent ?? true)) return;
           GlassToast.show(context, state.error!, tone: AppTone.danger);
           context.read<RulesCubit>().clearError();
         },
@@ -149,13 +156,6 @@ class _RulesScreenState extends State<RulesScreen> {
       'A number of opens a day, then blocked until midnight',
   };
 }
-
-/// The glyph for a rule kind — shared by the list, the picker and the editor.
-IconData ruleKindIcon(RuleKind k) => switch (k) {
-  RuleKind.schedule => Icons.schedule,
-  RuleKind.timeLimit => Icons.hourglass_bottom,
-  RuleKind.openLimit => Icons.touch_app_outlined,
-};
 
 /// A starter rule (EVO-031). Opens the editor pre-filled — never saves on tap,
 /// so the user still confirms the hours before anything blocks.

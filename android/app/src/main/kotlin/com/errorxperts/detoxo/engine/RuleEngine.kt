@@ -126,6 +126,9 @@ class RuleEngine {
             entries.any { it.strict && !it.isPendingLimit && it.platformIds.isNotEmpty() }
         val hasStrictHostRules =
             entries.any { it.strict && !it.isPendingLimit && it.domains.isNotEmpty() }
+        val hasStrictPackageRules =
+            entries.any { it.strict && !it.isPendingLimit && it.packages.isNotEmpty() }
+        val hasPlatformRules = entries.any { it.platformIds.isNotEmpty() }
         val hasPendingLimits = entries.any { it.isPendingLimit }
     }
 
@@ -179,8 +182,31 @@ class RuleEngine {
      */
     fun hasStrictHostRules(): Boolean = snap.hasStrictHostRules
 
+    /**
+     * Whether a strict entry names a PACKAGE — gates the strict package arm,
+     * which runs above the throttle on nearly every foreground event. Narrower
+     * than [hasStrictRules] for the reason [hasPackageRules] is narrower than
+     * [hasAnyRules]: a locked rule built from websites alone would otherwise
+     * pay a full entry walk per event and never match.
+     */
+    fun hasStrictPackageRules(): Boolean = snap.hasStrictPackageRules
+
+    /**
+     * Whether any entry names a platform (the reel meter's `"*"` included) —
+     * gates the platform arm inside the detector loop, which recurs per match.
+     */
+    fun hasPlatformRules(): Boolean = snap.hasPlatformRules
+
     /** Whether anything needs re-measuring — gates the watchdog's UsageQuery. */
     fun hasPendingLimits(): Boolean = snap.hasPendingLimits
+
+    /** Whether a pending budget measures foreground TIME — gates the watchdog's per-app query. */
+    fun hasPendingUsageLimits(): Boolean =
+        snap.entries.any { it.isPendingLimit && it.usageLimitMs > 0L }
+
+    /** Whether a pending budget counts LAUNCHES — gates the watchdog's event-log query. */
+    fun hasPendingOpenLimits(): Boolean =
+        snap.entries.any { it.isPendingLimit && it.openLimitCount > 0 }
 
     /** The pending budgets, for the reconciler. */
     fun pendingLimits(): List<Entry> = snap.entries.filter { it.isPendingLimit }

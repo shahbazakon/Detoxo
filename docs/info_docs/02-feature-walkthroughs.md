@@ -733,12 +733,15 @@ To build one from scratch, tap **New rule** and pick one of three kinds:
 - **Open limit** — a number of launches per day (1 to 20). After that many
   opens, the app is blocked until midnight.
 
-Then choose what the rule covers under **Block**: tap **category** chips
-(Short-form video, Social, Games…), add specific **apps** from the picker (your
-protected apps are marked and can't be picked), and — for schedules — **reel
-feeds** (Instagram Reels, YouTube Shorts…) and **websites** (popular-site chips
-or any address you type). A schedule can mix all four; time and open limits
-work on apps and categories, since Android only counts time per app.
+Then choose what the rule covers under **Block**: add specific **apps** from the
+picker (your protected apps are marked and can't be picked), and — for schedules —
+**reel feeds** (Instagram Reels, YouTube Shorts…) and **websites** (popular-site
+chips or any address you type). Below those, swipe the two rows of **category**
+chips (Short-form video, Social, Games…); **All distracting** picks every
+distracting category in one tap, and tapping it again clears them. A schedule can
+mix all four; time and open limits work on apps and categories, since Android
+only counts time per app. **Strict** and **Lock** sit under the targets, just
+above Save.
 
 When a rule is blocking, the app bounces you home (or backs out of the site,
 or closes the feed) and the block screen tells you when you get it back:

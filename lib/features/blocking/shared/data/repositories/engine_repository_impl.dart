@@ -173,7 +173,7 @@ class EngineRepositoryImpl implements EngineRepository {
       );
 
   @override
-  Future<void> pushRules(String json, int nextBoundaryMs) =>
+  Future<bool> pushRules(String? json, int nextBoundaryMs) =>
       _channel.pushRules(json, nextBoundaryMs);
 
   @override

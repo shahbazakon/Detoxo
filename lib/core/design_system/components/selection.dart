@@ -111,9 +111,7 @@ class GlassSegmented extends StatelessWidget {
                             Icon(
                               segments[i].icon,
                               size: 18,
-                              color: i == selected
-                                  ? accent
-                                  : glass.onGlassMuted,
+                              color: i == selected ? accent : glass.onGlassMuted,
                             ),
                             const SizedBox(width: AppSpacing.xs),
                           ],
@@ -121,24 +119,16 @@ class GlassSegmented extends StatelessWidget {
                             // Breathing room so a label never touches the
                             // pill's rim when the control hugs its content.
                             padding: EdgeInsets.symmetric(
-                              horizontal: compact
-                                  ? AppSpacing.sm
-                                  : AppSpacing.xs,
+                              horizontal: compact ? AppSpacing.sm : AppSpacing.xs,
                             ),
                             child: Text(
                               segments[i].label,
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
-                              style:
-                                  (compact ? text.labelMedium : text.labelLarge)
-                                      ?.copyWith(
-                                        fontWeight: i == selected
-                                            ? FontWeight.w700
-                                            : FontWeight.w500,
-                                        color: i == selected
-                                            ? accent
-                                            : glass.onGlassMuted,
-                                      ),
+                              style: (compact ? text.labelMedium : text.labelLarge)?.copyWith(
+                                fontWeight: i == selected ? FontWeight.w700 : FontWeight.w500,
+                                color: i == selected ? accent : glass.onGlassMuted,
+                              ),
                             ),
                           ),
                         ],
@@ -236,10 +226,7 @@ class AppChip extends StatelessWidget {
       minTapTarget: const Size(0, AppSizes.minTapTarget),
       child: GlassContainer(
         enableBlur: false,
-        padding: const EdgeInsets.symmetric(
-          horizontal: AppSpacing.md,
-          vertical: AppSpacing.xs,
-        ),
+        padding: const EdgeInsets.symmetric(horizontal: AppSpacing.md, vertical: AppSpacing.xs),
         borderRadius: AppRadius.pill,
         tintTop: selected ? accent.withValues(alpha: 0.28) : null,
         tintBottom: selected ? accent.withValues(alpha: 0.14) : null,
@@ -247,10 +234,7 @@ class AppChip extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            if (icon != null) ...[
-              Icon(icon, size: 16),
-              const SizedBox(width: AppSpacing.xxs),
-            ],
+            if (icon != null) ...[Icon(icon, size: 16), const SizedBox(width: AppSpacing.xxs)],
             Text(
               label,
               style: text.labelLarge?.copyWith(
@@ -259,6 +243,62 @@ class AppChip extends StatelessWidget {
             ),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Two rows of chips that scroll together as one horizontal rail. [leading]
+/// opens the first row (a quick-pick, a header pill) and [trailing] closes the
+/// second (an "add" action); [chips] split evenly, first half on top, so a
+/// behaviour-ordered list reads top row = the usual suspects. Used by the rule
+/// editor's categories and the web blocker's popular sites.
+class ChipRail extends StatelessWidget {
+  const ChipRail({
+    required this.chips,
+    this.leading,
+    this.trailing,
+    this.padding = EdgeInsets.zero,
+    super.key,
+  });
+
+  final List<Widget> chips;
+  final Widget? leading;
+  final Widget? trailing;
+
+  /// Inset of the scrolling content. A list that lets the rail bleed off the
+  /// screen edge passes its trailing gutter here; one that already pads its
+  /// children has a gutter and passes nothing — the widget must not bake one
+  /// caller's edge into every rail.
+  final EdgeInsetsGeometry padding;
+
+  @override
+  Widget build(BuildContext context) {
+    final half = chips.length ~/ 2;
+    Widget pad(Widget chip) => Padding(
+      padding: const EdgeInsets.only(right: AppSpacing.xs),
+      child: chip,
+    );
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      padding: padding,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              if (leading != null) pad(leading!),
+              for (final c in chips.take(half)) pad(c),
+            ],
+          ),
+          const SizedBox(height: AppSpacing.xxs),
+          Row(
+            children: [
+              for (final c in chips.skip(half)) pad(c),
+              if (trailing != null) pad(trailing!),
+            ],
+          ),
+        ],
       ),
     );
   }

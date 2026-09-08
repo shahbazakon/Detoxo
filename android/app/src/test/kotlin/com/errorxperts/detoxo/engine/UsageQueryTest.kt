@@ -40,6 +40,29 @@ class UsageQueryTest {
     }
 
     @Test
+    fun opensByPackageAppliesTheSameTransitionRule() {
+        // The watchdog's reconciler reads this map; counting every
+        // MOVE_TO_FOREGROUND instead flipped an open limit early with Detoxo
+        // closed.
+        val fg = UsageQuery.EVENT_MOVE_TO_FOREGROUND
+        val events = sequenceOf(
+            "com.a" to fg,
+            "com.a" to fg,
+            "com.b" to fg,
+            "com.a" to 2,
+            "com.a" to fg,
+            "com.launcher" to fg,
+            "com.a" to fg,
+        )
+        val opens = UsageQuery.countOpensByPackage(events)
+        assertEquals(3, opens["com.a"])
+        assertEquals(1, opens["com.b"])
+        assertEquals(1, opens["com.launcher"])
+        assertEquals(null, opens["com.c"])
+        assertTrue(UsageQuery.countOpensByPackage(emptySequence()).isEmpty())
+    }
+
+    @Test
     fun onlyForegroundAndScreenInteractiveEventsSurvive() {
         for (type in 0..40) {
             assertEquals("type $type", type == 1 || type == 18, UsageQuery.keepsEvent(type))

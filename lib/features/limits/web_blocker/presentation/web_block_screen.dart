@@ -328,51 +328,32 @@ class _PopularChips extends StatelessWidget {
   Widget build(BuildContext context) {
     final cubit = context.read<WebBlockCubit>();
     final active = state.activePopularIds;
-    final sites = state.popular;
     // Two rows sharing one horizontal scroll; the Protection pill opens the
     // first row and the "Add website" chip closes the second, so each row
     // carries one extra chip and the split is an even half.
-    final half = sites.length ~/ 2;
-    final protectionCount = state.protectionCount;
-    Widget chip(PopularSite site) => Padding(
-      padding: const EdgeInsets.only(right: AppSpacing.xs),
-      child: AppChip(
-        label: site.name,
-        icon: site.icon,
-        selected: active.contains(site.id),
-        onSelected: () => cubit.togglePopular(site),
-      ),
-    );
-    return SingleChildScrollView(
-      scrollDirection: Axis.horizontal,
-      // Only the far end of the scroll keeps a gutter.
+    return ChipRail(
+      // The list has no right padding so the rail can scroll off the screen
+      // edge; only the far end of the scroll keeps a gutter.
       padding: const EdgeInsets.only(right: AppSpacing.md),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Padding(
-                padding: const EdgeInsets.only(right: AppSpacing.xs),
-                child: _ProtectionChip(activeCount: protectionCount),
-              ),
-              for (final site in sites.take(half)) chip(site),
-            ],
-          ),
-          const SizedBox(height: AppSpacing.xs),
-          Row(
-            children: [
-              for (final site in sites.skip(half)) chip(site),
-              AppChip(
-                label: 'Add website',
-                icon: Icons.add,
-                selected: false,
-                onSelected: () => _showSiteSheet(context),
-              ),
-            ],
-          ),
-        ],
+      leading: _ProtectionChip(activeCount: state.protectionCount),
+      trailing: AppChip(
+        label: 'Add website',
+        icon: Icons.add,
+        selected: false,
+        // A one-shot action, not a toggle: without this it announced as
+        // "Add website, not selected".
+        momentary: true,
+        onSelected: () => _showSiteSheet(context),
       ),
+      chips: [
+        for (final site in state.popular)
+          AppChip(
+            label: site.name,
+            icon: site.icon,
+            selected: active.contains(site.id),
+            onSelected: () => cubit.togglePopular(site),
+          ),
+      ],
     ).animate().fadeIn(duration: AppDurations.normal);
   }
 }

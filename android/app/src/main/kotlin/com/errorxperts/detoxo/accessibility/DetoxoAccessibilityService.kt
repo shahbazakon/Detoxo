@@ -264,6 +264,10 @@ class DetoxoAccessibilityService : AccessibilityService() {
     /** EVO-029: whether the watchdog has any rule budget worth re-measuring. */
     fun hasPendingRuleLimits(): Boolean = ruleEngine.hasPendingLimits()
 
+    /** Which of the two UsageStats queries the pending budgets actually need. */
+    fun hasPendingUsageLimits(): Boolean = ruleEngine.hasPendingUsageLimits()
+    fun hasPendingOpenLimits(): Boolean = ruleEngine.hasPendingOpenLimits()
+
     /**
      * EVO-029: flip every pending rule limit whose budget today's measurements
      * say is used up. True when something actually changed, so the caller only
@@ -640,7 +644,7 @@ class DetoxoAccessibilityService : AccessibilityService() {
         // which Dart expresses by splitting that rule's own windows before the
         // push — never by minting a grant. `offersUnblock = false` on the wall
         // it raises, so the button is not even offered.
-        if (ruleEngine.hasStrictRules() &&
+        if (ruleEngine.hasStrictPackageRules() &&
             (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
                 pkg == foregroundPkg)
         ) {
@@ -824,7 +828,7 @@ class DetoxoAccessibilityService : AccessibilityService() {
                         // limit blocks this surface whatever the plan below would
                         // allow — unless a grant lifts it, which is exactly the
                         // set a Pause lifts too.
-                        val rule = if (ruleEngine.hasAnyRules()) {
+                        val rule = if (ruleEngine.hasPlatformRules()) {
                             ruleEngine.blockingForPlatform(platform.platformId, now, meterMs)
                         } else {
                             null

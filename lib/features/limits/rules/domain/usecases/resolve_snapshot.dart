@@ -2,6 +2,7 @@ import 'package:detoxo/features/catalog/catalog.dart';
 import 'package:detoxo/features/limits/rules/domain/entities/rule.dart';
 import 'package:detoxo/features/limits/rules/domain/entities/rule_snapshot.dart';
 import 'package:detoxo/features/limits/rules/domain/usecases/rule_calendar.dart';
+import 'package:detoxo/features/limits/web_blocker/domain/entities/popular_site.dart';
 
 /// Floor for a *projected* limit exhaustion. The projection assumes the target
 /// app keeps running, so as a budget nears zero it lands arbitrarily close to
@@ -84,8 +85,15 @@ RulesEvaluation resolveSnapshot({
   List<String> distracting() =>
       distractingMemo ??= cat.packagesWithBehavior(AppBehavior.distracting);
 
+  // Native takes the FIRST blocking entry, so this order decides which rule's
+  // reason and "Unlocks at" the wall shows. `createdAtMs` is a wall-clock
+  // stamp that two rules can share, and `List.sort` is not stable past 32
+  // items, so the id breaks the tie — the same every resolve.
   final ordered = [...rules]
-    ..sort((a, b) => a.createdAtMs.compareTo(b.createdAtMs));
+    ..sort((a, b) {
+      final byTime = a.createdAtMs.compareTo(b.createdAtMs);
+      return byTime != 0 ? byTime : a.id.compareTo(b.id);
+    });
   for (final r in ordered) {
     if (!r.enabled) {
       statuses[r.id] = RuleStatus.off;
@@ -296,10 +304,17 @@ List<String> _lockWiden(
 
 /// Categories become their services' packages AND domains (a category is "the
 /// service"); an explicitly picked app stays app-only, like the App Blocker.
+/// A website that is a popular-site chip covers its aliases too: the chip
+/// stores its primary domain only, and the web blocker expands the same chip
+/// on ITS push path, so a rule on "X (Twitter)" has to close twitter.com as
+/// well — native matches a host exactly or by subdomain, never by brand.
 _Targets _flatten(RuleSelection sel, Catalog cat) {
   final packages = <String>{...sel.apps};
   final domains = <String>{
-    for (final w in sel.websites) Catalog.normalizeHost(w),
+    for (final w in sel.websites) ...[
+      Catalog.normalizeHost(w),
+      ...PopularSites.aliasesFor(Catalog.normalizeHost(w)),
+    ],
   };
   for (final id in sel.categories) {
     for (final pkg in cat.packagesIn(id)) {

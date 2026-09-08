@@ -257,6 +257,46 @@ class RuleEngineTest {
     }
 
     @Test
+    fun strictPackageAndPlatformGatesAreExact() {
+        // A strict rule built from websites alone must not arm the strict
+        // package arm — it runs above the throttle on nearly every foreground
+        // event and could never match.
+        engine.setSnapshot("[${entry(strict = true, domains = q("x.com"), windows = open())}]")
+        assertTrue(engine.hasStrictRules())
+        assertFalse(engine.hasStrictPackageRules())
+        assertFalse(engine.hasPlatformRules())
+
+        engine.setSnapshot("[${entry(strict = true, packages = q(IG), windows = open())}]")
+        assertTrue(engine.hasStrictPackageRules())
+        assertFalse(engine.hasPlatformRules())
+
+        // The meter's "*" is a platform: the detector arm has to run for it.
+        engine.setSnapshot("[${entry(platforms = q("*"), always = true, reelMs = 1)}]")
+        assertTrue(engine.hasPlatformRules())
+        assertFalse(engine.hasStrictPackageRules())
+    }
+
+    @Test
+    fun pendingBudgetGatesNameTheQueryEachNeeds() {
+        // The watchdog pays for a UsageStats query only when a pending budget
+        // of that kind exists: a time limit never needs the event log, an open
+        // limit never needs the per-app totals.
+        fun pending(id: String, usageMs: Long, opens: Int) =
+            """{"id":"$id","reason":"DAILY_LIMIT","mode":"BLOCK","packages":[${q(IG)}],""" +
+                """"domains":[],"platformIds":[],"windows":[${open()}],"always":false,""" +
+                """"reelTimeLimitMs":0,"strict":false,"usageLimitMs":$usageMs,""" +
+                """"openLimitCount":$opens,"spent":false}"""
+        engine.setSnapshot("[${pending("t", 60_000L, 0)}]")
+        assertTrue(engine.hasPendingLimits())
+        assertTrue(engine.hasPendingUsageLimits())
+        assertFalse(engine.hasPendingOpenLimits())
+
+        engine.setSnapshot("[${pending("o", 0L, 5)}]")
+        assertFalse(engine.hasPendingUsageLimits())
+        assertTrue(engine.hasPendingOpenLimits())
+    }
+
+    @Test
     fun subdomainRuleIsAllocationFreeAndExact() {
         assertTrue(RuleEngine.isSubdomainOf("m.instagram.com", "instagram.com"))
         assertFalse(RuleEngine.isSubdomainOf("instagram.com", "instagram.com"))

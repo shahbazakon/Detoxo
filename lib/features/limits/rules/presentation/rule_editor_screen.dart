@@ -9,12 +9,10 @@ import 'package:detoxo/features/limits/rules/domain/entities/rule.dart';
 import 'package:detoxo/features/limits/rules/domain/entities/rule_editor_args.dart';
 import 'package:detoxo/features/limits/rules/domain/usecases/rule_summary.dart';
 import 'package:detoxo/features/limits/rules/presentation/rules_cubit.dart';
-import 'package:detoxo/features/limits/rules/presentation/rules_screen.dart';
-import 'package:detoxo/features/limits/unblock/domain/entities/bypass_entry.dart';
-import 'package:detoxo/features/limits/unblock/presentation/unblock_cubit.dart';
-import 'package:detoxo/features/limits/unblock/presentation/widgets/unblock_duration_sheet.dart';
-import 'package:detoxo/features/limits/web_blocker/domain/entities/popular_site.dart';
-import 'package:detoxo/features/limits/web_blocker/domain/utils/domain_validator.dart';
+import 'package:detoxo/features/limits/rules/presentation/widgets/override_tile.dart';
+import 'package:detoxo/features/limits/rules/presentation/widgets/reel_feed_sheet.dart';
+import 'package:detoxo/features/limits/rules/presentation/widgets/rule_kind_icon.dart';
+import 'package:detoxo/features/limits/rules/presentation/widgets/website_sheet.dart';
 import 'package:detoxo/features/protected_apps/protected_apps.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -33,12 +31,51 @@ const List<String> _weekdayNames = [
   'Sunday',
 ];
 
+/// The catalog's distracting categories — what the one-tap quick-pick toggles.
+/// The catalog owns the set: `LockScope.distracting` widens to the same one.
+final List<String> _distracting = Catalog.bundled.categoriesWithBehavior(AppBehavior.distracting);
+
 /// Create / edit one rule. Draft state lives here until Save; the app-wide
 /// [RulesCubit] persists and pushes.
 class RuleEditorScreen extends StatefulWidget {
   const RuleEditorScreen({required this.args, super.key});
 
   final RuleEditorArgs args;
+
+  /// One outline glyph per catalog category, so the rail can be scanned
+  /// rather than read. Keyed by seed id; `test/rule_editor_test.dart` pins
+  /// that every seed category has one, so a new category cannot ship bare.
+  @visibleForTesting
+  static const Map<String, IconData> categoryIcons = {
+    'short_form_video': Icons.movie_filter_outlined,
+    'social': Icons.people_outline,
+    'video_streaming': Icons.live_tv_outlined,
+    'games': Icons.sports_esports_outlined,
+    'news': Icons.newspaper_outlined,
+    'messaging': Icons.chat_bubble_outline,
+    'browsers': Icons.language,
+    'tools': Icons.handyman_outlined,
+    'productivity': Icons.work_outline,
+    'education': Icons.school_outlined,
+  };
+
+  /// The quick-pick's rule, pure so it can be pinned: when every id in [all]
+  /// is already in [current], tapping clears them; otherwise it adds the
+  /// missing ones and touches nothing else.
+  @visibleForTesting
+  static List<String> toggleAll(List<String> current, List<String> all) {
+    if (all.every(current.contains)) {
+      return [
+        for (final id in current)
+          if (!all.contains(id)) id,
+      ];
+    }
+    return [
+      ...current,
+      for (final id in all)
+        if (!current.contains(id)) id,
+    ];
+  }
 
   @override
   State<RuleEditorScreen> createState() => _RuleEditorScreenState();
@@ -69,12 +106,18 @@ class _RuleEditorScreenState extends State<RuleEditorScreen> {
   bool _saving = false;
 
   Rule? get _existing => widget.args.rule;
-  bool get _isEdit => _existing != null;
+
+  /// "Edit" means the rule is STORED, not merely passed in: a preset stamp and
+  /// the Activity row's "Limit this app" both arrive as a fresh, unsaved Rule
+  /// and must read as new — "Save rule", "created", and no Delete button that
+  /// would remove nothing and quietly discard the draft.
+  late final bool _isEdit;
 
   @override
   void initState() {
     super.initState();
     final r = _existing;
+    _isEdit = r != null && context.read<RulesCubit>().state.rules.any((x) => x.id == r.id);
     _kind = r?.kind ?? widget.args.kind;
     _name = TextEditingController(text: r?.name ?? '');
     final s = r?.schedule;
@@ -114,9 +157,7 @@ class _RuleEditorScreenState extends State<RuleEditorScreen> {
   Widget build(BuildContext context) {
     final text = Theme.of(context).textTheme;
     return GlassScaffold(
-      appBar: GlassAppBar(
-        title: Text(_isEdit ? 'Edit rule' : 'New ${_kind.label.toLowerCase()}'),
-      ),
+      appBar: GlassAppBar(title: Text(_isEdit ? 'Edit rule' : 'New ${_kind.label.toLowerCase()}')),
       body: ListView(
         padding: EdgeInsets.fromLTRB(
           AppSpacing.md,
@@ -156,7 +197,7 @@ class _RuleEditorScreenState extends State<RuleEditorScreen> {
             ),
             RuleKind.openLimit => _budgetSection(
               text,
-              headline: '$_opens ${_opens == 1 ? 'open' : 'opens'} a day',
+              headline: '${RuleSummary.count(_opens, 'open', 'opens')} a day',
               hint: 'After that many launches, the apps block until midnight.',
               slider: AdaptiveSlider(
                 value: _opens.toDouble(),
@@ -169,56 +210,14 @@ class _RuleEditorScreenState extends State<RuleEditorScreen> {
             ),
           },
           const SizedBox(height: AppSpacing.md),
-          const SectionHeader('Commitment'),
-          // A locked rule is committed: strict is implied and no longer the
-          // user's to change, so the toggle goes away rather than sitting
-          // there greyed out.
-          if (!_locked)
-            AppToggleTile(
-              leading: const Icon(Icons.lock_outline),
-              title: 'Strict',
-              subtitle: "A Pause won't lift this rule",
-              value: _strict,
-              onChanged: (v) => setState(() => _strict = v),
-            ),
-          if (_strict && !_locked) ...[
-            const SizedBox(height: AppSpacing.xs),
-            const InlineHint(
-              icon: Icons.info_outline,
-              text:
-                  'Strict rules keep blocking apps, reel feeds and websites '
-                  'even while Detoxo is paused. Turn this on for the rules you '
-                  'set because you know future-you will want to skip them.',
-            ),
-          ],
-          ..._lockSection(context),
-          const SizedBox(height: AppSpacing.md),
+          // Concrete targets first (the apps, feeds and sites the user has in
+          // mind), categories below them; Commitment comes after both, so the
+          // rule says what it covers before it is asked how hard to hold.
           const SectionHeader('Block'),
-          Text('Categories', style: text.labelLarge),
-          const SizedBox(height: AppSpacing.xs),
-          Wrap(
-            spacing: AppSpacing.xs,
-            runSpacing: AppSpacing.xs,
-            children: [
-              for (final c in AppCategorySeed.categories)
-                AppChip(
-                  label: c.displayName,
-                  selected: _categories.contains(c.id),
-                  onSelected: () => setState(() {
-                    _categories.contains(c.id)
-                        ? _categories.remove(c.id)
-                        : _categories.add(c.id);
-                  }),
-                ),
-            ],
-          ),
-          const SizedBox(height: AppSpacing.md),
           GlassListTile(
             leading: const Icon(Icons.apps),
             title: 'Apps',
-            subtitle: _apps.isEmpty
-                ? 'None selected'
-                : _count(_apps.length, 'app'),
+            subtitle: _apps.isEmpty ? 'None selected' : _count(_apps.length, 'app'),
             trailing: const Icon(Icons.add_circle_outline),
             onTap: _pickApps,
           ),
@@ -235,9 +234,7 @@ class _RuleEditorScreenState extends State<RuleEditorScreen> {
             GlassListTile(
               leading: const Icon(Icons.play_circle_outline),
               title: 'Reel feeds',
-              subtitle: _platforms.isEmpty
-                  ? 'None selected'
-                  : _count(_platforms.length, 'feed'),
+              subtitle: _platforms.isEmpty ? 'None selected' : _count(_platforms.length, 'feed'),
               trailing: const Icon(Icons.add_circle_outline),
               onTap: _pickPlatforms,
             ),
@@ -245,19 +242,13 @@ class _RuleEditorScreenState extends State<RuleEditorScreen> {
             GlassListTile(
               leading: const Icon(Icons.public),
               title: 'Websites',
-              subtitle: _websites.isEmpty
-                  ? 'None selected'
-                  : _count(_websites.length, 'site'),
+              subtitle: _websites.isEmpty ? 'None selected' : _count(_websites.length, 'site'),
               trailing: const Icon(Icons.add_circle_outline),
               onTap: _pickWebsites,
             ),
             if (_websites.isNotEmpty) ...[
               const SizedBox(height: AppSpacing.xs),
-              _removableChips(
-                _websites,
-                (h) => h,
-                (h) => setState(() => _websites.remove(h)),
-              ),
+              _removableChips(_websites, (h) => h, (h) => setState(() => _websites.remove(h))),
             ],
           ] else
             const InlineHint(
@@ -266,6 +257,62 @@ class _RuleEditorScreenState extends State<RuleEditorScreen> {
                   'Limits count app time from Android usage access, so they '
                   'apply to apps and categories.',
             ),
+          const SizedBox(height: AppSpacing.md),
+          // A heading, like every other group label on this screen, so
+          // heading navigation lands on it and the quick-pick has context.
+          Semantics(header: true, child: Text('Categories', style: text.labelLarge)),
+          const SizedBox(height: AppSpacing.xs),
+          // Seed order is behaviour order (distracting first), so the top row
+          // is the usual suspects and the quick-pick that opens it covers them.
+          ChipRail(
+            leading: AppChip(
+              label: 'All distracting',
+              // The lock section's "every distracting app" is a different set
+              // (packages, re-resolved at push); name the noun this one toggles.
+              semanticLabel: 'All distracting categories',
+              icon: Icons.bolt_outlined,
+              selected: _distracting.every(_categories.contains),
+              onSelected: () => setState(
+                () => _categories = RuleEditorScreen.toggleAll(_categories, _distracting),
+              ),
+            ),
+            chips: [
+              for (final c in AppCategorySeed.categories)
+                AppChip(
+                  label: c.displayName,
+                  icon: RuleEditorScreen.categoryIcons[c.id],
+                  selected: _categories.contains(c.id),
+                  onSelected: () => setState(() {
+                    _categories.contains(c.id) ? _categories.remove(c.id) : _categories.add(c.id);
+                  }),
+                ),
+            ],
+          ),
+          const SizedBox(height: AppSpacing.md),
+          const SectionHeader('Commitment'),
+          // A locked rule is committed: strict is implied and no longer the
+          // user's to change, so the toggle goes away rather than sitting
+          // there greyed out.
+          if (!_locked)
+            AppToggleTile(
+              leading: const Icon(Icons.lock_outline),
+              title: 'Strict',
+              subtitle: "A Pause won't lift this rule",
+              value: _strict,
+              onChanged: (v) => setState(() => _strict = v),
+            ),
+          SizedBox(height: AppSpacing.xs),
+          if (_strict && !_locked) ...[
+            const SizedBox(height: AppSpacing.xs),
+            const InlineHint(
+              icon: Icons.info_outline,
+              text:
+                  'Strict rules keep blocking apps, reel feeds and websites '
+                  'even while Detoxo is paused. Turn this on for the rules you '
+                  'set because you know future-you will want to skip them.',
+            ),
+          ],
+          ..._lockSection(context),
           const SizedBox(height: AppSpacing.xl),
           PrimaryButton(
             label: _isEdit ? 'Save changes' : 'Save rule',
@@ -294,7 +341,7 @@ class _RuleEditorScreenState extends State<RuleEditorScreen> {
         const SectionHeader('When'),
         Wrap(
           spacing: AppSpacing.xs,
-          runSpacing: AppSpacing.xs,
+          runSpacing: AppSpacing.xxs,
           children: [
             for (var d = 1; d <= 7; d++)
               AppChip(
@@ -338,8 +385,7 @@ class _RuleEditorScreenState extends State<RuleEditorScreen> {
         else if (overnight)
           const InlineHint(
             icon: Icons.nightlight_round,
-            text:
-                'Ends the next morning — the whole night counts as the start day.',
+            text: 'Ends the next morning — the whole night counts as the start day.',
           ),
       ],
     );
@@ -412,8 +458,7 @@ class _RuleEditorScreenState extends State<RuleEditorScreen> {
       refreshApps: () => sl<EngineRepository>().installedApps(refresh: true),
       unavailable: {
         for (final p in _apps) p: 'Added',
-        for (final a in ProtectedAppCatalog.apps)
-          a.packageName: 'Auto-protected',
+        for (final a in ProtectedAppCatalog.apps) a.packageName: 'Auto-protected',
         for (final a in protected) a.packageName: 'Protected',
       },
     );
@@ -434,25 +479,21 @@ class _RuleEditorScreenState extends State<RuleEditorScreen> {
     if (!mounted) return;
     final options = [
       for (final t in targets)
-        if (!t.isBrowser &&
-            (t.isInstalled || _platforms.contains(t.platformId)))
+        if (!t.isBrowser && (t.isInstalled || _platforms.contains(t.platformId)))
           (id: t.platformId, label: t.displayName),
     ];
-    final picked = await _MultiSelectSheet.show(
+    final picked = await ReelFeedSheet.show(
       context,
       title: 'Reel feeds',
       options: options,
       selected: _platforms.toSet(),
     );
     if (picked == null || !mounted) return;
-    setState(
-      () =>
-          _platforms = options.map((o) => o.id).where(picked.contains).toList(),
-    );
+    setState(() => _platforms = options.map((o) => o.id).where(picked.contains).toList());
   }
 
   Future<void> _pickWebsites() async {
-    final picked = await _WebsiteSheet.show(context, initial: _websites);
+    final picked = await WebsiteSheet.show(context, initial: _websites);
     if (picked == null || !mounted) return;
     setState(() => _websites = picked);
   }
@@ -521,28 +562,21 @@ class _RuleEditorScreenState extends State<RuleEditorScreen> {
                   'cannot be deleted, and a Pause does not lift it — the only '
                   'way in is an override.',
       ),
-      const SizedBox(height: AppSpacing.xs),
-      AppToggleTile(
-        leading: const Icon(Icons.auto_awesome_motion),
-        title: 'Cover every distracting app',
-        subtitle: 'Keeps holding as new ones are installed',
-        value: _lockScope == LockScope.distracting,
-        // Widening only: a lock that covers less than it did is a lock being
-        // picked apart, and `LockGuard` refuses that anyway.
-        onChanged: _lockScope == LockScope.distracting
-            ? null
-            : (v) => setState(
-                () => _lockScope = v ? LockScope.distracting : _lockScope,
-              ),
-      ),
-      if (_kind != RuleKind.schedule) ...[
+      // Schedules only: `resolveSnapshot` never widens a limit (its budget
+      // would widen with it), so offering the one-way toggle there committed
+      // the user to a setting that did nothing.
+      if (_kind == RuleKind.schedule) ...[
         const SizedBox(height: AppSpacing.xs),
-        const InlineHint(
-          icon: Icons.info_outline,
-          text:
-              'Wider coverage applies to schedules only — a daily limit has to '
-              'keep counting the apps you picked, or its budget would be spent '
-              'the moment you opened anything.',
+        AppToggleTile(
+          leading: const Icon(Icons.auto_awesome_motion),
+          title: 'Cover every distracting app',
+          subtitle: 'Keeps holding as new ones are installed',
+          value: _lockScope == LockScope.distracting,
+          // Widening only: a lock that covers less than it did is a lock being
+          // picked apart, and `LockGuard` refuses that anyway.
+          onChanged: _lockScope == LockScope.distracting
+              ? null
+              : (v) => setState(() => _lockScope = v ? LockScope.distracting : _lockScope),
         ),
       ],
       // The STORED rule, not the draft: ticking "Lock this rule" and then
@@ -550,7 +584,7 @@ class _RuleEditorScreenState extends State<RuleEditorScreen> {
       // not locked — and `resolveSnapshot` would have nothing to lift.
       if (_existing?.locked ?? false) ...[
         const SizedBox(height: AppSpacing.sm),
-        _OverrideTile(rule: _existing!),
+        OverrideTile(rule: _existing!),
       ],
     ];
   }
@@ -597,18 +631,14 @@ class _RuleEditorScreenState extends State<RuleEditorScreen> {
     if (!mounted) return;
     setState(() => _saving = false);
     if (!ok) {
-      GlassToast.show(
-        context,
-        cubit.state.error ?? RulesCubit.saveFailed,
-        tone: AppTone.warning,
-      );
+      // Read, then clear: the list screen underneath leaves an error raised
+      // from here alone, so it is this screen's to consume.
+      final message = cubit.state.error ?? RulesCubit.saveFailed;
+      cubit.clearError();
+      GlassToast.show(context, message, tone: AppTone.warning);
       return;
     }
-    GlassToast.show(
-      context,
-      _isEdit ? 'Rule saved.' : 'Rule created.',
-      tone: AppTone.success,
-    );
+    GlassToast.show(context, _isEdit ? 'Rule saved.' : 'Rule created.', tone: AppTone.success);
     context.pop();
   }
 
@@ -631,313 +661,11 @@ class _RuleEditorScreenState extends State<RuleEditorScreen> {
       // Read the cubit's own message, like `_save` does: "this rule is locked"
       // and "your rules didn't load" are not the same problem, and neither is
       // "couldn't save — try again".
-      GlassToast.show(
-        context,
-        cubit.state.error ?? RulesCubit.saveFailed,
-        tone: AppTone.warning,
-      );
+      final message = cubit.state.error ?? RulesCubit.saveFailed;
+      cubit.clearError();
+      GlassToast.show(context, message, tone: AppTone.warning);
     }
   }
 
-  static String _count(int n, String noun) =>
-      '$n $noun${n == 1 ? '' : 's'} selected';
-}
-
-/// A sheet of toggle rows over `(id, label)` options; pops the chosen ids.
-class _MultiSelectSheet extends StatefulWidget {
-  const _MultiSelectSheet({required this.options, required this.selected});
-
-  final List<({String id, String label})> options;
-  final Set<String> selected;
-
-  static Future<Set<String>?> show(
-    BuildContext context, {
-    required String title,
-    required List<({String id, String label})> options,
-    required Set<String> selected,
-  }) => GlassBottomSheet.show<Set<String>>(
-    context: context,
-    title: title,
-    child: _MultiSelectSheet(options: options, selected: selected),
-  );
-
-  @override
-  State<_MultiSelectSheet> createState() => _MultiSelectSheetState();
-}
-
-class _MultiSelectSheetState extends State<_MultiSelectSheet> {
-  late final Set<String> _picked = {...widget.selected};
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        if (widget.options.isEmpty)
-          const EmptyState(
-            icon: Icons.play_disabled,
-            title: 'No reel feeds found',
-            subtitle: 'Install a supported app to pick its feed.',
-          )
-        else
-          ConstrainedBox(
-            constraints: BoxConstraints(
-              maxHeight: MediaQuery.sizeOf(context).height * 0.5,
-            ),
-            child: ListView(
-              shrinkWrap: true,
-              children: [
-                for (final o in widget.options) ...[
-                  AppToggleTile(
-                    title: o.label,
-                    value: _picked.contains(o.id),
-                    selected: _picked.contains(o.id),
-                    onChanged: (on) => setState(() {
-                      on ? _picked.add(o.id) : _picked.remove(o.id);
-                    }),
-                  ),
-                  const SizedBox(height: AppSpacing.xs),
-                ],
-              ],
-            ),
-          ),
-        const SizedBox(height: AppSpacing.md),
-        PrimaryButton(
-          label: 'Done',
-          expand: true,
-          onPressed: () => Navigator.of(context).pop(_picked),
-        ),
-      ],
-    );
-  }
-}
-
-/// Popular-site chips plus a custom host field (validated by the web
-/// blocker's `DomainValidator`); pops the chosen hosts.
-class _WebsiteSheet extends StatefulWidget {
-  const _WebsiteSheet({required this.initial});
-
-  final List<String> initial;
-
-  static Future<List<String>?> show(
-    BuildContext context, {
-    required List<String> initial,
-  }) => GlassBottomSheet.show<List<String>>(
-    context: context,
-    title: 'Websites',
-    child: _WebsiteSheet(initial: initial),
-  );
-
-  @override
-  State<_WebsiteSheet> createState() => _WebsiteSheetState();
-}
-
-class _WebsiteSheetState extends State<_WebsiteSheet> {
-  late final List<String> _hosts = [...widget.initial];
-  final _controller = TextEditingController();
-  String? _error;
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  /// False when the text in the field is present but invalid — the caller stays
-  /// open and shows [_error] rather than dropping what the user typed.
-  bool _add() {
-    final (:host, :error) = DomainValidator.check(_controller.text, _hosts);
-    if (host == null) {
-      setState(() => _error = error);
-      return false;
-    }
-    setState(() {
-      _hosts.add(host);
-      _controller.clear();
-      _error = null;
-    });
-    return true;
-  }
-
-  /// "Done" commits a host typed but not yet added. Losing it silently is the
-  /// one thing a save button must not do.
-  void _done() {
-    if (_controller.text.trim().isNotEmpty && !_add()) return;
-    Navigator.of(context).pop(_hosts);
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final customs = [
-      for (final h in _hosts)
-        if (!PopularSites.all.any((s) => s.primaryDomain == h)) h,
-    ];
-    return Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: [
-        Wrap(
-          spacing: AppSpacing.xs,
-          runSpacing: AppSpacing.xs,
-          children: [
-            for (final site in PopularSites.all)
-              AppChip(
-                label: site.name,
-                icon: site.icon,
-                selected: _hosts.contains(site.primaryDomain),
-                onSelected: () => setState(() {
-                  _hosts.contains(site.primaryDomain)
-                      ? _hosts.remove(site.primaryDomain)
-                      : _hosts.add(site.primaryDomain);
-                }),
-              ),
-          ],
-        ),
-        const SizedBox(height: AppSpacing.md),
-        TextField(
-          controller: _controller,
-          keyboardType: TextInputType.url,
-          textInputAction: TextInputAction.done,
-          autocorrect: false,
-          onSubmitted: (_) => _add(),
-          onChanged: (_) {
-            if (_error != null) setState(() => _error = null);
-          },
-          decoration: InputDecoration(
-            hintText: 'e.g. news.example.com',
-            errorText: _error,
-            prefixIcon: const Icon(Icons.public),
-            suffixIcon: IconButton(
-              icon: const Icon(Icons.add),
-              tooltip: 'Add website',
-              onPressed: _add,
-            ),
-          ),
-        ),
-        if (customs.isNotEmpty) ...[
-          const SizedBox(height: AppSpacing.sm),
-          Wrap(
-            spacing: AppSpacing.xs,
-            runSpacing: AppSpacing.xs,
-            children: [
-              for (final h in customs)
-                AppChip(
-                  label: h,
-                  selected: true,
-                  icon: Icons.close,
-                  onSelected: () => setState(() => _hosts.remove(h)),
-                ),
-            ],
-          ),
-        ],
-        const SizedBox(height: AppSpacing.md),
-        PrimaryButton(label: 'Done', expand: true, onPressed: _done),
-      ],
-    );
-  }
-}
-
-/// The honest way past a locked rule: spend one of a small weekly quota, name
-/// a reason, pick a window. Shown inside the editor of a rule that is already
-/// locked, so the escape sits exactly where the user goes looking for the off
-/// switch they cannot find.
-///
-/// Deliberately NOT behind the PIN as well. The PIN guards settings; the quota
-/// guards the rule. Stacking both means meeting two gates for one intention.
-class _OverrideTile extends StatelessWidget {
-  const _OverrideTile({required this.rule});
-
-  final Rule rule;
-
-  @override
-  Widget build(BuildContext context) {
-    final state = context.watch<UnblockCubit>().state;
-    final live = context.read<UnblockCubit>().activeOverrideFor(rule.id);
-    final time = localTimeFormat(context);
-    // Is the rule actually blocking right now? An override buys a window
-    // starting NOW, so spending one on a closed schedule (or an unspent budget)
-    // costs a scarce resource and lifts nothing.
-    final status = context.watch<RulesCubit>().state.statusOf(rule);
-    final enforcing = status.enforcing;
-    if (live != null) {
-      return AppCard(
-        leading: const IconBadge(
-          icon: Icons.lock_open,
-          color: AppColors.warning,
-        ),
-        title:
-            'Lifted until ${RuleSummary.clock(live.untilMs, DateTime.now(), time: time)}',
-        subtitle: live.reason?.label,
-      );
-    }
-    final left = state.overridesLeft;
-    final resets = state.overridesResetAtMs;
-    final available = left > 0 && enforcing;
-    return AppCard(
-      leading: IconBadge(
-        icon: Icons.lock_open,
-        color: available ? AppColors.seed : AppColors.warning,
-      ),
-      title: 'Lift this rule for a while',
-      subtitle: !enforcing
-          ? "Not blocking right now — you don't need one"
-          : left > 0
-          ? '$left of ${state.config.overrideLimit} overrides left'
-          : resets > 0
-          ? 'None left — back ${RuleSummary.clock(resets, DateTime.now(), time: time)}'
-          : 'None left',
-      // Never lead the user into a sheet that will refuse.
-      onTap: available ? () => _showOverrideSheet(context, rule) : null,
-    );
-  }
-}
-
-/// Reason first, then the window — in that order on purpose: naming the reason
-/// is the friction, and picking a duration before it would make the reason feel
-/// like paperwork after the fact.
-Future<void> _showOverrideSheet(BuildContext context, Rule rule) async {
-  final unblock = context.read<UnblockCubit>();
-  final rules = context.read<RulesCubit>();
-  final reason = await GlassBottomSheet.show<OverrideReason>(
-    context: context,
-    title: 'Why do you need ${rule.name} now?',
-    child: Builder(
-      builder: (sheetContext) => Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          for (final r in OverrideReason.values)
-            GlassListTile(
-              title: r.label,
-              onTap: () => Navigator.of(sheetContext).pop(r),
-            ),
-        ],
-      ),
-    ),
-  );
-  if (reason == null || !context.mounted) return;
-  final window = await showUnblockDurationSheet(
-    context,
-    label: rule.name,
-    maxWindow: Duration(milliseconds: unblock.state.config.overrideMaxWindowMs),
-  );
-  if (window == null) return;
-  // Re-read the status at commit time, not at build time: the sheet is two
-  // taps long, and a schedule window can close inside it.
-  final status = rules.state.statusOf(rule);
-  final refused = await unblock.requestOverride(
-    ruleId: rule.id,
-    reason: reason,
-    window: window,
-    enforcingNow: status.enforcing,
-  );
-  // The snapshot resolver subtracts the lift from this rule's own windows, so
-  // native re-arms at the far edge by the long compare it already does — the
-  // rule comes back on time even if Detoxo is never reopened.
-  if (refused == null) await rules.resync();
-  if (!context.mounted) return;
-  GlassToast.show(
-    context,
-    refused ?? '${rule.name} lifted for ${window.inMinutes} min',
-    tone: refused == null ? AppTone.success : AppTone.warning,
-  );
+  static String _count(int n, String noun) => '${RuleSummary.count(n, noun, '${noun}s')} selected';
 }

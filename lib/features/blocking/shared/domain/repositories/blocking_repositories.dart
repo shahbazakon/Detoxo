@@ -69,8 +69,9 @@ abstract interface class EngineRepository {
   /// Pushes the resolved rules snapshot (JSON array of flat entries with
   /// absolute windows) plus the earliest moment any window opens or closes
   /// (0 = none). Native enforces the windows itself and posts `ruleBoundary`
-  /// once that moment has passed.
-  Future<void> pushRules(String json, int nextBoundaryMs);
+  /// once that moment has passed. A null [json] pushes the boundary alone
+  /// (native keeps its snapshot). False when native did not take the push.
+  Future<bool> pushRules(String? json, int nextBoundaryMs);
 
   /// `ruleBoundary` events — a pushed rule window opened or closed at the
   /// yielded epoch-ms. The listener re-resolves and re-pushes.

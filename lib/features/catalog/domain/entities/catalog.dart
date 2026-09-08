@@ -131,6 +131,15 @@ class Catalog {
       if (category.behavior == behavior) ...packagesIn(category.id),
   ];
 
+  /// The ids of every category carrying [behavior], in seed order — the rule
+  /// editor's "All distracting" quick-pick. Same owner as
+  /// [packagesWithBehavior], so a second copy of "what counts as distracting"
+  /// cannot drift from the first.
+  List<String> categoriesWithBehavior(AppBehavior behavior) => [
+    for (final category in categories)
+      if (category.behavior == behavior) category.id,
+  ];
+
   /// Lower-cases, trims, and strips the trailing-dot FQDN form and a leading
   /// `www.` — the same shape every domain in the seed is stored in.
   static String normalizeHost(String host) {

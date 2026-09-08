@@ -496,7 +496,7 @@ class _FakeEngineRepo implements EngineRepository {
   ) async => nudgePushed.add((settings, packages));
 
   @override
-  Future<void> pushRules(String json, int nextBoundaryMs) async {}
+  Future<bool> pushRules(String? json, int nextBoundaryMs) async => true;
 
   @override
   Stream<int> ruleBoundaryStream() => const Stream.empty();

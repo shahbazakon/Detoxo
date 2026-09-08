@@ -151,13 +151,26 @@ class RulesCubit extends Cubit<RulesState> {
   /// Serialised so two triggers can never overlap: a cold start fires both
   /// `load()` and the Daily Limit listener, and without this their pushes could
   /// land out of order and leave native holding the OLDER snapshot.
+  ///
+  /// Also coalesced: a trigger that lands while one is queued but not yet
+  /// started joins it. A resume, the rules screen's post-frame resync and the
+  /// +1 s boundary timer otherwise ran three full read-query-resolve-push
+  /// cycles back to back, each redundant with the last. One already RUNNING
+  /// is not joined — a mutation during it must re-run on the new state.
   Future<void> resync() {
-    final next = _chain.then((_) => _resync());
+    final queued = _queued;
+    if (queued != null) return queued;
+    final next = _chain.then((_) {
+      _queued = null;
+      return _resync();
+    });
+    _queued = next;
     _chain = next.catchError((Object _) {});
     return next;
   }
 
   Future<void> _chain = Future<void>.value();
+  Future<void>? _queued;
 
   /// Re-resolve + re-push the snapshot, refresh every status and (while a
   /// limit rule exists) the Usage Access grant; re-arm the boundary timer.

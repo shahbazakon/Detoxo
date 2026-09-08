@@ -53,7 +53,9 @@ class _FakeUsage implements UsageRepository {
   final List<AppUsage>? usage;
   final List<UsageEvent>? events;
   final bool denied;
-  int calls = 0;
+  int usageCalls = 0;
+  int eventCalls = 0;
+  int get calls => usageCalls + eventCalls;
 
   @override
   Future<bool?> hasAccess() async => !denied;
@@ -63,7 +65,7 @@ class _FakeUsage implements UsageRepository {
     DateTime start,
     DateTime end,
   ) async {
-    calls++;
+    usageCalls++;
     return denied ? const UsageDenied() : UsageGranted(usage ?? const []);
   }
 
@@ -72,7 +74,7 @@ class _FakeUsage implements UsageRepository {
     DateTime start,
     DateTime end,
   ) async {
-    calls++;
+    eventCalls++;
     return denied ? const UsageDenied() : UsageGranted(events ?? const []);
   }
 }
@@ -149,6 +151,27 @@ void main() {
         expect(e.domains, containsAll(['instagram.com', 'example.com']));
         expect(e.windows.length, 5);
         expect(e.always, isFalse);
+        // A popular-site website covers its aliases, as the web blocker's own
+        // chip does — "X (Twitter)" stores x.com and must close twitter.com.
+        final x = resolveSnapshot(
+          rules: [
+            _schedule(
+              selection: const RuleSelection(websites: ['x.com', 'news.io']),
+            ),
+          ],
+          now: _now,
+        ).snapshot.entries.single;
+        expect(x.domains, containsAll(['x.com', 'twitter.com', 'news.io']));
+        // Two rules stamped in the same millisecond keep one order every
+        // resolve: native takes the first blocking entry.
+        final tied = resolveSnapshot(
+          rules: [
+            _schedule(id: 'b', createdAtMs: 9),
+            _schedule(id: 'a', createdAtMs: 9),
+          ],
+          now: _now,
+        ).snapshot.entries.map((e) => e.id);
+        expect(tied, ['a', 'b']);
         expect(
           eval.statuses['s1']!.activeNow,
           isTrue,
@@ -520,6 +543,23 @@ void main() {
       expect(RuleKind.fromWire('nope'), isNull);
       expect(SelectionMode.fromWire('nope'), SelectionMode.block);
     });
+
+    test('a document without an id is dropped, not listed unenforced', () {
+      // Native skips a row with no id, so such a rule would list and toggle
+      // while blocking nothing — and `remove('')` would take every one.
+      expect(Rule.fromJson({'kind': 'SCHEDULE'}), isNull);
+      expect(Rule.fromJson({'id': '', 'kind': 'SCHEDULE'}), isNull);
+      expect(Rule.fromJson({'id': 7, 'kind': 'SCHEDULE'}), isNull);
+    });
+
+    test('a limit with no budget is refused by the shared validator', () {
+      // `resolveSnapshot` emits nothing for a budget of zero, so the rule
+      // would read "0 min a day" and block nothing.
+      expect(_timeLimit(thresholdMin: 0).validate(), isNotNull);
+      expect(_openLimit(maxOpens: 0).validate(), isNotNull);
+      expect(_timeLimit().validate(), isNull);
+      expect(_openLimit().validate(), isNull);
+    });
   });
 
   group('syncRules', () {
@@ -527,7 +567,7 @@ void main() {
 
     setUp(() {
       engine = _MockEngine();
-      when(() => engine.pushRules(any(), any())).thenAnswer((_) async {});
+      when(() => engine.pushRules(any(), any())).thenAnswer((_) async => true);
     });
 
     test(
@@ -597,6 +637,77 @@ void main() {
       );
       expect(eval!.statuses['t1']!.spent, isTrue);
       expect(eval.snapshot.entries.single.id, 't1');
+    });
+
+    test('each budget kind reads only the UsageStats query it needs', () async {
+      final time = _FakeUsage();
+      await syncRules(
+        _FakeRules([_timeLimit()]),
+        _FakeDailyLimit(Duration.zero),
+        time,
+        engine,
+        now: () => _now,
+      );
+      expect((time.usageCalls, time.eventCalls), (1, 0));
+
+      final opens = _FakeUsage();
+      final eval = await syncRules(
+        _FakeRules([_openLimit()]),
+        _FakeDailyLimit(Duration.zero),
+        opens,
+        engine,
+        now: () => _now,
+      );
+      expect((opens.usageCalls, opens.eventCalls), (0, 1));
+      expect(eval!.statuses['o1']!.usageKnown, isTrue);
+    });
+
+    test(
+      'an unchanged snapshot pushes the boundary without the array',
+      () async {
+        final first = await syncRules(
+          _FakeRules([_schedule()]),
+          _FakeDailyLimit(Duration.zero),
+          _FakeUsage(),
+          engine,
+          now: () => _now,
+        );
+        final second = await syncRules(
+          _FakeRules([_schedule()]),
+          _FakeDailyLimit(Duration.zero),
+          _FakeUsage(),
+          engine,
+          now: () => _now,
+          previous: first!.snapshot,
+        );
+        expect(second!.snapshot, first.snapshot);
+        final captured = verify(
+          () => engine.pushRules(captureAny(), captureAny()),
+        ).captured;
+        expect(captured[0], isA<String>());
+        expect(
+          captured[2],
+          isNull,
+          reason: 'byte-identical → not re-marshalled',
+        );
+        expect(captured[3], first.snapshot.nextBoundaryMs);
+      },
+    );
+
+    test('a push native did not take reports nothing new', () async {
+      when(() => engine.pushRules(any(), any())).thenAnswer((_) async => false);
+      final eval = await syncRules(
+        _FakeRules([_schedule()]),
+        _FakeDailyLimit(Duration.zero),
+        _FakeUsage(),
+        engine,
+        now: () => _now,
+      );
+      expect(
+        eval,
+        isNull,
+        reason: 'the caller must not record a snapshot native never received',
+      );
     });
 
     test(
@@ -1025,7 +1136,7 @@ void main() {
     setUp(() {
       engine = _MockEngine();
       boundaries = StreamController<int>.broadcast();
-      when(() => engine.pushRules(any(), any())).thenAnswer((_) async {});
+      when(() => engine.pushRules(any(), any())).thenAnswer((_) async => true);
       when(
         () => engine.ruleBoundaryStream(),
       ).thenAnswer((_) => boundaries.stream);
@@ -1108,6 +1219,17 @@ void main() {
       boundaries.add(1);
       await Future<void>.delayed(Duration.zero);
       verify(() => engine.pushRules(any(), any())).called(2);
+      await c.close();
+    });
+
+    test('resyncs queued before one starts run as one', () async {
+      final c = cubit(_FakeRules([_schedule()]));
+      await c.load();
+      clearInteractions(engine);
+      // A resume, the screen's post-frame resync and the boundary timer land
+      // together; without coalescing that was three full cycles.
+      await Future.wait([c.resync(), c.resync(), c.resync()]);
+      verify(() => engine.pushRules(any(), any())).called(1);
       await c.close();
     });
 

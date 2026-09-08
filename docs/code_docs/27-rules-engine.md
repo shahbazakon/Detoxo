@@ -27,7 +27,8 @@ lib/features/limits/rules/
 ├── domain/usecases/rule_summary.dart    the list / pill / dashboard copy — pure
 ├── domain/rule_sync.dart                syncRules(): THE push path
 ├── data/repositories/rule_repository_impl.dart
-└── presentation/{rules_cubit, rules_screen, rule_editor_screen}.dart
+├── presentation/{rules_cubit, rules_screen, rule_editor_screen}.dart
+└── presentation/widgets/{rule_kind_icon, reel_feed_sheet, website_sheet, override_tile}.dart
 
 android/.../engine/RuleEngine.kt         Android-free: snapshot + now → blocking Entry?  (JVM-tested)
 lib/features/dashboard/presentation/widgets/rules_card.dart   the dashboard entry point
@@ -42,8 +43,10 @@ violation. `tool/boundaries_baseline.txt` is unchanged (zero entries).
 One JSON array of rule documents in the plan-doc vocabulary, so the deferred fields (snooze, date
 ranges, fixed-duration locks) are additive. Enums persist as stable name strings; every field is
 read **null- and type-tolerantly** (a wrong-typed field degrades that field — a cast would throw out
-the whole list); a document with an unknown `kind`, a non-object element, or anything that throws
-while parsing is **dropped on its own** (logged) rather than taking the list down; a corrupt blob
+the whole list); a document with an unknown `kind` **or no `id`** (native skips an id-less row, so
+it would list and toggle while enforcing nothing — and `remove('')` would take every one), a
+non-object element, or anything that throws while parsing is **dropped on its own** (logged)
+rather than taking the list down; a corrupt blob
 **throws** (the web-blocker contract — the sync must abort rather than push `[]`, which native
 honours as a clear). `RulesCubit` refuses every mutation until a load has actually succeeded, so a
 failed read can never be saved back over the real list.
@@ -109,11 +112,15 @@ failed read can never be saved back over the real list.
 `resolve_snapshot.dart` — `resolveSnapshot({rules, now, usageMsByPackage, opensByPackage,
 usageKnown, dailyReelLimit, catalog, horizonDays})` → `RulesEvaluation(snapshot, statuses)`:
 
-1. Enabled rules in `createdAtMs` order — native takes the **first** blocking entry, so order is
-   the tie-break. Disabled rules map to `RuleStatus.off`.
+1. Enabled rules in `createdAtMs` order, id as the second key (two rules can share a wall-clock
+   stamp, and `List.sort` is unstable past 32 items) — native takes the **first** blocking entry,
+   so this order decides which rule's reason the wall names. Disabled rules map to `RuleStatus.off`.
 2. Targets flatten through the catalog ([26](26-catalog-and-usage-signal.md)): a **category**
    contributes its services' packages **and** their domains (a category is "the service"); an
-   explicitly picked app stays app-only, like the App Blocker; websites are `normalizeHost`ed.
+   explicitly picked app stays app-only, like the App Blocker; websites are `normalizeHost`ed, and
+   a popular-site host carries its `PopularSites.aliasesFor` — the web blocker's own chip rule, so
+   a rule on "X (Twitter)" closes twitter.com as well as x.com (native matches exact-or-subdomain,
+   never by brand).
 3. `SCHEDULE` → one entry with every window in the horizon (omitted when there is none);
    `activeNow` / `nextChangeMs` from the open or next window.
 4. `TIME_LIMIT` → spent when `usageKnown && used ≥ thresholdMs`: one entry with
@@ -155,9 +162,15 @@ never labels, so the list renders without the installed-apps scan), `status(rule
 `rule_sync.dart` — `syncRules(RuleRepository, DailyLimitRepository, UsageRepository,
 EngineRepository, {now})` → `RulesEvaluation?`. The `syncWebBlocklist` shape: try/catch →
 `AppLogger.e`, a failed `load()` **aborts** (native keeps its last-good snapshot). UsageStats is read
-only when an enabled limit rule exists (`queryAppUsage` + `queryUsageEvents` over
-`todayInterval`; skipped at exactly midnight, when the window would be empty); `UsageDenied` /
-`UsageUnavailable` → `usageKnown = false`. Then `engine.pushRules(json, nextBoundaryMs)`.
+per budget kind: `queryAppUsage` only when an enabled **time** limit exists, `queryUsageEvents` only
+when an enabled **open** limit does — each is a binder round trip plus a channel decode of every row,
+over `todayInterval`, and both are skipped at exactly midnight, when the window would be empty;
+`UsageDenied` / `UsageUnavailable` on a query that ran → `usageKnown = false`. Then
+`engine.pushRules(json, nextBoundaryMs)` — with `json` **absent** when the entries equal the last
+pushed snapshot (`previous`), so the common resume / boundary push marshals the boundary alone and
+native keeps what it has (§5). `pushRules` returns whether native took the push; a refused one makes
+`syncRules` return null, so the cubit keeps its previous statuses and last-pushed snapshot and the
+next trigger pushes in full rather than assuming native holds what it never received.
 
 Its single caller is `RulesCubit` (§7): on `load()` (cold start), on every mutation, on every
 resume (`AppResumeSync`'s cheap leg — `guardedSync('rules', RulesCubit.resync())`), on native
@@ -174,7 +187,8 @@ carry a rules leg — one owner, one push path.
 
 **`pushRules {json: String, nextBoundaryMs: Long}`** — the arm is `pushWebBlocklist`'s twin
 (`CommandHandler.kt`): an absent / non-JSON-array `json` is a **no-op** (never a wipe; clearing needs
-an explicit `"[]"`), an unchanged `json` skips the prefs rewrite, `nextBoundaryMs` is **always**
+an explicit `"[]"` — and Dart sends it absent on an unchanged snapshot, §4), an unchanged `json`
+skips the prefs rewrite, `nextBoundaryMs` is **always**
 written (read as `Number` — Flutter marshals small longs as `Integer`, and it is clamped to ≥ 0 so a
 negative can never read as "no boundary"), then `service.refreshRules()` re-reads both. The engine
 re-parses only when the snapshot **string** actually changed (`RuleEngine.setSnapshot` holds the last
@@ -229,7 +243,12 @@ entries, stale gates).
   unchanged **source string** is a no-op (no re-parse); rows without an `id` are skipped; capped at
   `MAX_ENTRIES = 51` (= `maxRules` + the synthetic daily-limit entry). The `Snapshot` precomputes
   every hot-path gate: `hasPackageRules` (a blocking entry names a package), `hasHostRules`,
-  `hasReelMeter`, `hasStrictRules`, `hasStrictPlatformRules`, `hasPendingLimits`.
+  `hasReelMeter`, `hasStrictRules`, `hasStrictPlatformRules`, `hasStrictHostRules`,
+  `hasStrictPackageRules` (the strict package arm above the throttle — a strict websites-only rule
+  must not walk every entry per foreground event and never match), `hasPlatformRules` (the
+  detector-loop arm; the meter's `"*"` counts) and `hasPendingLimits`; the watchdog asks
+  `hasPendingUsageLimits` / `hasPendingOpenLimits` so it runs only the UsageStats query a pending
+  budget of that kind needs.
 - **"No rules" is not "no entries."** A user with zero rules but a global Daily Limit set still has
   the synthetic meter entry, so `hasAnyRules()` is true for them. The package arm is gated on
   `hasPackageRules()` for exactly that reason — it runs above the throttle on nearly every
@@ -257,7 +276,11 @@ packages, so a category rule is one budget, matching Dart's `_sum`. `RuleEngine.
 rebuilds the snapshot with those entries flipped, recomputing every gate.
 
 `WatchdogJobService.reconcileLimits(context)` runs it on the existing 15-minute tick, gated on
-`hasPendingRuleLimits()` and `UsageQuery.hasAccess`, and posts `ruleBoundary` on a real flip so a
+`hasPendingRuleLimits()` and `UsageQuery.hasAccess`, querying per-app totals only for a pending
+time limit and the event log only for a pending open limit. Launches are folded by
+`UsageQuery.countOpensByPackage` — the same transition rule as Dart's `countOpens` (a run of
+foreground events for one package is one open); counting every `MOVE_TO_FOREGROUND`, as it once
+did, flipped an open limit early with Detoxo closed. It posts `ruleBoundary` on a real flip so a
 live Dart re-resolves and agrees. **No new job, no alarm, no new permission** — `PACKAGE_USAGE_STATS`
 is already declared. Dart stays authoritative: its next push re-derives every verdict and overwrites
 whatever native decided.
@@ -282,7 +305,7 @@ value the counter only writes every 5 s.
 | `TYPE_WINDOW_STATE_CHANGED` block, after the foreground update | `checkRuleBoundary(now)` — one long compare against the mirror; when passed: zero mirror + prefs, post `ruleBoundary`. Public so the watchdog can call it. |
 | **Right after the Pause gate**, before the One Reel scroll capture and the throttle | **Package arm** — foreground-anchored like the App Blocker arm (`WINDOW_STATE_CHANGED || pkg == foregroundPkg`): `blockingForPackage` → `onAppBlocked(pkg, reason)` (HOME bounce, the wall with the rule's reason, shared HOME debounce, `blocked{platformId:"rule", reason}`). |
 | Browser gate + `handleBrowser` | The gate is `webEngine.hasAnyRules() \|\| ruleEngine.hasHostRules()`; when `webEngine.matchHost` is null, `blockingForHost` runs; a hit follows the web-block path with `source: "RULE"`, the host named, `blockReason = entry.reason`. |
-| Detector loop, **before** the Conscious / One Reel allow checks | **Platform arm** — `blockingForPlatform(platformId, now, timeTodayMs)` (the prefs read happens only when a meter entry exists, and only after a detector match); a hit calls `onDetected(..., ruleReason)`, which forces a count-only `NONE` mode to `PRESS_BACK`, raises `reelPayload(..., reason)` (so `sanitised()` drops the lying plan chip) and posts `blocked` with `reason`. |
+| Detector loop, **before** the Conscious / One Reel allow checks | **Platform arm** (gated on `hasPlatformRules()`) — `blockingForPlatform(platformId, now, timeTodayMs)` (the prefs read happens only when a meter entry exists, and only after a detector match); a hit calls `onDetected(..., ruleReason)`, which forces a count-only `NONE` mode to `PRESS_BACK`, raises `reelPayload(..., reason)` (so `sanitised()` drops the lying plan chip) and posts `blocked` with `reason`. |
 
 **Pause semantics — decided here.** Rule blocks sit **below** the Pause gate by default: a Pause
 (and, when M2 lands, an emergency pass) lifts them the way it lifts reel and web blocking. App
@@ -290,7 +313,7 @@ Blocker locks stay **above** the gate, unchanged.
 
 **Strict rules (EVO-030)** are the per-rule opt-out, and a **locked** rule (M8) is one by
 construction. A rule with `strict: true` gets a second pass
-**above** the gate — same foreground anchoring, same wall — and the reel arm keeps working during a
+**above** the gate (`hasStrictPackageRules()`) — same foreground anchoring, same wall — and the reel arm keeps working during a
 Pause because `hasStrictPlatformRules()` lets the detection pass run and `strictOnly = paused`
 narrows it to strict entries. Everything else a Pause used to lift still lifts: the One Reel scroll capture
 and the plan checks are all explicitly `!paused`.
@@ -351,7 +374,10 @@ Two things the cubit guarantees that are easy to lose:
 
 - **`resync()` is serialised.** A cold start fires two (its own `load()` and the `DailyLimitCubit`
   listener); without a chain their pushes could land out of order and leave native on the *older*
-  snapshot.
+  snapshot. It is also **coalesced**: a trigger that lands while a resync is queued but not yet
+  started joins it — a resume, the rules screen's post-frame resync and the +1 s boundary timer
+  used to run three full read-query-resolve-push cycles back to back. One already *running* is not
+  joined; a mutation during it must re-run on the new state.
 - **`loaded` gates every mutation.** A failed load leaves an empty list; saving on top of it would
   replace the real rules on disk with one rule and a success toast.
 - It also holds the **last snapshot** so a usage read that fails — transiently, or because the user
@@ -369,7 +395,10 @@ semantics), an `InlineHint` + "Grant usage access" (`PermissionRepository.reques
 when a limit rule exists and the grant is not known-true, the pinned **Daily reel limit** row
 (`DailyLimitCubit` + `ContentCounterCubit.timeToday`, → `Routes.dailyLimit`), then one
 `GlassListTile` per rule (kind icon, name, `RuleSummary.describe`, status `Pill`, `AppToggle`; tap →
-editor), and a FAB → kind picker sheet. It calls `resync()` on entry. The usage hint renders only
+editor), and a FAB → kind picker sheet. It calls `resync()` on entry. Its error listener speaks only
+while the list is the route on top: the editor is pushed over it and consumes its own refusals (the
+listener used to toast the same `LockGuard` reason a second time, or clear it before the editor read
+it and leave the generic "Couldn't save"). The usage hint renders only
 when the tri-state grant is **known false** — `!= true` flashed "limits cannot enforce" on every
 cold entry, against the repo's own "render a neutral Checking… row" convention.
 
@@ -377,16 +406,31 @@ With no rules the screen shows `EmptyState` followed by **Start from a preset** 
 the FAB is the blank-page entry point, these are the shortcut past it.
 
 **`RuleEditorScreen`** (`Routes.ruleEditor = '/rules/edit'`, `extra: RuleEditorArgs{kind, rule?}` —
-the router's first `extra`; a foreign extra opens a blank schedule): name; SCHEDULE → day `AppChip`s
-(default Mon–Fri, labelled from `RuleSummary.dayLabel` and announced as full weekday names),
-Starts / Ends via Flutter's `showTimePicker`, an "ends the next morning" hint for overnight windows
-and an error for equal times; a **Strict** toggle (EVO-030); TIME_LIMIT → `AdaptiveSlider` 5–240 min;
-OPEN_LIMIT → 1–20 opens; targets → category `AppChip`s (`AppCategorySeed.categories`), **Apps**
-through the shared `showAppPickerSheet` (protected packages marked unavailable, as in the App
-Blocker), and for schedules **Reel feeds** (`ConfigRepository.loadBlockTargets` filtered to installed,
-non-browser targets) and **Websites** (`PopularSites` chips + a custom host through
-`DomainValidator.check`). Validation: ≥ 1 target; ≥ 1 day and `start ≠ end` for a schedule.
-Delete via `AppDialog.confirm(destructive: true)`.
+the router's first `extra`; a foreign extra opens a blank schedule). "Edit" means the passed rule
+is **stored** (its id is in `RulesCubit.state.rules`), not merely passed in: a preset stamp and the
+Activity row's "Limit this app" arrive as fresh, unsaved rules and read as new — "Save rule",
+"created", and no Delete button (which would remove nothing and quietly discard the draft). Top to
+bottom: name; SCHEDULE → day `AppChip`s (default Mon–Fri, labelled from `RuleSummary.dayLabel` and
+announced as full weekday names), Starts / Ends via Flutter's `showTimePicker`, an "ends the next
+morning" hint for overnight windows and an error for equal times; TIME_LIMIT → `AdaptiveSlider`
+5–240 min; OPEN_LIMIT → 1–20 opens; **Block** — the concrete targets first: **Apps** through the
+shared `showAppPickerSheet` (protected packages marked unavailable, as in the App Blocker), and for
+schedules **Reel feeds** (`ReelFeedSheet` over `ConfigRepository.loadBlockTargets` filtered to
+installed, non-browser targets) and **Websites** (`WebsiteSheet`: `PopularSites` chips + a custom
+host through `DomainValidator.check`, its removable chips announced as "Remove …"); then a
+**Categories** heading over the category chips (`AppCategorySeed.categories` in seed order, one
+outline icon per id from `RuleEditorScreen.categoryIcons`, pinned complete by
+`test/rule_editor_test.dart`) in a two-row `ChipRail` (design system — the web blocker's
+popular-site strip lifted into a widget; the caller owns the edge gutter) that scrolls as one unit,
+opened by an **All distracting** quick-pick chip (announced "All distracting categories") that
+toggles every `Catalog.categoriesWithBehavior(distracting)` id through the pure
+`RuleEditorScreen.toggleAll`; then **Commitment** — the **Strict** toggle (EVO-030) and the lock
+section, whose "Cover every distracting app" toggle renders for schedules only (the resolver never
+widens a limit) — last, so the escalation comes after the rule says what it covers. The editor
+consumes its own refusal toasts (see `RulesScreen`). Validation: ≥ 1 target; ≥ 1 day and
+`start ≠ end` for a schedule; a limit's budget > 0. Delete via
+`AppDialog.confirm(destructive: true)`. The sheets, the override tile and `ruleKindIcon` live in
+`presentation/widgets/`; counts and the open-limit headline read `RuleSummary.count`.
 
 **Dashboard** — `RulesCard` (tinted `GlassCard` status row, `AppIcon.rules` = Lucide
 `CalendarClock`) sits full-width between the session banners and the App / Web Blocker pair in
@@ -427,13 +471,23 @@ document and the wire.
   floors its projection to a minute; a mutation after a failed load is refused, never written; a
   wrong-typed field degrades that field instead of the list; a spent category limit closes its
   websites; unknown usage holds a block that is already up; every preset validates and resolves.
+  Since the 2026-09-08 batch: a popular-site website covers its aliases; a `createdAtMs` tie
+  orders by id; a document without an id is dropped; a limit with no budget fails `validate()`;
+  each budget kind reads only its UsageStats query; an unchanged snapshot pushes the boundary
+  without the array; a push native did not take reports nothing; queued resyncs run as one.
+- Dart `test/rule_editor_test.dart` — every seed category has an icon; the catalog's distracting
+  ids in seed order; `toggleAll` adds the missing ids then clears exactly those.
+  `test/core/design_system/chip_rail_test.dart` — the even split with leading / trailing, and both
+  rows moving as one scroll.
 - JVM `engine/RuleEngineTest.kt` (with `testImplementation("org.json:json")`, so the parse itself
   runs) — empty / blank; active vs expired / future windows (end exclusive); `always`; `"*"`;
   the reel meter at / below the limit and never on a package or host; `ALL_EXCEPT` within listed
   dimensions; host suffix match; first wins; malformed keeps the previous snapshot; missing ids
   skipped; the cap leaves room for the synthetic daily-limit entry (51); a meter-only snapshot never
   arms the package arm; `activeUntil` names the covering window; `strictOnly` sees only opted-in
-  rules; `isSubdomainOf`.
+  rules; `isSubdomainOf`; the strict package and platform gates are exact; the pending-budget
+  gates name the query each needs. JVM `engine/UsageQueryTest.kt` — `countOpensByPackage` applies
+  the same transition rule as `countOpens`.
 - JVM `engine/LimitReconcilerTest.kt` — a budget is spent at the threshold, not before; a category
   budget is one sum across its packages; open budgets count launches and unknown packages contribute
   nothing; a flipped limit starts blocking and arms the package arm, and re-flipping is idempotent.
@@ -461,6 +515,9 @@ document and the wire.
 - `lib/features/limits/rules/domain/rule_sync.dart`
 - `lib/features/limits/rules/data/repositories/rule_repository_impl.dart`
 - `lib/features/limits/rules/presentation/{rules_cubit,rules_screen,rule_editor_screen}.dart`
+- `lib/features/limits/rules/presentation/widgets/{rule_kind_icon,reel_feed_sheet,website_sheet,override_tile}.dart`
+- `lib/features/limits/web_blocker/domain/entities/popular_site.dart` (`aliasesFor`, read by the resolver)
+- `lib/features/catalog/domain/entities/catalog.dart` (`categoriesWithBehavior`)
 - `lib/features/limits/limits.dart`
 - `lib/features/limits/daily_limit/presentation/daily_limit_screen.dart` (meter-backed "used" + banner)
 - `lib/features/dashboard/presentation/widgets/{rules_card,blocker_section}.dart`
@@ -476,10 +533,11 @@ document and the wire.
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/{RuleEngine,LimitReconciler}.kt`
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/ConfigStore.kt` (`rulesJson` in its own `detoxo_rules_snapshot` file, `nextBoundaryMs`)
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/ContentCounter.kt` (`timeTodayMs`)
+- `android/app/src/main/kotlin/com/errorxperts/detoxo/engine/UsageQuery.kt` (`countOpensByPackage`)
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/channels/CommandHandler.kt` (`pushRules`)
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/accessibility/DetoxoAccessibilityService.kt` (`refreshRules`, `checkRuleBoundary`, the three arms, `onAppBlocked(pkg, reason)`, `onDetected(..., ruleReason)`, `reelPayload(..., reason)`)
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/receivers/WatchdogJobService.kt` (`checkRuleBoundary`, `reconcileLimits`)
 - `android/app/src/main/kotlin/com/errorxperts/detoxo/overlay/BlockScreenRenderer.kt` (`unlocksAtMs` + the "Unlocks at" copy), `android/app/src/main/res/values/strings.xml`
 - `android/app/build.gradle.kts` (`org.json` test dependency)
 - `android/app/src/test/kotlin/com/errorxperts/detoxo/engine/{RuleEngineTest,LimitReconcilerTest}.kt`
-- `test/rules_calendar_test.dart`, `test/rules_engine_test.dart`, `test/rules_screen_semantics_test.dart`, `test/resume_sync_test.dart`
+- `test/rules_calendar_test.dart`, `test/rules_engine_test.dart`, `test/rules_screen_semantics_test.dart`, `test/resume_sync_test.dart`, `test/rule_editor_test.dart`, `test/core/design_system/chip_rail_test.dart`

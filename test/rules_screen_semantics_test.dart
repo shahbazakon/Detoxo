@@ -80,7 +80,7 @@ void main() {
     final engine = _MockEngine();
     // ignore: close_sinks — handed back and closed by each test body.
     final boundaries = StreamController<int>.broadcast();
-    when(() => engine.pushRules(any(), any())).thenAnswer((_) async {});
+    when(() => engine.pushRules(any(), any())).thenAnswer((_) async => true);
     when(engine.ruleBoundaryStream).thenAnswer((_) => boundaries.stream);
     final rules = RulesCubit(
       _FakeRules([_limitRule]),

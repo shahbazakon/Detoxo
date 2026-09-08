@@ -139,18 +139,31 @@ class WatchdogJobService : JobService() {
             val start = UsageQuery.startOfDay(now)
             if (start >= now) return
 
+            // Only the budgets that exist pay for their query — each is a
+            // binder round trip over the whole day, every tick, all day, with
+            // Detoxo closed: a time limit never needs the event log, an open
+            // limit never needs the per-app totals.
             val usageMs = HashMap<String, Long>()
-            for (row in UsageQuery.appUsage(context, start, now)) {
-                val pkg = row["package"] as? String ?: continue
-                usageMs[pkg] = (row["foregroundMillis"] as? Number)?.toLong() ?: 0L
-            }
-            val opens = HashMap<String, Int>()
-            for (row in UsageQuery.events(context, start, now)) {
-                val pkg = row["package"] as? String ?: continue
-                val type = (row["type"] as? Number)?.toInt() ?: continue
-                if (type == UsageQuery.EVENT_MOVE_TO_FOREGROUND) {
-                    opens[pkg] = (opens[pkg] ?: 0) + 1
+            if (service.hasPendingUsageLimits()) {
+                for (row in UsageQuery.appUsage(context, start, now)) {
+                    val pkg = row["package"] as? String ?: continue
+                    usageMs[pkg] = (row["foregroundMillis"] as? Number)?.toLong() ?: 0L
                 }
+            }
+            // The same transition rule Dart's `countOpens` and the wall's
+            // `opensToday` apply: an app resuming its own next activity is not
+            // a new open. Counting every MOVE_TO_FOREGROUND flipped an open
+            // limit early whenever the phone was away from Dart.
+            val opens = if (service.hasPendingOpenLimits()) {
+                UsageQuery.countOpensByPackage(
+                    UsageQuery.events(context, start, now).asSequence().mapNotNull { row ->
+                        val pkg = row["package"] as? String ?: return@mapNotNull null
+                        val type = (row["type"] as? Number)?.toInt() ?: return@mapNotNull null
+                        pkg to type
+                    },
+                )
+            } else {
+                emptyMap()
             }
             if (service.markRuleLimitsSpent(usageMs, opens)) {
                 ServiceEventBus.post("ruleBoundary", mapOf("atMs" to now))

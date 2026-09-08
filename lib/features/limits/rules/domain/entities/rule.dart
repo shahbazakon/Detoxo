@@ -94,20 +94,6 @@ class RuleSelection extends Equatable {
     'categories': categories,
   };
 
-  RuleSelection copyWith({
-    SelectionMode? mode,
-    List<String>? platforms,
-    List<String>? apps,
-    List<String>? websites,
-    List<String>? categories,
-  }) => RuleSelection(
-    mode: mode ?? this.mode,
-    platforms: platforms ?? this.platforms,
-    apps: apps ?? this.apps,
-    websites: websites ?? this.websites,
-    categories: categories ?? this.categories,
-  );
-
   @override
   List<Object?> get props => [mode, platforms, apps, websites, categories];
 }
@@ -191,13 +177,6 @@ class RuleSchedule extends Equatable {
     'timeEnd': formatHHmm(endMin),
   };
 
-  RuleSchedule copyWith({Set<int>? days, int? startMin, int? endMin}) =>
-      RuleSchedule(
-        days: days ?? this.days,
-        startMin: startMin ?? this.startMin,
-        endMin: endMin ?? this.endMin,
-      );
-
   @override
   List<Object?> get props => [days, startMin, endMin];
 }
@@ -223,17 +202,21 @@ class Rule extends Equatable {
     this.lockScope = LockScope.selection,
   });
 
-  /// Null when `kind` is unknown — the repository drops such a document rather
-  /// than turning it into a rule it cannot evaluate.
+  /// Null when `kind` is unknown or `id` is missing — the repository drops
+  /// such a document rather than turning it into a rule it cannot evaluate.
+  /// Native skips a row without an id, so an id-less rule would list and
+  /// toggle while enforcing nothing, and `remove('')` would take every one.
   static Rule? fromJson(Map<String, dynamic> m) {
     final kind = RuleKind.fromWire(_str(m['kind']));
     if (kind == null) return null;
+    final id = _str(m['id']) ?? '';
+    if (id.isEmpty) return null;
     final selection = _map(m['selection']);
     final activation = _map(m['activation']);
     final timeLimit = _map(m['timeLimit']);
     final openLimit = _map(m['openLimit']);
     return Rule(
-      id: _str(m['id']) ?? '',
+      id: id,
       name: _str(m['name']) ?? '',
       kind: kind,
       createdAtMs: _int(m['createdAtMs']),
@@ -266,6 +249,15 @@ class Rule extends Equatable {
       if (s.startMin == s.endMin) {
         return 'Start and end cannot be the same time.';
       }
+    }
+    // `resolveSnapshot` emits no entry at all for a budget of zero, so such a
+    // rule lists as "0 min a day" and blocks nothing. Unreachable from the
+    // sliders; reachable from a restored document whose budget map is gone.
+    if (kind == RuleKind.timeLimit && thresholdMs <= 0) {
+      return 'Pick a daily budget.';
+    }
+    if (kind == RuleKind.openLimit && maxOpens <= 0) {
+      return 'Pick how many opens a day.';
     }
     if (selection.isEmpty) {
       return 'Pick at least one app, category, site or reel feed.';

@@ -31,7 +31,7 @@ class RuleRepositoryImpl implements RuleRepository {
         continue;
       }
       if (rule == null) {
-        AppLogger.w('rules: dropped a document with an unknown kind');
+        AppLogger.w('rules: dropped a document with no id or an unknown kind');
         continue;
       }
       out.add(rule);

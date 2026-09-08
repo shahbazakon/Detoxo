@@ -70,6 +70,75 @@ forever — the settled-decisions memory). IDs are monotonic and never reused.
 | EVO-065 | Name the apps Detoxo counts but is not blocking, and arm them from the Reels list | analytics + blocking (settings / targets) | 2 | approved | S | 2026-09-08 | 2026-09-08 |
 | EVO-066 | Turn the day's reach pattern into a standing schedule rule | analytics/insights + limits/rules | 2 | approved | M | 2026-09-08 | 2026-09-08 |
 | EVO-067 | Say which plan produced these numbers, and offer the stricter gate from Activity | analytics + blocking (settings) | 2 | approved | S | 2026-09-08 | 2026-09-08 |
+| EVO-068 | Show what a rule will cover, live, in the editor | limits/rules + catalog | 2 | approved | S | 2026-09-08 | 2026-09-08 |
+| EVO-069 | Warn when a rule overlaps one that already exists | limits/rules | 2 | approved | S | 2026-09-08 | 2026-09-08 |
+| EVO-070 | A quiet heads-up before a schedule window opens (reopens a §8 deferral) | limits/rules (native receivers/engine) + settings | 2 | approved | M | 2026-09-08 | 2026-09-08 |
+
+## 2026-09-08 — Tier-1 batch (rules / rule editor evolution run)
+
+Corrective, no proposal files. A full `/detoxo-evolution` cycle over `limits/rules` right after
+the editor's category rail landed (two-row `ChipRail`, icons, the "All distracting" quick-pick,
+targets above categories, Commitment last): four read-only auditors over the twelve dimensions,
+every finding re-read at its line, nineteen kept, six refuted. All nineteen approved and shipped:
+
+1. **A rule on "X (Twitter)" left twitter.com open.** The resolver only normalised a website
+   while the web blocker expands the same popular-site chip to its aliases on its own push path;
+   native matches exact-or-subdomain, never by brand. `flatten` now adds `PopularSites.aliasesFor`.
+   Pinned. HIGH.
+2. **The native watchdog counted every foreground event**, where both `UsageQuery.countOpens` and
+   Dart's `countOpens` dedupe consecutive same-package transitions — so an open limit could flip
+   early with Detoxo closed. Folded through the new `UsageQuery.countOpensByPackage`; JVM-pinned.
+   MEDIUM.
+3. **An unsaved preset or Activity-row draft rendered as "Edit rule"**, with "Save changes",
+   "Rule saved." and a live Delete that removed nothing and discarded the draft. `_isEdit` is now
+   membership in the cubit's list, not "a Rule was passed in". MEDIUM.
+4. **A locked-rule refusal toasted twice, or as the generic "Couldn't save".** The list screen
+   stays mounted under the editor and its listener toasted and cleared the same error the editor
+   was about to read. The listener speaks only while its route is current; the editor consumes its
+   own errors. MEDIUM.
+5. **A document with no id listed and toggled but never enforced** (native skips id-less rows),
+   and removing one removed all of them. `Rule.fromJson` drops it like an unknown kind. Pinned.
+6. **The shared validator bounded neither budget**: a restored limit at zero read "0 min a day"
+   and blocked nothing. `validate()` refuses a limit without a budget. Pinned.
+7. **The usage-events query ran for time-limit-only users** on every resync and every watchdog
+   tick, feeding a map only open limits read. Both sides now query per budget kind
+   (`hasPendingUsageLimits` / `hasPendingOpenLimits` natively). Pinned both sides.
+8. **`resync()` serialised but never coalesced** — a resume plus opening the screen queued three
+   full cycles. A trigger landing on a queued-but-unstarted resync joins it. Pinned.
+9. Four a11y labels: "Categories" is a heading; the quick-pick announces "All distracting
+   categories"; the website sheet's custom-host chips say "Remove …" (the trap the file's own
+   comment names); the web blocker's "Add website" is `momentary`.
+10. `ChipRail` no longer bakes the web blocker's edge gutter in — `padding` is the caller's, so
+    the editor's padded list stops double-padding it.
+11. The distracting set is the catalog's (`Catalog.categoriesWithBehavior`), and the quick-pick's
+    add/clear rule is a static `RuleEditorScreen.toggleAll`, pinned with the icon map in
+    `test/rule_editor_test.dart`; `ChipRail` has `test/core/design_system/chip_rail_test.dart`.
+12. Resolver order ties on `createdAtMs` break on id (the sort is unstable past 32 rules).
+13. "Cover every distracting app" renders for schedules only — the resolver never widened a
+    limit, so on one the one-way toggle committed the user to nothing.
+14. Native gates: the strict package arm runs on `hasStrictPackageRules()`, the platform arm on
+    `hasPlatformRules()` (a strict websites-only rule paid a full entry walk per foreground event
+    and could never match). JVM-pinned.
+15. Copy: the editor's counts and the open-limit headline read `RuleSummary.count`; two dead
+    `copyWith`s deleted.
+16. `syncRules` pushes the boundary alone when the entries equal the last pushed snapshot (native
+    reads an absent `json` as "keep what you have"), and a push native did not take
+    (`pushRules` now returns `bool`) reports nothing, so the cubit never records a snapshot native
+    never received. Pinned.
+17. `docs/info_docs/04-faqs.md` §rules matches the editor's order and names the quick-pick
+    (applied on the user's instruction to complete the batch).
+
+Reported, not fixed: the double parse of a *changed* snapshot in `CommandHandler` (a probe
+`JSONArray` then `RuleEngine.parse`) — parsing once needs the parsed list handed to
+`setSnapshot`, which couples the handler to the engine's internals for a few ms on a rare path;
+left as is. Refuted or settled, for the record: the rail's 6/5 split (eleven items cannot halve),
+renaming the reel-feed sheet, host validation at the entity level, schedule constructor bounds
+with no live caller, a payload size cap on a same-process channel, `buildWhen` on an Equatable
+state. The move-only split of `rule_editor_screen.dart` (row 18) shipped as its own step, see
+the file list in doc 27. Proposals written and approved in the same turn, not implemented:
+EVO-068, EVO-069, EVO-070. Manual device checks owed: a schedule on "X (Twitter)" closes
+twitter.com in Chrome; an open limit of 2 with the app resuming its own activities does not flip
+on the watchdog tick; the editor's rail at 2× text scale; TalkBack on the quick-pick.
 
 ## 2026-09-08 — Activity screen: copy trim (user-requested UI change)
 

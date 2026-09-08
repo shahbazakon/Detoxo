@@ -74,6 +74,21 @@ object UsageQuery {
         return opens
     }
 
+    /**
+     * [countOpens] for every package at once, under the same transition rule —
+     * the map the limit reconciler measures open budgets against.
+     */
+    internal fun countOpensByPackage(events: Sequence<Pair<String, Int>>): Map<String, Int> {
+        val opens = HashMap<String, Int>()
+        var last: String? = null
+        for ((p, type) in events) {
+            if (type != EVENT_MOVE_TO_FOREGROUND) continue
+            if (p != last) opens[p] = (opens[p] ?: 0) + 1
+            last = p
+        }
+        return opens
+    }
+
     /** The AppOps grant behind `PACKAGE_USAGE_STATS` — the one grant this object needs. */
     fun hasAccess(context: Context): Boolean = try {
         val appOps = context.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager

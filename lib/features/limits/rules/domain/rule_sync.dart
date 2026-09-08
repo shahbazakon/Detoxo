@@ -1,6 +1,8 @@
+import 'package:collection/collection.dart';
 import 'package:detoxo/core/utils/app_logger.dart';
 import 'package:detoxo/features/blocking/shared/domain/repositories/blocking_repositories.dart';
 import 'package:detoxo/features/limits/daily_limit/domain/repositories/daily_limit_repository.dart';
+import 'package:detoxo/features/limits/rules/domain/entities/rule.dart';
 import 'package:detoxo/features/limits/rules/domain/entities/rule_snapshot.dart';
 import 'package:detoxo/features/limits/rules/domain/repositories/rule_repository.dart';
 import 'package:detoxo/features/limits/rules/domain/usecases/resolve_snapshot.dart';
@@ -59,7 +61,7 @@ Future<RulesEvaluation?> syncRules(
   }
 }
 
-Future<RulesEvaluation> _push(
+Future<RulesEvaluation?> _push(
   RuleRepository rules,
   DailyLimitRepository dailyLimit,
   UsageRepository usage,
@@ -73,20 +75,29 @@ Future<RulesEvaluation> _push(
   var usageKnown = false;
   var usageMs = const <String, int>{};
   var opens = const <String, int>{};
-  if (list.any((r) => r.enabled && r.kind.isLimit)) {
+  // Each query is a binder round trip plus a channel decode of every row
+  // (the event log is a few hundred a day), on every resync. Only the budgets
+  // that exist pay for theirs: a time limit never needs the event log, an
+  // open limit never needs the per-app totals.
+  final needsUsage = list.any((r) => r.enabled && r.kind == RuleKind.timeLimit);
+  final needsOpens = list.any((r) => r.enabled && r.kind == RuleKind.openLimit);
+  if (needsUsage || needsOpens) {
     final (start, _) = todayInterval(now);
     if (now.isAfter(start)) {
-      final u = await usage.queryAppUsage(start, now);
-      final e = await usage.queryUsageEvents(start, now);
-      if (u is UsageGranted<List<AppUsage>> &&
-          e is UsageGranted<List<UsageEvent>>) {
+      final u = needsUsage ? await usage.queryAppUsage(start, now) : null;
+      final e = needsOpens ? await usage.queryUsageEvents(start, now) : null;
+      final usageOk = !needsUsage || u is UsageGranted<List<AppUsage>>;
+      final eventsOk = !needsOpens || e is UsageGranted<List<UsageEvent>>;
+      if (usageOk && eventsOk) {
         usageKnown = true;
-        final ms = <String, int>{};
-        for (final a in u.data) {
-          ms[a.package] = (ms[a.package] ?? 0) + a.foregroundMillis;
+        if (u is UsageGranted<List<AppUsage>>) {
+          final ms = <String, int>{};
+          for (final a in u.data) {
+            ms[a.package] = (ms[a.package] ?? 0) + a.foregroundMillis;
+          }
+          usageMs = ms;
         }
-        usageMs = ms;
-        opens = countOpens(e.data);
+        if (e is UsageGranted<List<UsageEvent>>) opens = countOpens(e.data);
       }
     }
   }
@@ -120,9 +131,25 @@ Future<RulesEvaluation> _push(
     previousEntries: previous?.entries ?? const [],
     activeOverrides: lifts,
   );
-  await engine.pushRules(
-    eval.snapshot.toJsonString(),
+  // An unchanged snapshot still crosses with its boundary — native writes
+  // `nextBoundaryMs` unconditionally and reads an absent `json` as "keep what
+  // you have" — but the array (~45 KB typical, ~175 KB at the cap) is neither
+  // re-encoded nor marshalled: the common resume / boundary push is built to
+  // be byte-identical, so it need not be built at all.
+  final unchanged =
+      previous != null &&
+      const ListEquality<SnapshotEntry>().equals(
+        previous.entries,
+        eval.snapshot.entries,
+      );
+  final pushed = await engine.pushRules(
+    unchanged ? null : eval.snapshot.toJsonString(),
     eval.snapshot.nextBoundaryMs,
   );
+  // A push that failed (the channel has already logged it) leaves native on
+  // its previous snapshot. Report nothing new, so the caller keeps the
+  // statuses and last-pushed snapshot it had, and the next trigger pushes in
+  // full instead of assuming native holds what it never received.
+  if (!pushed) return null;
   return eval;
 }

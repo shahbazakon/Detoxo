@@ -30,7 +30,7 @@ with an `AppLogger.w` when the collision changes the category.
 
 Lookups: `categoryForPackage`, `behaviorForPackage` (→ `neutral`), `serviceForPackage`,
 `domainsForPackage` (the `AppDomainCatalog.domainsFor` replacement), `categoryForHost`,
-`serviceForHost`, `packagesIn(categoryId)`, `packagesWithBehavior(behavior)`.
+`serviceForHost`, `packagesIn(categoryId)`, `packagesWithBehavior(behavior)`, `categoriesWithBehavior(behavior)` (the category ids, in seed order — the rule editor's "All distracting" quick-pick reads it, so the distracting set has one owner).
 
 `packagesWithBehavior` is the one lookup that is **scanned, not indexed** — it walks the
 categories and flattens the matching `packagesIn` lists. That is deliberate: unlike `packagesIn`
